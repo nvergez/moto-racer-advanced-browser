@@ -11,9 +11,9 @@ Phase 2 in [plan.md](plan.md) builds the native recompiled game and proves it ag
 Phase 2 is done when all of the following hold, on the owner's machine, with the ROM and retail BIOS pinned in ADR 0001:
 
 1. **Native, coverage.** On every route in the route manifest, including the full cup, the native build runs under `GBARECOMP_STRICT_STATIC=1` with `self_heal_coverage=FULLY_STATIC dispatch_misses=0 interpreted_insns=0 healed_native=0`, `unmapped=0 io_unhandled=0`, exit code 0, and stops exactly at `--frames`.
-2. **Native, recompilation correctness.** On every route, the recompiled build and gbarecomp's interpreter (`GBARECOMP_FORCE_INTERP=1`) give identical framebuffer CRCs and RAM region hashes on every frame (ADR 0001, comparison 1).
-3. **Native, fidelity against mGBA.** On the full cup, the two-layer comparison with mGBA passes on every frame except allowlisted differences, each with a written cause. Race results (finishing position and time per race) equal mGBA's, and any save the route writes is byte-identical to mGBA's (ADR 0001, comparison 2).
-4. **Web.** The browser bundle, built with our own main and both IWRAM corpora, runs `boot_to_race`, `full_race_cross` and the cup route in headless Chromium (audio muted) from a frame-indexed replay: 0 dispatch misses, no abort, and sampled framebuffer CRCs equal to the native run.
+2. **Native, recompilation correctness.** On every route, the recompiled build and gbarecomp's interpreter (`GBARECOMP_FORCE_INTERP=1`) give identical framebuffer CRCs and RAM region hashes, captured at VBlank start, on every frame (ADR 0001, comparison 1). RAM-hash equality between the backends has not been measured yet (**unverified**); P2-09 measures it first. If some state legitimately differs between backends, this criterion uses the excluded-region list that P2-09 documents, each region with its cause.
+3. **Native, fidelity against mGBA.** On the full cup, the two-layer comparison with mGBA passes on every frame except allowlisted differences, each with a written cause. Race results (finishing position and time per race) equal mGBA's, and any save the route writes is byte-identical to mGBA's (ADR 0001, comparison 2). P2-19 produces this evidence.
+4. **Web.** The browser bundle, built with our own main and both IWRAM corpora, runs `boot_to_race`, `full_race_cross` and the cup route in headless Chromium (audio muted) from a frame-indexed replay: 0 dispatch misses, no abort, and sampled framebuffer CRCs equal to the native run. P2-12 covers the first two routes, P2-19 the cup.
 5. **Saves work.** The options-save route writes a 32 KiB `.sav` byte-identical to mGBA's, and a boot from it loads it (the language menu is skipped).
 
 Criterion 3 carries the main risk: races currently leave lockstep with mGBA in every gbarecomp backend (diagnosis §6). Task P2-13 investigates it first. If the cause is an emulation-timing difference that neither engine is known to get right, the owner decides whether to revise criterion 3 (ADR 0001, "Open risk").
@@ -24,16 +24,17 @@ Criterion 3 carries the main risk: races currently leave lockstep with mGBA in e
 - Every new `game.toml` entry is reviewed by a human and carries a `note` with its evidence: ROM SHA-1, address, and how it was found.
 - Claims in PR descriptions and docs carry evidence (command, frame, address, `file:line` at the gbarecomp pin). Mark anything unconfirmed **unverified**.
 - gbarecomp changes go in `patches/gbarecomp/` with a README row, never into the submodule. Each patch header says what it fixes and how it was tested, ready for upstream. Nothing is filed upstream without the owner.
-- Tests that need the ROM run locally only. CI runs what needs no game data: gbarecomp's tests, the synthetic repro ROMs if they can run there, and the comparator's unit tests.
+- Tests that need the ROM run locally only. CI runs what needs no game data: gbarecomp's tests, the patch-tooling test (P2-00), the synthetic repro ROMs if they can run there, and the comparator's unit tests.
 - Native test runs are headless with `SDL_AUDIODRIVER=dummy`, `GBARECOMP_SELFHEAL_RECOMPILE=0`, a fresh save, and RAM healing off. Browser runs use headless Chromium with audio muted.
 - Store CRCs, hashes and diff summaries, not frames (raw frames are 115,200 bytes each, and the disk filled up during the diagnosis).
+- Compare backends, or gbarecomp with mGBA, only through captures taken at VBlank start, never through `--dump-png`: where a `--frames N` run stops depends on the backend and the game state, so the dumped frame can be N or N+1 (diagnosis §7.3). A match on a static screen is not evidence (diagnosis §7.4).
 
 ### Commands used below
 
 The native executable is built by `scripts/build-native.sh` (PR #5) into `build/native/MotoRacerAdvanceRecomp`. "Native run, N frames" means, from `build/native`:
 
 ```sh
-rm -f ../saves/t.sav
+mkdir -p ../saves && rm -f ../saves/t.sav
 SDL_AUDIODRIVER=dummy GBARECOMP_SELFHEAL_RECOMPILE=0 ./MotoRacerAdvanceRecomp \
   --bios ../../bios/gba_bios.bin --rom ../../roms/moto-racer-advance.gba \
   --frames N --no-window --save-path ../saves/t.sav ../../game.toml
@@ -56,7 +57,7 @@ Numbers are proposals and are assigned when each patch lands. The four investiga
 |---|---|---|---|---|---|
 | 0003 | IRQ call-return leak: pop at the IRQ-continuation heal, and truncate to the entry depth when `runtime_irq()` returns | runtime-bugs prototype; the web-abort prototype is its second half | 17 lines | P2-01 | U1 |
 | 0004 | End-of-run quit waits for IRQ handlers (IRQ-depth guard) | runtime-bugs prototype, first half of its 0004 | 1 line plus comment | P2-01 | U2 |
-| 0005 | Observation capture, env-gated: headless per-frame framebuffer CRC (and optional dump), render-time per-scanline state | ppu-diffs and iwram-overlays diagnostic prototypes | about 150-250 lines | P2-03 | U15, U16 |
+| 0005 | Observation capture, env-gated: at VBlank start, the framebuffer CRC (optional raw dump) and RAM region hashes; render-time per-scanline state; bytes written to FIFO A and B per frame | ppu-diffs and iwram-overlays diagnostic prototypes | about 200-300 lines | P2-03 | U15, U16 |
 | 0006 | RAM overlay table selector, plus heal-tier skip for selected PCs | iwram-overlays prototype | about 40 lines plus additions | P2-07 | U5, U6 |
 | 0007 | OBJ is a color-effect 1st target when BLDCNT bit 4 is set | ppu-diffs prototype | 17 lines added, 10 removed | P2-08 | U13 |
 | 0008 | `GBARECOMP_WEB_MAIN` override in `build_web.sh` | iwram-overlays prototype | 1 line | P2-12 | U8 |
@@ -64,15 +65,40 @@ Numbers are proposals and are assigned when each patch lands. The four investiga
 | (0010) | Bridge frame boundary (present, input, quit inside a bridge) | runtime-bugs and web-abort prototypes, two designs | 39-60 lines | P2-16, only if adopted | U3 |
 | (extra) | Input replay at VBlank start | only if P2-02's game-owned approach fails | small | P2-02 | U10 |
 
-Most of these touch `patches/gbarecomp/README.md`: merge them one at a time, rebase, and run `scripts/apply-patches.sh --check` after each.
+Most of these touch `patches/gbarecomp/README.md`: merge them one at a time and rebase. Several will stack on nearby code (0007 and 0009 in the same compositor code, 0003 and 0006 in `runtime_arm.cpp`, 0010 next to 0004's quit check; their exact hunks are not known yet). PR #5's `scripts/apply-patches.sh` judges each patch on its own against the fully patched tree (reverse check, then forward check, otherwise it stops, l.47-56), and every build calls it through `ensure_patches` (`scripts/lib/common.sh:230-232`). With two stacked patches whose hunks are within each other's context, the earlier one neither reverse-applies nor applies on the full tree, so every build would stop (reproduced on a toy repository: patch A edits line 10, patch B line 12). P2-00 makes the tooling apply the series as a stack before any new patch lands.
 
 ## Tasks
 
-Effort figures are rough guesses for one agent, in working days.
+Effort figures are rough guesses for one agent, in working days. "Depends on" lists what a task's acceptance or test commands need; the code of a task can often be written earlier and merged once its dependencies have landed.
+
+### P2-00. Apply the gbarecomp patch series as a stack
+
+*Depends on:* PR #5. *Effort:* 0.5. It lands before any new engine patch.
+
+Scope:
+
+- `scripts/apply-patches.sh` applies `patches/gbarecomp/*.patch` in name order on top of the pin, instead of judging each patch on its own against the fully patched tree (see "Patch queue"). When the submodule's tracked files are not exactly "pin plus the current series", it restores them to the pin, including files an earlier series added, and applies the series in order.
+- A stamp under `build/` records the pin, a hash of the series and the resulting tree state. `ensure_patches` does nothing when the stamp matches. `--check` reports whether the tree is "pin plus series". `--reverse` restores the pin.
+- If the submodule has changes that no known series explains (a hand edit), the script stops without touching anything and says so.
+- A/B builds: a way to leave named patches out (for example `--without 0003`), building into a separate directory so the normal build is never left stale. The next normal build restores the full series. P2-01's "fails without 0003" uses it.
+- Update `patches/gbarecomp/README.md` and `docs/toolchain.md`.
+
+Acceptance:
+
+- A shell test that needs no game data (so CI can run it): on a toy repository with two stacked patches (A edits line 10, B line 12), the new script applies, re-applies with no change, checks, reverses, and builds with B left out. PR #5's script fails on the same case.
+- PR #5's 0001 and 0002 still apply; `scripts/build-native.sh` and `scripts/test-engine.sh` pass.
+- A hand edit inside the submodule stops the script with a message, and the edit is not lost.
+
+Tests:
+
+```sh
+tests/tooling/apply-patches-test.sh                      # (new)
+scripts/apply-patches.sh --check && scripts/build-native.sh && scripts/test-engine.sh
+```
 
 ### P2-01. Fix the IRQ call-return leak and the end-of-run watchdog
 
-*Depends on:* PR #5. *Effort:* 0.5-1.
+*Depends on:* P2-00. *Effort:* 0.5-1.
 
 Scope:
 
@@ -82,10 +108,10 @@ Scope:
 
 Acceptance:
 
-- `scripts/apply-patches.sh --check` reports all patches applied, and `scripts/test-engine.sh` passes (52 of 52 with the test ROMs).
-- Both repro ROMs fail on the pin without 0003 (`generated call-return stack overflow`, exit 134) and pass with it.
+- `scripts/apply-patches.sh --check` reports the series applied, and `scripts/test-engine.sh` passes (52 of 52 with the test ROMs).
+- Both repro ROMs fail on the pin without 0003 (built with P2-00's way of leaving a patch out; `generated call-return stack overflow`, exit 134) and pass with it.
 - With the PR #5 config plus these patches, native runs of 3,600, 5,400 and 12,000 frames exit 0 with no `SELF-HEAL bridge ... exceeded` message and no `did not iret` watchdog. On this config a run may still stop a few frames past `--frames` while a long bridge runs (the intro player is interpreted); exact stops are required from P2-10 on.
-- Frame 2700 is byte-identical to the build without the patches.
+- No frame-identity check against the unpatched build: it cannot show that guest behavior is unchanged, because the unpatched build runs inside the stale bridge from VBlank 1029 on and the title frames it still produces are static (diagnosis §1.1, §7.4). The check that can show it is comparison 1 against the interpreter over busy frames, through VBlank-start captures; P2-05 runs it on the first build that reaches the race.
 - If the repro ROMs run in CI without a BIOS dump (**unverified**: gbarecomp may need a 16 KiB BIOS image even with `--bios-skip-intro`), CI runs them. Otherwise the PR says so and they stay local.
 
 Tests:
@@ -98,50 +124,58 @@ scripts/build-native.sh && (cd build/native && <native run, 3600 frames>)
 
 ### P2-02. Replay inputs: one converter, applied at VBlank start
 
-*Depends on:* PR #5. *Effort:* 1.
+*Depends on:* P2-03, whose VBlank-start captures the acceptance uses (the converter and callback can be written in parallel with it). *Effort:* 1.
 
 Scope:
 
 - `tools/replay/script2replay.py` *(new)*: harness input script to `gbarecomp-keyinput-v1`, with the frame convention documented in the script and in `tools/analysis/README.md`. Port and merge the two prototype converters; their offset conventions differ (diagnosis §7.3).
-- Apply replays at VBlank start from game-owned code, without an engine patch: our `src/main.cpp` installs `RunOptions::input_frame`, which gbarecomp calls "once per emulated frame at VBlank start — before the VBlank IRQ is raised" and whose returned keys are ANDed with the host keys (`gbarecomp/src/runtime/runtime.h:144-155`; installed at `runtime.cpp:2424-2431`). It reads its own trace file from an environment variable of ours, because gbarecomp suspends `input_frame` while `GBARECOMP_INPUT_REPLAY` is set. That this works headless and in the browser is **unverified**. If it does not, write the engine patch instead (U10).
-- The same callback is where per-frame RAM region hashes will be computed (P2-03); it may read guest memory but must not write it.
+- Apply replays at VBlank start from game-owned code, without an engine patch: our `src/main.cpp` installs `RunOptions::input_frame`, which gbarecomp calls "once per emulated frame at VBlank start — before the VBlank IRQ is raised" and whose returned keys are ANDed with the host keys (`gbarecomp/src/runtime/runtime.h:144-155`; installed at `runtime.cpp:2424-2431`). Natively it reads its own trace file, named by an environment variable of ours, because gbarecomp suspends `input_frame` while `GBARECOMP_INPUT_REPLAY` is set. That this works headless and in the browser is **unverified**. If it does not, write the engine patch instead (U10).
+- **How the browser gets a trace.** The web bootstrap honors `?env=` and `?args=` only in a bundle built with `--dev` and served from localhost (`packaging/web/bootstrap.js:10-16` at the pin), and its `preRun` writes only `/data/game.gba`, `/data/gba_bios.bin` and `/data/runtime.toml` into the wasm file system (`bootstrap.js:66`). A trace file cannot reach the bundle without one more gbarecomp patch. Instead, the converter also writes a C++ source holding the route traces, compiled only into test builds (a CMake option, off by default), and the same environment variable, passed through `?env=`, names an embedded route. The iwram-overlays prototype did this (`traces.h`). A bundle with embedded traces is a test bundle: built with `--dev`, kept under `build/`, never published (P2-12).
+- The callback only steers input; it does not hash RAM. The public read, `bus_read_u32` (`runtime_arm.h:111`), updates bus state on every call (`sync_bios_access()` and `note_pc`, `runtime_bus_bridge.cpp:256-263`, `:445-456`; the open-bus state the game reads, Phase 1 §6), so RAM hashes come from patch 0005 (P2-03).
 
 Acceptance:
 
-- On `boot_to_race`, gbarecomp's interpreter (`GBARECOMP_FORCE_INTERP=1`) reaches the race. Its front-end menus match mGBA's on the same harness-numbered frames, except the known fade and timing frames (diagnosis §5): compare screenshots at 5-bit precision now, and per-line state once P2-03 lands.
+- On `boot_to_race`, gbarecomp's interpreter (`GBARECOMP_FORCE_INTERP=1`) reaches the race. Its VBlank-start captures (P2-03) match mGBA's front-end frames on the same harness-numbered frames, at 5-bit precision and in per-line state, except the known fade and timing frames (diagnosis §5). No `--dump-png` comparison across engines (diagnosis §7.3).
 - A wrong offset must be detectable: the diagnosis measured 818 exact frames in 2400-4005 at the best offset and 226 at the next one, so report both counts for the chosen convention and its neighbors.
-- Inputs keep being applied during a long interpreter bridge. Test it on a build without static IWRAM code, where the race loop is bridged (diagnosis §3.4): the bike must accelerate.
+- The check that inputs keep being applied during a long interpreter bridge moves to P2-05, the first build that reaches the race with its loop bridged.
 
 Tests:
 
 ```sh
+mkdir -p build/replays
 python3 -I tools/replay/script2replay.py tools/analysis/input/boot_to_race.txt > build/replays/boot_to_race.csv
-(cd build/native && GBARECOMP_FORCE_INTERP=1 <replay env var>=../replays/boot_to_race.csv <native run, 4400 frames>)
+(cd build/native && GBARECOMP_FORCE_INTERP=1 <replay env var>=../replays/boot_to_race.csv <capture env> <native run, 4400 frames>)
 ```
 
 ### P2-03. Capture the same observations from both engines
 
-*Depends on:* PR #5. *Effort:* 1.5-2.
+*Depends on:* P2-00. *Effort:* 1.5-2.
 
 Scope:
 
-- **gbarecomp side:** patch 0005, env-gated and observation-only. Per frame, the framebuffer CRC (and an optional raw dump for a frame range). Per line, the render-time state: video registers, palette[0], and CRCs of OAM, palette and VRAM, sampled before each line is rendered (diagnosis §7.2). Per-frame RAM region hashes are computed in our own `input_frame` callback (P2-02), not in the patch.
-- **mGBA side:** in `tools/analysis/harness`, sample the per-line state where mGBA renders the line (port the ppu-diffs harness prototype), and add per-frame framebuffer CRCs and RAM region hashes taken at VBlank start.
+- **gbarecomp side:** patch 0005, env-gated and observation-only.
+  - At VBlank start (where gbarecomp calls `input_frame`), named by harness frame (`frame_count` + 1, diagnosis §7.3): the framebuffer CRC, an optional raw dump for a frame range, and RAM region hashes. The hashes read the bus's backing arrays (`GbaBus::ewram_ptr()`, `iwram_ptr()`, `src/gba/gba_bus.h:181-182`), never `bus_read_*`, which has side effects (P2-02).
+  - Per line, the render-time state: video registers, palette[0], and CRCs of OAM, palette and VRAM, sampled before each line is rendered (diagnosis §7.2).
+  - Per frame, the bytes written to FIFO A and FIFO B by the CPU and by DMA, for P2-15. The existing `GBARECOMP_AUDIO_FIFO_TRACE` cannot serve: it is a 1,024-entry ring of samples consumed at timer overflow (`gba_audio.h:138-142`, `gba_audio.cpp:567-580`), readable only through the TCP debug server (`src/debug/tcp_debug_server.cpp:376-380`). `GBARECOMP_MMIO_DUMP`'s ring wraps after about 2,500 frames of this game (diagnosis U16).
+- **mGBA side:** in `tools/analysis/harness`, the same observations: per-line state sampled where mGBA renders the line (port the ppu-diffs harness prototype), and per-frame framebuffer CRCs, RAM region hashes and FIFO writes taken at VBlank start.
 - **Common format:** one TSV schema on both sides, with harness-numbered frames.
+  - The frame CRC is computed over RGB555 on both engines: each channel reduced to 5 bits before hashing, so the two pixel formats cannot make every frame differ.
+  - To bound storage, the default per-frame record holds one CRC over that frame's masked, serialized line records (masks as in P2-09), and FIFO writes as a count and a CRC. Full line records and FIFO bytes are written only for a requested frame range. A comparison finds failing frames from the CRCs and re-runs that range with full records; runs are deterministic (diagnosis §7.6).
 
 Acceptance:
 
-- With the capture variables unset, gbarecomp frames are byte-identical to a build without the patch (`--dump-png` at 1300 and 2700, and frame CRCs over `boot_to_race`).
-- Both engines produce captures for `boot_to_race` frames 1-4400.
+- **Capture off.** With the capture variables unset, the patched build behaves exactly like the unpatched one: the same final line (`final_pc`, `steps`, `ppu_vcount`, `ppu_frames`) and byte-identical `--dump-png` at frames where the screen changes: 240 (BIOS fade), 300 and 320 (license fade), 600 and 1000 (intro), with no input. Both sides of each comparison use the same backend; run it once on the interpreter (`GBARECOMP_FORCE_INTERP=1`) and once on the recompiled build. Title frames do not count (diagnosis §7.4).
+- **Capture on.** With capture enabled, the same final lines and dumps as with capture off, and two capture runs give byte-identical capture files.
+- Both engines produce captures for frames 1-3,000 of a boot without input (the interpreter on the gbarecomp side), with harness-numbered frames.
 - On frames 1-330, the per-line state of the two engines differs only where the diagnosis explains it (§5.4, §7.2).
-- The capture of a 25,000-frame race stays under about 1 GB.
+- Size: without full line records, a 25,000-frame capture stays under about 50 MB. Full line records cost about 40 KB per frame (about 1 GB for a 25,000-frame race), so they are written only for requested ranges.
 
 Tests:
 
 ```sh
 tools/analysis/harness/build.sh
-tools/analysis/harness/run_harness.sh --out runs/b2r --script tools/analysis/input/boot_to_race.txt --frames 4400 <new capture options>
-(cd build/native && <capture env> <native run, 4400 frames>)
+tools/analysis/harness/run_harness.sh --out runs/boot3000 --frames 3000 <new capture options>
+(cd build/native && GBARECOMP_FORCE_INTERP=1 <capture env> <native run, 3000 frames>)
 ```
 
 ### P2-04. Routes, including a full cup (mGBA only)
@@ -153,6 +187,7 @@ Scope:
 - A route manifest `tools/difftest/routes.toml` *(new)* listing each route's input script, frame count, starting save and checkpoints. Start with the existing scripts: `boot_to_race`, `full_race_cross`, `race_gp`, `race_traffic`, `abort_race`, `options_save`, `multiplayer_lobby` (lobby only, no partner).
 - New scripts: restart from the pause menu; race, front end, second race (exercises both image switches twice); the cup.
 - The cup: first check which Solo modes are open on a fresh save ([game-facts.md](research/game-facts.md) question 16; sources conflict). If Championship is locked, the owner chooses between reaching it by play in the harness (long, but from a fresh save) and starting from a save generated by a committed script (saves themselves are never committed). Open-loop inputs that hold A finish a race in 8th place (`full_race_cross`); whether that is enough to complete a cup is **unverified**.
+- A route with a starting save copies it to a scratch file before each run and passes the copy: the harness's `--save` loads the file and writes the run's save back to it (`gbaharness --help`: "cartridge save file to load/persist"), so the original would change.
 
 Acceptance:
 
@@ -169,7 +204,7 @@ for r in <routes>; do tools/analysis/harness/run_harness.sh --out runs/$r-a --sc
 
 ### P2-05. Resume entries, SRAM routines and hidden ROM roots
 
-*Depends on:* P2-01, because `static_resume_all` without the leak fix makes leaks more frequent (diagnosis §2.1). *Effort:* 1.
+*Depends on:* P2-01, because `static_resume_all` without the leak fix makes leaks more frequent (diagnosis §2.1); P2-02 for the replay (and P2-03's captures through it). *Effort:* 1.
 
 Scope:
 
@@ -182,14 +217,15 @@ Acceptance:
 
 - `scripts/regen.sh` succeeds, and its log shows the new function count.
 - On the IWRAM-interpreted build, `boot_to_race` up to frame 3290 and a 12,000-frame boot with no input report no ROM dispatch misses other than the switch slots P2-06 handles (IWRAM misses remain), with no abort or watchdog.
-- Checkpoint frames are unchanged against P2-01's build.
-- The race still freezes on this build (diagnosis §3.4). That is expected until P2-10.
+- **Comparison 1, first measurement** (also P2-01's frame-regression check): over `boot_to_race` frames 1-3,290, this build's VBlank-start frame CRCs equal the interpreter's on every frame. RAM-hash differences, if any, are recorded with the regions involved and handed to P2-09, which classifies them before comparison 1 gates. The comparator comes with P2-09; a diff of the two capture files is enough here. Equality is expected but **unverified**.
+- Inputs keep being applied during a long interpreter bridge (moved from P2-02): on this build the race loop is bridged (diagnosis §3.4), and with P2-02's replay the bike moves. The VBlank-start frame CRCs at 3830, 4000 and 4400 differ from each other; with the stock replay those three frames were identical because the bike stayed at 0 km/h (diagnosis §1.4).
+- The race still cannot complete on this build: natively the bridged race loop reaches the 200M-instruction cap around frame 5,100 (diagnosis §3.4). That is expected until P2-10.
 
-Tests: `scripts/build-native.sh`, then native runs of 3,290 frames with the `boot_to_race` replay and 12,000 frames without input; read the coverage banner and `recomp_master_misses_A9MP.toml.frag`.
+Tests: `scripts/build-native.sh`, then native runs of 3,290 and 4,400 frames with the `boot_to_race` replay and capture, the same 3,290 frames on the interpreter, and 12,000 frames without input; read the coverage banner and `recomp_master_misses_A9MP.toml.frag`.
 
 ### P2-06. armcc switch-table case slots
 
-*Depends on:* PR #5; merge after P2-05 to avoid `game.toml` conflicts. *Effort:* 1.
+*Depends on:* P2-05: its checks reuse P2-05's runs, and both edit `game.toml`. The script can be written earlier. *Effort:* 1.
 
 Scope:
 
@@ -200,42 +236,43 @@ Acceptance:
 
 - Discovery grows by about 469 functions (2,259 to 2,728 on PR #5's config; the absolute numbers move with P2-05).
 - The misses at `0x08011B98`, `0x08011BB8`, `0x08011BD4`, `0x08012460`, `0x08012480`, `0x08011DDC` and `0x08011DE8` are gone.
-- Frames and coverage are otherwise unchanged.
+- Frames and coverage are otherwise unchanged: P2-05's VBlank-start captures over `boot_to_race` 1-3,290 are identical with and without the new seeds.
 - The script finds 20 dispatchers in total, matching Phase 1's count of `addls pc` switches.
 
 Tests: `python3 -I tools/seeds/find_switch_tables.py roms/moto-racer-advance.gba`, `scripts/regen.sh`, native boot runs as in P2-05.
 
 ### P2-07. RAM overlay selector patch
 
-*Depends on:* PR #5. *Effort:* 1.
+*Depends on:* P2-01 (`scripts/repro-test.sh`; P2-00's tooling through it) and P2-03 (captures for the "unchanged when unset" check). *Effort:* 1.
 
 Scope:
 
 - Port patch 0006 from the prototype (`g_runtime_ram_overlay_select` in `runtime_arm.h/.cpp`, reset in `runtime.cpp`).
 - Add: skip the heal tier in `runtime_dispatch_miss` for PCs the selector claimed (diagnosis §3.2, limits); save and restore the selector with the multiplayer `RuntimeArmContext` (`runtime_arm.cpp:1603-1635`), or document clearly that link play is unsupported with it.
 - A synthetic overlay repro ROM *(new, no Nintendo data)*: two different ARM routines copied to the same IWRAM address at different times, each writing a distinct result to EWRAM, compiled as a main corpus plus an `--output-prefix` corpus. This is also U5's upstream repro.
+- The patch header says what the selector checks (the entry word only) and why upstream may prefer its own mechanisms (ADR 0001 decision 2, "Upstream fit").
 
 Acceptance:
 
 - gbarecomp's tests pass.
 - The repro passes under `GBARECOMP_STRICT_STATIC=1` with a selector, and shows the wrong result without one (the bug the patch fixes).
-- With the selector unset, behavior is unchanged (gbarecomp's tests and P2-05's frames).
+- With the selector unset, behavior is unchanged: gbarecomp's tests, and VBlank-start captures over a 3,000-frame boot without input identical with and without the patch (same backend on both sides).
 
 Tests: `scripts/test-engine.sh`, `scripts/repro-test.sh`.
 
 ### P2-08. OBJ 1st-target fix
 
-*Depends on:* PR #5. Measuring needs P2-03; until then, use the scratch comparison scripts and redo the measurement in P2-09. *Effort:* 0.5.
+*Depends on:* P2-01 (on PR #5's config a run of 2,716 frames or more aborts without it, diagnosis §1.3) and P2-03 (per-frame captures). The patch can be written earlier. *Effort:* 0.5.
 
 Scope: patch 0007 (diagnosis §5.1) in both compositors and the wide margin path, with the semi-transparency flag, plus a synthetic PPU test: mode 0, one normal OBJ, BLDCNT=`0x0090`, BLDY=16, expect white.
 
 Acceptance:
 
-- Frame 240 goes from 3,622 differing pixels against mGBA to about 300, all within one step.
-- Over boot frames 1-2,717, only frames 220-269 change.
-- HLE and LLE stay byte-identical.
+- At frame 240, the VBlank-start raw frame goes from 3,622 pixels differing from the harness's frame 240 to about 300, all within one step.
+- Over boot frames 1-2,717, per-frame CRCs with and without the patch differ only on frames 220-269.
+- HLE and LLE stay byte-identical: per-frame CRCs of `build/native/MotoRacerAdvanceRecomp` and `build/native-lle/MotoRacerAdvanceRecomp` (from `scripts/build-native.sh --lle`) are equal on every frame.
 
-Tests: `scripts/build-native.sh` and `scripts/build-native.sh --lle`, native runs to 2,717 frames, comparison with the harness frames (P2-09's runner once it exists).
+Tests: `scripts/build-native.sh` and `scripts/build-native.sh --lle`, capture runs of 2,717 frames without input on both binaries, comparison with the harness frames (P2-09's runner once it exists).
 
 ### P2-09. Comparator and replay test runner
 
@@ -243,30 +280,38 @@ Tests: `scripts/build-native.sh` and `scripts/build-native.sh --lle`, native run
 
 Scope:
 
-- `tools/difftest/compare.py` *(new; stdlib Python, run with `python3 -I`)*: both comparisons of ADR 0001 decision 5.
-  - Comparison 1: exact frame CRCs and RAM hashes.
+- `tools/difftest/compare.py` *(new; stdlib Python, run with `python3 -I`)*: both comparisons of ADR 0001 decision 5, on VBlank-start captures only (never `--dump-png`, diagnosis §7.3).
+  - Comparison 1: exact frame CRCs and RAM hashes, minus any excluded regions this task documents (below).
   - Comparison 2, layer 1: exact per-line state, with masks (BLDALPHA `0x1F1F`, BLDY `0x1F`).
-  - Comparison 2, layer 2: exact pixels on lines with no effect, ±1 step per channel on effect lines, from raw frames captured only for the frames that fail layer 1 or a CRC check.
-  - It reports the first divergence (frame, line, column), counts per layer, and allowlist hits.
+  - Comparison 2, layer 2: exact pixels (RGB555) on lines with no effect, ±1 step per channel on effect lines, from raw frames captured only for the frames that fail layer 1 or a CRC check.
+  - It streams: it reads both captures frame by frame, keeps only counts and the first divergence (frame, line, column), and lists failing frame ranges, which the runner re-runs with full line records and raw frames (P2-03). Allowlist hits are counted per entry.
 - Per-route allowlists *(new)* with frame ranges, layer, cause and a diagnosis reference.
-- `scripts/replay-test.sh <route> --against interp|mgba` *(new)* runs the harness and gbarecomp with the same replay, then the comparator.
+- `scripts/replay-test.sh <route> --against interp|mgba` *(new)* runs the harness and gbarecomp with the same replay, then the comparator. Until P2-10, the gbarecomp side of `--against mgba` is the interpreter (`GBARECOMP_FORCE_INTERP=1`): before that, the recompiled build cannot run a race with static IWRAM code (diagnosis §3.4).
+- To localize a comparison 1 failure, the runner can re-run both sides with gbarecomp's fingerprint ring (`GBARECOMP_INSN_TRACE=1`, `GBARECOMP_FP_SAVE`; `runtime.cpp:2089-2094`) and diff the two files. The ring keeps about 8M instructions (`runtime_arm.cpp:382-388`), so the run must stop within about 60 frames after the divergence, and arming it costs about 640 MB of memory.
 - Unit tests for the comparator on synthetic data (no game data), run in CI.
 
 Acceptance:
 
-- On `boot_to_race` frames 1-3290, against mGBA, the runner reproduces the diagnosis. Without P2-08, frames 220-269 fail layer 2; with it, they pass. The timing-shaped frames of diagnosis §5.4 fail layer 1 and are allowlisted with that cause. Everything else passes.
+- On `boot_to_race` frames 1-3290, against mGBA with gbarecomp's interpreter, the runner reproduces the diagnosis. Without P2-08, frames 220-269 fail layer 2; with it, they pass. The timing-shaped frames of diagnosis §5.4 fail layer 1 and are allowlisted with that cause. Everything else passes.
 - A deliberately wrong replay offset makes the run fail.
+- **RAM-hash equality is measured before it gates.** Every RAM-hash difference between the recompiled build and the interpreter, from P2-05's measurement and from a 3,600-frame boot without input, is either fixed as a bug or explained. If some state legitimately differs between backends at VBlank start (gbarecomp's own cross-backend hash excludes such bookkeeping, `COSIM_ORACLE.md:123-131`; whether any of it lives in guest RAM is **unverified**), the fallback is a named list of excluded regions, each with its cause, or a different sampling point. The list is the one exit criterion 2 uses.
 - Comparison 1 runs and reports, but gates only from P2-10 on.
 
-Tests: `scripts/replay-test.sh boot_to_race --against mgba`, `scripts/replay-test.sh boot_to_race --against interp`, and the comparator's unit tests.
+Tests:
+
+```sh
+python3 -I -m unittest discover tools/difftest/tests      # (new)
+scripts/replay-test.sh boot_to_race --against mgba
+scripts/replay-test.sh boot_to_race --against interp
+```
 
 ### P2-10. Compile both IWRAM images and select per dispatch
 
-*Depends on:* P2-05, P2-07; P2-06 recommended first. *Effort:* 2.
+*Depends on:* P2-05, P2-07, and P2-09: its tests use `scripts/replay-test.sh`, and it gates on comparison 1 and on P2-09's results (P2-02 and P2-03 through it). P2-06 recommended first. *Effort:* 2.
 
 Scope (ADR 0001 decision 2):
 
-- In `game.toml`: `[[code_copy]]` for the race image and the race IWRAM roots (`0x03004844`, `0x030009A4`, `0x0300170C`, `0x03001CB0`, `0x03001BC4`, `0x03000000` ARM; `0x030044C2` Thumb), each reviewed against Phase 1 evidence.
+- In `game.toml`: `[[code_copy]]` for the race image and the race IWRAM roots, each reviewed against Phase 1 evidence. Candidates: `0x03004844`, `0x030009A4`, `0x0300170C`, `0x03001CB0`, `0x03001BC4`, `0x03000000` and `0x030044D0` in ARM; `0x030044C0` and `0x030044C2` in Thumb. The mixer's three entries, from the ROM bytes (diagnosis §3.2): the ROM veneer at `0x0816280C` jumps to Thumb `0x030044C0`, whose `bx r0` goes to the Thumb code at `0x030044C2`, which enters ARM `0x030044D0` with `add r0,pc,#8; bx r0`. This settles the `0x030044C0`/`0x030044C2` mismatch in [phase1-findings.md](research/phase1-findings.md) §4: both are entries. The prototype seeded all three; keep a seed only where the finder does not reach the entry on its own, with a `note`.
 - A front-end config *(new, for example `configs/frontend-iwram.toml`)* with the front-end image and its roots (`0x030004DC`, `0x030004DE` Thumb; `0x030004EC`, `0x03000708` ARM).
 - `scripts/regen.sh` runs a second `gba_recompile --output-prefix fe_` pass into its own generated directory, and CMake builds both.
 - `src/overlay_select.cpp` *(new)*:
@@ -276,11 +321,11 @@ Scope (ADR 0001 decision 2):
   - a refusal to start when `GBARECOMP_RAM_OVERLAY_HEAL` is set.
 - The switch slots of the 4 race-image tables (P2-06's script).
 
-Acceptance (the prototype's numbers on the M4 Pro):
+Acceptance (on the M4 Pro). The prototype measured these numbers with a diagnostic VBlank-start replay and the extra roots above (diagnosis §3.2). With P2-02's replay the counts may differ, so the gates are the zero counts; the other numbers are for information.
 
 - `boot_to_race` 4,400 frames and `full_race_cross` 25,000 frames under `GBARECOMP_STRICT_STATIC=1`: `FULLY_STATIC`, 0 misses, 0 interpreted, `ppu_frames` equal to `--frames`.
-- The selector never returns "no image" (0 of about 51 million calls in the full race).
-- Comparison 1 (against the interpreter) is exact on every frame of both routes. The prototype matched 500 of 500 sampled frames; this gate checks all of them.
+- The selector never returns "no image" (the prototype made about 51 million calls in the full race, 0 of them without a match).
+- Comparison 1 (against the interpreter) is exact on every frame of both routes, apart from any excluded regions P2-09 documented. The prototype matched 500 of 500 sampled framebuffers; this gate checks every frame and RAM.
 - Front-end menus against mGBA are unchanged from P2-09's results.
 - Wall time is about 6 s and 43 s; for information, not a gate.
 
@@ -301,15 +346,17 @@ Scope:
 - `scripts/strict-gate.sh` *(new)* runs every manifest route under `GBARECOMP_STRICT_STATIC=1` and checks the banner strings, as gbarecomp's other game repositories do (gbarecomp-integration.md §3.4).
 - Fix each miss with reviewed seeds, found from non-strict runs' miss fragments.
 - Saves: run `options_save` on both engines and compare the `.sav` files; boot from that save on both engines and compare.
+- The copy-window invariant of ADR 0001 decision 2, for every route in the harness: IME is 0 and `[0x03007FFC]` is zero during each image copy, and no PC in `0x03000000`-`0x03000833` executes until the new vector is set.
 
 Acceptance:
 
 - Every route passes the strict gate.
 - `options_save` writes a 32 KiB file byte-identical to the harness's `--save` output, with the checksum at `0xCC8` valid (Phase 1 §1).
 - A boot from it skips the language menu in both engines.
-- Comparison 1 is exact on every route.
+- Comparison 1 is exact on every route, apart from any excluded regions P2-09 documented.
+- The copy-window invariant holds on every route; a route where it does not hold stops the task and goes back to the ADR.
 
-Tests: `scripts/strict-gate.sh`; `scripts/replay-test.sh options_save --against mgba`.
+Tests: `scripts/strict-gate.sh`; `scripts/replay-test.sh options_save --against mgba`; the harness with `--watch-write` on `0x03000000`-`0x03000833`, IME and `0x03007FFC`, and `--trace-pc 0x03000000-0x03000833` with `--step-frames` around each copy.
 
 ### P2-12. Browser build with our main and both corpora
 
@@ -319,16 +366,16 @@ Scope:
 
 - Patch 0008 (`GBARECOMP_WEB_MAIN`).
 - `scripts/build-web.sh` passes our main, the selector and the `fe_` corpus.
-- A private test bundle with the ROM and BIOS embedded (`build_web.sh --embed-private-rom`), built under `build/` only, never published or committed.
-- `tools/web-replay/run.mjs` *(new)*: headless Chromium with audio muted, using Playwright installed outside the repository. It loads the bundle with a frame-indexed replay and collects framebuffer CRCs and the coverage banner from the console.
+- A private test bundle: `scripts/build-web.sh --dev --embed-private-rom`, with the route traces compiled in (P2-02's CMake option) and one selected through `?env=`, which only a `--dev` bundle served from localhost honors (`packaging/web/bootstrap.js:10-16`). Built under `build/` only, never published or committed. The bundle for players is built without traces, without `--dev` and without the ROM.
+- `tools/web-replay/run.mjs` *(new)*: headless Chromium with audio muted. Playwright is installed outside the repository; `run.mjs` loads it from the directory named by an environment variable (for example `MRA_PLAYWRIGHT_DIR`, through `createRequire`) and stops with a clear message when it is unset. `NODE_PATH` would not help, since Node does not use it to resolve ES module imports. It loads the test bundle with a route selected, and collects framebuffer CRCs (patch 0005's VBlank-start capture, printed to the console) and the coverage banner from the console.
 
 Acceptance:
 
 - `boot_to_race` and `full_race_cross` complete in the browser: `FULLY_STATIC`, 0 misses, exit 0.
-- Sampled framebuffer CRCs equal the native run's. The prototype matched 500 of 500.
+- Sampled framebuffer CRCs equal the native run's VBlank-start CRCs. The prototype matched 500 of 500.
 - The normal bundle, where the player picks the ROM, still reaches the title and a race when driven by hand. The owner checks this once.
 
-Tests: `scripts/build-web.sh`, `node tools/web-replay/run.mjs <bundle> <route>`.
+Tests: `scripts/build-web.sh --dev --embed-private-rom`, `MRA_PLAYWRIGHT_DIR=<dir> node tools/web-replay/run.mjs <bundle> <route>`.
 
 ### P2-13. Why races leave lockstep with mGBA
 
@@ -344,7 +391,7 @@ Scope (diagnosis §6):
 Deliverable: `docs/research/phase2-race-lockstep.md` *(new)* with root cause and evidence, and then one of:
 
 - a gbarecomp timing fix (a new patch with a synthetic repro);
-- event-anchored replays (route segments keyed to a game event such as the DISPCNT `0x1741` transition) if the game is otherwise deterministic;
+- event-anchored replays (route segments keyed to a game event such as the DISPCNT `0x1741` transition) if the game is otherwise deterministic. This reworks P2-02's converter and P2-09's runner, so it becomes task P2-20;
 - a recommendation that the owner revise exit criterion 3.
 
 Acceptance: if fixed, layer 1 is exact on `boot_to_race` race frames 3290-4400 and `full_race_cross` gives mGBA's finishing position and time. Otherwise, the document explains the difference with evidence, and the owner has the decision.
@@ -364,6 +411,13 @@ Acceptance:
 - On register-identical fly-in lines, sprite differences of 2 steps or more against mGBA fall from 17,690 pixels to 0 (diagnosis §5.6).
 - Front-end frames are unchanged.
 
+Tests:
+
+```sh
+scripts/build-native.sh && scripts/test-engine.sh        # includes the synthetic OBJ test
+scripts/replay-test.sh boot_to_race --against mgba       # budget on, then off: front-end results equal
+```
+
 Whether players get the budget is decided with Phase 4's widescreen work. The semi-transparent OBJ brightness rule (diagnosis §5.7) is not changed in Phase 2: allowlist it until a hardware test settles it.
 
 ### P2-15. Audio comparison
@@ -372,14 +426,16 @@ Whether players get the budget is decided with Phase 4's widescreen work. The se
 
 Scope: compare the bytes written to FIFO A per frame:
 
-- mGBA side: harness `--watch-write 0x040000A0-0x040000A3`, which includes DMA writes;
-- gbarecomp side: `GBARECOMP_AUDIO_FIFO_TRACE` or the capture patch;
+- mGBA side: harness `--watch-write 0x040000A0-0x040000A3`, which includes DMA writes, or P2-03's harness capture;
+- gbarecomp side: patch 0005's FIFO-write capture (P2-03). `GBARECOMP_AUDIO_FIFO_TRACE` records consumed samples, not writes, and `GBARECOMP_MMIO_DUMP` wraps after about 2,500 frames (P2-03);
 - add the result to the comparator's report.
 
 Acceptance:
 
 - Identical FIFO A bytes per frame on front-end frames of `boot_to_race`, and on race frames wherever layer 1 is in lockstep.
 - Any difference is located (frame, DMA restart timing) and allowlisted with a cause or fixed. Phase 1 §5 explains why drift would be audible.
+
+Tests: `scripts/replay-test.sh boot_to_race --against mgba` with FIFO capture enabled on both sides, and a comparator unit test on synthetic FIFO records.
 
 ### P2-16. Decide on the bridge frame-boundary patch
 
@@ -416,31 +472,62 @@ Deliverable: `docs/research/open-bios-ab.md` *(new)*. It feeds ADR 0001 decision
 
 ### P2-18. Exit gate and write-up
 
-*Depends on:* P2-11 to P2-15, plus P2-16's decision. *Effort:* 1.
+*Depends on:* P2-15, P2-16 and P2-19, and through them every other task except P2-17. *Effort:* 1.
 
 Scope:
 
-- Run the five exit criteria.
+- Check the five exit criteria from the evidence of P2-11, P2-12 and P2-19. No new comparison work happens here.
 - Write `docs/research/phase2-results.md` *(new)*: commands, banners, comparison summaries and allowlists, with ROM and BIOS hashes and the gbarecomp pin.
 - Update [plan.md](plan.md) and, if the owner agrees, the ADR's status.
+
+### P2-19. The cup against mGBA, and in the browser
+
+*Depends on:* P2-11, P2-12, P2-13, P2-14, and P2-20 if P2-13 calls for it. *Effort:* 2-4.
+
+This task produces the evidence for exit criteria 3 and 4 on the cup, which no earlier task covers.
+
+Scope:
+
+- Run the cup route (P2-04) through `scripts/replay-test.sh cup --against mgba` on the recompiled build: both layers of comparison 2, the saves the route writes, and comparison 1 against the interpreter.
+- Build the cup's allowlist: each entry a frame range, a layer, a cause and a reference (diagnosis section or P2-13's document).
+- Compare per-race results (finishing position and time) with mGBA's. Where the game keeps them (RAM or the results screen) has not been established (**unverified**); find a reliable source first.
+- Storage: run on per-frame CRCs (P2-03) and write full line records and raw frames only for failing ranges. Estimate the disk needed before the run (several races, two engines); the disk filled up once during the diagnosis.
+- Run the cup in headless Chromium from the private test bundle (P2-12) and compare sampled CRCs with the native run.
+
+Acceptance:
+
+- Exit criteria 3 and 4 hold on the cup, or a written list of what fails, each item with its cause, goes to the owner together with P2-13's recommendation.
+
+Tests: `scripts/replay-test.sh cup --against mgba`, `scripts/replay-test.sh cup --against interp`, `node tools/web-replay/run.mjs <bundle> cup`.
+
+### P2-20. Event-anchored replays (only if P2-13 calls for them)
+
+*Depends on:* P2-13. *Effort:* 1-2.
+
+Scope: the converter (P2-02) splits a route into segments keyed to game events (for example the DISPCNT `0x1741` transition at race start) and replays each segment from its event; the runner (P2-09) aligns frames per segment. Re-run P2-09's acceptance and P2-13's comparison with the new replays. P2-19 then depends on this task.
 
 ## Order and parallel work
 
 ```mermaid
 graph TD
-  PR5["PR 5 merged"] --> T01["P2-01 leak and watchdog patches"]
-  PR5 --> T02["P2-02 replay at VBlank start"]
-  PR5 --> T03["P2-03 capture"]
-  PR5 --> T06["P2-06 switch slots"]
-  PR5 --> T07["P2-07 overlay selector patch"]
-  PR5 --> T08["P2-08 OBJ 1st-target fix"]
+  PR5["PR 5 merged"] --> T00["P2-00 patch series as a stack"]
+  T00 --> T01["P2-01 leak and watchdog patches"]
+  T00 --> T03["P2-03 capture"]
+  T03 --> T02["P2-02 replay at VBlank start"]
   T04["P2-04 routes and cup (mGBA)"]
   T17["P2-17 open-BIOS A/B (mGBA)"]
   T01 --> T05["P2-05 resume_all, SRAM, roots"]
+  T02 --> T05
+  T05 --> T06["P2-06 switch slots"]
+  T01 --> T07["P2-07 overlay selector patch"]
+  T03 --> T07
+  T01 --> T08["P2-08 OBJ 1st-target fix"]
+  T03 --> T08
   T02 --> T09["P2-09 comparator and runner"]
   T03 --> T09
   T05 --> T10["P2-10 both IWRAM corpora"]
   T07 --> T10
+  T09 --> T10
   T06 -.-> T10
   T10 --> T11["P2-11 strict gate, saves"]
   T04 --> T11
@@ -450,29 +537,36 @@ graph TD
   T09 --> T13["P2-13 race lockstep"]
   T08 --> T14["P2-14 OBJ budget"]
   T09 --> T14
-  T09 --> T15["P2-15 audio"]
+  T03 --> T15["P2-15 audio"]
+  T09 --> T15
   T11 --> T16["P2-16 bridge decision"]
   T12 --> T16
-  T11 --> T18["P2-18 exit gate"]
-  T12 --> T18
-  T13 --> T18
-  T14 --> T18
-  T15 --> T18
+  T13 -.-> T20["P2-20 event-anchored replays, if needed"]
+  T11 --> T19["P2-19 cup vs mGBA and in browser"]
+  T12 --> T19
+  T13 --> T19
+  T14 --> T19
+  T20 -.-> T19
+  T15 --> T18["P2-18 exit gate"]
   T16 --> T18
+  T19 --> T18
 ```
 
 | Wave | Tasks that can run in parallel | Notes |
 |---|---|---|
 | 0 (now) | P2-04, P2-17 | mGBA harness only; no PR #5 needed |
-| 1 (PR #5 merged) | P2-01, P2-02, P2-03, P2-06, P2-07, P2-08 | P2-01 first if one agent; P2-06 merges after P2-05 |
-| 2 | P2-05, P2-09 | |
-| 3 | P2-10, P2-13, P2-14, P2-15 | P2-13 can start on the interpreter build; it is the longest pole |
-| 4 | P2-11, P2-12 | |
-| 5 | P2-16, then P2-18 | |
+| 1 (PR #5 merged) | P2-00 | Small; it lands before any new patch |
+| 2 | P2-01, P2-03 | The code of P2-02, P2-07 and P2-08 can be written now and merged when their dependencies have landed |
+| 3 | P2-02, P2-07, P2-08 | |
+| 4 | P2-05, P2-09 | |
+| 5 | P2-06, P2-10, P2-13, P2-14, P2-15 | P2-06 merges before P2-10 if it can. P2-13 can start on the interpreter build; its effort is the most uncertain |
+| 6 | P2-11, P2-12 | P2-20 here if P2-13 calls for it |
+| 7 | P2-16, P2-19 | |
+| 8 | P2-18 | |
 
-Merge hotspots: `game.toml` (P2-05, P2-06, P2-10, P2-11), `patches/gbarecomp/README.md` (most engine tasks), `scripts/regen.sh` and `CMakeLists.txt` (P2-10, P2-12), `src/main.cpp` (P2-02, P2-10). Merge those in dependency order and rebase.
+Merge hotspots: `game.toml` (P2-05, P2-06, P2-10, P2-11), `patches/gbarecomp/README.md` (most engine tasks), `scripts/apply-patches.sh` (P2-00), `scripts/regen.sh` and `CMakeLists.txt` (P2-02's trace option, P2-10, P2-12), `src/main.cpp` (P2-02, P2-10, P2-12). Merge those in dependency order and rebase.
 
-The critical path is PR #5 → P2-01 → P2-05 → P2-10 → P2-11 → P2-18, about 7-10 working days. P2-13 runs beside it and may decide whether criterion 3 can be met as written.
+The critical path is PR #5 → P2-00 → P2-03 → P2-02 → P2-09 → P2-10 → P2-11 → P2-19 → P2-18, about 12-16.5 working days by the estimates above (the earlier 7-10 days missed several dependencies and the cup work). P2-13 runs beside it and may decide whether criterion 3 can be met as written. If P2-13 runs to its high estimate and calls for P2-20, the path through them is up to a day longer.
 
 ## Decisions the owner needs to make
 
