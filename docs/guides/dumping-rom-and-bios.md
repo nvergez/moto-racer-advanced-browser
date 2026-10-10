@@ -2,36 +2,52 @@
 
 **Researched:** 2026-10-10. Nobody on the project has dumped this cartridge yet, so none of these procedures has been tested with it. Prices are what vendor pages listed on that date, except where a different date is given.
 
-The project needs two files, and both must come from hardware you own:
+This guide covers two files:
 
-| File | Where it goes | Comes from |
-|---|---|---|
-| Moto Racer Advance ROM | `roms/moto-racer-advance.gba` | Your cartridge, read with a cartridge reader |
-| GBA BIOS (16384 bytes) | `bios/gba_bios.bin` | Your Game Boy Advance console, read by a small homebrew program running on it |
+| File | Where it goes | Comes from | When it's needed |
+|---|---|---|---|
+| Moto Racer Advance ROM | `roms/moto-racer-advance.gba` | Your genuine cartridge, read with a cartridge reader | **Now.** Phase 1 starts from it ([plan](../plan.md)) |
+| GBA BIOS (16384 bytes) | `bios/gba_bios.bin` | Your Game Boy Advance console, read by a small homebrew program running on it | **Not to start.** See below |
+
+**The ROM is the only file you need to start.** gbarecomp needs a 16 KiB BIOS image at build time and at run time ([Part 2](#how-gbarecomp-uses-the-bios)), but that image doesn't have to be a dump of Nintendo's BIOS. [docs/research/open-bios.md](../research/open-bios.md) recommends building with the open-source Cult-of-GBA BIOS instead, recompiled the same way (its options A and A′), and concludes: "No BIOS dump is needed to build or ship. One is needed to sign off fidelity against retail." A retail BIOS dump is still worth making when you can:
+
+- It's the only retail reference for checking the port against the real BIOS (open-bios.md §5.3). open-bios.md §6 says: "If the owner can dump their console's BIOS, do it".
+- gbarecomp's stock setup, which expects SHA-1 `300c20df…3492`, needs it ([Part 2](#how-gbarecomp-uses-the-bios)).
 
 The BIOS is built into the console, not the cartridge. A cartridge reader alone can't produce it.
 
 ## Short version: what to order
 
-| You already own | Order |
-|---|---|
-| Only the cartridge | 1. GBxCart RW (cartridge reader, ROM dump)<br>2. A writable GBA flash cart whose save memory keeps data with the power off: **FRAM, or battery-backed SRAM with a working battery** (runs the BIOS dumper)<br>3. A used GBA, GBA SP or GBA Micro (runs the BIOS dumper) |
-| Cartridge + a GBA, GBA SP, GBA Micro or Game Boy Player | Items 1 and 2 |
-| Cartridge + DS, DS Lite or 3DS only | Items 1, 2 and 3. A DS-family console produces a different BIOS file (see [Part 2](#which-console-the-bios-must-come-from)) |
-| Cartridge + GBA + a Wii, or a GameCube with an SD Gecko, that runs homebrew + a GameCube–GBA link cable | Nothing: [gba-link-cable-dumper](#alternative-gamecube-or-wii-over-the-link-cable) dumps both files. Its own estimate for this 4 MiB ROM is about 6 minutes |
+Two kits:
 
-Recommended items, with what the vendor pages said on 2026-10-10:
+- **ROM kit: order now.** A cartridge reader (GBxCart RW, item 1 below) and something to clean the contacts with (item 2). That's enough for Phase 1.
+- **BIOS kit: order when you want the retail BIOS dump.** A writable GBA flash cart whose save memory keeps data with the power off (item 3), and a GBA-family console to run the dumper on (item 4).
 
-1. **[GBxCart RW](https://www.gbxcart.com/)** by insideGadgets: "Just $33 plus shipping (when purchasing direct)". The page also lists resellers (Retro Game Repair Shop, ZedLabz, RetroModding, ModInFrance), which may ship faster to you. It reads GB, GBC and GBA cartridges and is driven on macOS by [FlashGBX](https://github.com/Lesserkuma/FlashGBX). The vendor says it's "Supported on Windows, Mac and Linux" and adds: "We highly recommend Windows for the best out of box experience." On a Mac, the FlashGBX app needs macOS Sequoia 15 or newer ([FlashGBX README L327](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/README.md?plain=1#L327)). On older macOS, run FlashGBX from Python instead ([CLI section below](#recommended-procedure-gbxcart-rw--flashgbx-on-macos)); we haven't tested that route on older macOS (**unverified**).
-2. **A flash cart for the BIOS dumper.** Its save memory must survive a power-off: **FRAM, or battery-backed SRAM with a working battery**. Avoid reproduction carts that have SRAM but no battery, which FlashGBX's README says exist ([L386](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/README.md?plain=1#L386)). bios-dump passes its SRAM test on such a cart and prints "Done dumping!", but the BIOS is lost when you power off to read it back ([details](#how-the-dumpers-work)). One of:
+| You already own | ROM kit (now) | BIOS kit (for the retail BIOS dump) |
+|---|---|---|
+| Only the cartridge | GBxCart RW | Flash cart with **FRAM, or battery-backed SRAM with a working battery**, plus a used GBA, GBA SP or GBA Micro |
+| Cartridge + a GBA, GBA SP, GBA Micro or Game Boy Player | GBxCart RW | Flash cart |
+| Cartridge + DS, DS Lite or 3DS only | GBxCart RW | Flash cart, plus a GBA-family console. A DS-family console produces a different BIOS file (see [Part 2](#which-console-the-bios-must-come-from)) |
+| Cartridge + GBA + a Wii, or a GameCube with an SD Gecko, that runs homebrew + a GameCube–GBA link cable | Nothing: [gba-link-cable-dumper](#alternative-gamecube-or-wii-over-the-link-cable) dumps the ROM. Its own estimate for this 4 MiB ROM is about 6 minutes | Nothing: the same tool dumps the BIOS |
+
+Recommended items, with what the vendor pages said on 2026-10-10.
+
+**ROM kit**
+
+1. **[GBxCart RW](https://www.gbxcart.com/)** by insideGadgets: "Just $33 plus shipping (when purchasing direct)". The page also lists resellers (Retro Game Repair Shop, ZedLabz, RetroModding, ModInFrance), which may ship faster to you. It reads GB, GBC and GBA cartridges and is driven on macOS by [FlashGBX](https://github.com/Lesserkuma/FlashGBX). The vendor says it's "Supported on Windows, Mac and Linux" and adds: "We highly recommend Windows for the best out of box experience." On a Mac, the FlashGBX app needs macOS Sequoia 15 or newer ([FlashGBX README L327](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/README.md?plain=1#L327)). On older macOS, run FlashGBX from Python instead ([CLI section below](#recommended-procedure-gbxcart-rw--flashgbx-on-macos)); we haven't tested that route on older macOS (**unverified**). You also need a USB cable for it; the vendor page doesn't say whether one is included or which connector the device uses.
+2. Isopropyl alcohol (99%+) and cotton swabs for cleaning cartridge contacts ([FlashGBX README, Troubleshooting](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/README.md?plain=1#L370)).
+
+**BIOS kit**
+
+3. **A flash cart for the BIOS dumper.** Its save memory must survive a power-off: **FRAM, or battery-backed SRAM with a working battery**. Avoid reproduction carts that have SRAM but no battery, which FlashGBX's README says exist ([L386](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/README.md?plain=1#L386)). bios-dump passes its SRAM test on such a cart and prints "Done dumping!", but the BIOS is lost when you power off to read it back ([details](#how-the-dumpers-work)). One of:
    - **insideGadgets "GBA 32MB, 256Kbit FRAM Save, Flash Cart"**, the **No Rumble** variant ([shop page](https://shop.insidegadgets.com/product/gba-32mb-256kbit-fram-save-flash-cart/)). This is the cheapest known-compatible option, because the GBxCart RW you're already buying writes to it ([FlashGBX README L150](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/README.md?plain=1#L150) lists "insideGadgets 32 MiB, 256K FRAM with Rumble option"). The live shop blocks automated requests (HTTP 403), so we read the Internet Archive's Wayback Machine snapshot of the same URL dated 2026-05-08 (timestamp `20260508182251`). It lists "No Rumble (Green PCB)" at $37 and "Rumble enabled (Green PCB)" at $42, both "Out of stock", and says "Restocks every 1-2 weeks." and "Includes a generic clear reproduction GBA cart shell (separately)". It also says "Need to flash a game on this cart? Make sure to grab our GBxCart Flasher." Rumble isn't needed here. Today's price and stock are **unverified**. If it's out of stock, the EverDrive below is the fallback.
    - **An SD-card flash cart** such as the [EverDrive GBA Mini](https://krikzz.com/our-products/cartridges/everdrive-gba-mini.html) ($99, "1Mbit SRAM (128KByte) save memory", "Supported with GameCube player"). It costs more, needs no writing step, and is useful later for running test programs on real hardware. Some SD carts copy the save to the SD card only at the next boot, which needs the save memory to survive the power-off in between ([details](#alternative-an-sd-flash-cart)). The EverDrive page doesn't say whether it has a battery (**unverified**).
-3. **A GBA-family console**: GBA (AGB-001), GBA SP (AGS-001/AGS-101), GBA Micro (OXY-001) or the GameCube Game Boy Player (DOL-017). **Not** a DS, DS Lite, 3DS or 2DS, and not a DSi, which has no GBA slot at all.
-4. Isopropyl alcohol (99%+) and cotton swabs for cleaning cartridge contacts ([FlashGBX README, Troubleshooting](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/README.md?plain=1#L370)).
+4. **A GBA-family console**: GBA (AGB-001), GBA SP (AGS-001/AGS-101), GBA Micro (OXY-001) or the GameCube Game Boy Player (DOL-017). **Not** a DS, DS Lite, 3DS or 2DS, and not a DSi, which has no GBA slot at all.
 
 ## Ground rules
 
-- **Dump from hardware you own. Downloading a ROM or BIOS image is not an acceptable substitute for this project**, even if you own the cartridge. Don't ask for, link to, or accept such files. This doc names no download sites, and nothing in the repo may.
+- **Dump from hardware you own: the ROM from a genuine cartridge, the BIOS from your own console. Downloading a copy of the game ROM or of Nintendo's BIOS is not an acceptable substitute for this project**, even if you own the cartridge. Don't ask for, link to, or accept such files. This doc names no download sites, and nothing in the repo may.
+- **A reproduction or bootleg cartridge is not an acceptable source either, even if its dump matches the known hashes.** A matching hash doesn't prove the cartridge is genuine ([Part 5](#part-5-buying-a-used-cartridge)).
 - **Never commit, upload or share the dumps**, including saves and anything derived from them. The paths below are gitignored, but `git add -f` overrides that. Keep a private backup outside the repo.
 - Keep the dumps unmodified: no trimming, header fixing or patching. gbarecomp's web page rejects a ROM whose SHA-1 differs from the one the build expects ("Wrong ROM: its SHA-1 is …", [`packaging/web/asset_store.js` L30](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/packaging/web/asset_store.js#L30) at gbarecomp `5e89943`).
 
@@ -78,9 +94,9 @@ Sources: [FlashGBX README](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d
    - Boot logo and header checksum show as valid.
    - The game code is **A9ME** (USA) or **A9MP** (Europe). These are the two Moto Racer Advance entries in FlashGBX's database ([`db_AGB.json` L2619–L2640](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/FlashGBX/config/db_AGB.json#L2619-L2640)).
    - ROM size shows **4 MiB** and save type **256K SRAM/FRAM**. Both entries list `"rs": 4194304` and save type 3, which `FlashGBX/CartridgeTypes.py` maps to "256K SRAM/FRAM" (32 KiB). The save type is **unverified** against the cartridge itself; Phase 1 confirms it in [`docs/research/game-facts.md`](../research/game-facts.md).
-5. **Back up the save first** with **Backup Save Data**. It's your progress, and if the board has a battery, a cartridge this old may have a weak one. Store it as `roms/moto-racer-advance.sav` (ignored by git).
+5. **Back up the save first** with **Backup Save Data**. It's your progress. The documented Europe board keeps it in battery-backed SRAM ([Part 5](#part-5-buying-a-used-cartridge)), and a cartridge this old may have a weak battery. Store it as `roms/moto-racer-advance.sav` (ignored by git).
 6. Click **Backup ROM** and save to `roms/moto-racer-advance.gba` in the repo.
-7. Wait for "The ROM backup is complete and the checksum was verified successfully!". For a GBA cartridge, this means the dump's CRC32 matches FlashGBX's database entry (`FlashGBX/FlashGBX_GUI.py` L1754–L1758). The other outcomes:
+7. Wait for "The ROM backup is complete and the checksum was verified successfully!". For a GBA cartridge, this means the dump's CRC32 matches FlashGBX's database entry (`FlashGBX/FlashGBX_GUI.py` L1754–L1758). That confirms a good read of a known ROM, not a genuine cartridge: a reproduction cart with an unmodified ROM passes too ([Part 5](#part-5-buying-a-used-cartridge)). The other outcomes:
    - "…the checksum doesn't match the known database entry": clean and reseat the cartridge, dump again, and compare the two SHA-1s. Two identical dumps that still don't match the database point to an unknown revision or a non-genuine cartridge (see [Part 5](#part-5-buying-a-used-cartridge)).
    - "A data loop was detected…": usually an overdump (wrong ROM size) or a bad read.
 8. Optionally, turn on ROM dump reports: **Options → Settings → Always generate ROM dump reports** (`FlashGBX_GUI.py` L667 and L674; CLI `--generate-dump-report`). Without that setting, the message box after a backup has a **Generate Dump Report** button. The report records the dump's details for `docs/research/`. Its "Save Type" line includes the save library string read from the ROM, such as `SRAM_V…` or `SRAM_F_V…` (`FlashGBX/DumpReport.py` L231 and L241), which [Part 5](#part-5-buying-a-used-cartridge) uses.
@@ -119,6 +135,8 @@ Add `--agb-romsize 4mb` only if FlashGBX fails to match the cartridge in its dat
 
 ## Part 2: The GBA BIOS
 
+You don't need this part to start ([top of this guide](#dumping-the-rom-and-the-gba-bios-from-your-own-hardware)). Do it when you want the retail BIOS: the reference for fidelity checks, and the image gbarecomp's stock setup expects.
+
 ### Which console the BIOS must come from
 
 The GBA family and the DS family carry two different 16 KiB GBA BIOS images. [mgba-emu/bios-dump README](https://github.com/mgba-emu/bios-dump/blob/7cffabaf7da18f18efc9c2712657eeef10abfdad/README) (commit `7cffaba`) lists:
@@ -132,11 +150,13 @@ mGBA recognizes both, as "Official GBA BIOS" and "Official GBA (DS) BIOS" (`GBA_
 
 gbarecomp expects SHA-1 `300c20df6731a33952ded8c436f7f186d25d3492`, MD5 `a860e8c0b6d573d191e4ec7db1b1e4f6`, 16384 bytes ([`bios/README.md`](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/bios/README.md) and [`src/gba/gba_bios.h` L25–L26](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/gba/gba_bios.h#L25-L26) at `5e89943`). libretro-database lists the same size, MD5 and SHA-1 for `gba_bios.bin` ([`dat/System.dat` L265](https://github.com/libretro/libretro-database/blob/bf825e3ec48d43557ad024da6a7b93e512043525/dat/System.dat#L265)). No source we found lists that SHA-1 next to one of the SHA-256s above, so **we infer** that it is the GBA-family image: gbarecomp's BIOS HLE reports the GBA-family checksum (`GBA_BIOS_CHECKSUM = 0xBAAE187Fu`, [`src/runtime/bios_hle.cpp` L87](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/runtime/bios_hle.cpp#L87)). Your own dump settles it: if it passes the SHA-1 check and its internal checksum is `BAAE187F` (Part 3), they are the same image.
 
-How gbarecomp uses the BIOS at `5e89943`:
+### How gbarecomp uses the BIOS
 
-- **By default, the BIOS is recompiled when the port is built.** `gba_recompile --bios <path>` translates the BIOS into C++ (`bios_recompiled.cpp` and `bios_dispatch_table.cpp`, written to `src/runtime/generated_bios` unless `--out` says otherwise; [`tools/gba_recompile/main.cpp` L162–L221](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/tools/gba_recompile/main.cpp#L162-L221)). The runtime links that output when it exists ([`CMakeLists.txt` L415–L449](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/CMakeLists.txt#L415-L449)), and the browser build stops without it ("missing generated BIOS", [`packaging/web/build_web.sh` L174–L175](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/packaging/web/build_web.sh#L174-L175)). So whoever builds the port needs a BIOS dump at build time, and the BIOS code a player runs is the code translated then.
+At gbarecomp `5e89943`:
+
+- **By default, the BIOS is recompiled when the port is built.** `gba_recompile --bios <path>` translates the BIOS into C++ (`bios_recompiled.cpp` and `bios_dispatch_table.cpp`, written to `src/runtime/generated_bios` unless `--out` says otherwise; [`tools/gba_recompile/main.cpp` L162–L221](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/tools/gba_recompile/main.cpp#L162-L221)). The runtime links that output when it exists ([`CMakeLists.txt` L415–L449](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/CMakeLists.txt#L415-L449)), and the browser build stops without it ("missing generated BIOS", [`packaging/web/build_web.sh` L174–L175](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/packaging/web/build_web.sh#L174-L175)). So whoever builds the port needs a 16 KiB BIOS image at build time, and the BIOS code a player runs is the code translated then. On gbarecomp's stock path that image is the retail dump. [docs/research/open-bios.md](../research/open-bios.md) (option A) recompiles the open-source Cult-of-GBA BIOS instead, with a game config that expects its hash, so no retail dump is needed to build.
 - **An opt-in high-level emulation (HLE) of BIOS calls exists.** `[bios].hle = true` in the game config, `--bios-hle`, or the `GBARECOMP_BIOS_HLE` environment variable turn it on. Calls it doesn't implement fall through to the recompiled BIOS ([`src/runtime/bios_hle.h` L6–L21](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/runtime/bios_hle.h#L6-L21); `src/runtime/runtime.cpp` L1104–L1113). When no recompiled BIOS is linked, the runtime switches to "BIOS HLE boot" on its own (`runtime.cpp` L1566–L1572). gbarecomp's `CLAUDE.md` ("not stubbed, not HLE'd") and `bios/README.md` ("We do **not** HLE SWIs") predate this code.
-- **A BIOS file is still required when the game runs, HLE or not.** The native runtime takes its path from the command line, then a cached `bios.cfg`, then a Windows file dialog (`runtime.cpp` L1383–L1409). A wrong size is an error, and a wrong hash is only a warning (`src/runtime/asset_picker.cpp` L141–L173). It then loads the file (`runtime.cpp` L1460) and maps it into the emulated bus (`bus.set_bios`, L1551). The web page requires exactly 16384 bytes and also only warns on a hash mismatch ("…is not the expected …; trying it anyway", `packaging/web/asset_store.js` L35–L37).
+- **A 16 KiB BIOS file is still required when the game runs, HLE or not.** Under open-bios.md's option A, the open image fills this role too. The native runtime takes its path from the command line, then a cached `bios.cfg`, then a Windows file dialog (`runtime.cpp` L1383–L1409). A wrong size is an error, and a wrong hash is only a warning (`src/runtime/asset_picker.cpp` L141–L173). It then loads the file (`runtime.cpp` L1460) and maps it into the emulated bus (`bus.set_bios`, L1551). The web page requires exactly 16384 bytes and also only warns on a hash mismatch ("…is not the expected …; trying it anyway", `packaging/web/asset_store.js` L35–L37).
 - `src/runtime/launcher_seam.h` L78 and netplay (`runtime.cpp` L1493–L1496: "netplay requires this build's original ROM and retail BIOS") require the exact hash.
 - `bios/README.md` L29 says "The runtime refuses to start with a BIOS whose hash isn't recognized", which contradicts the warning-only code above.
 
@@ -214,7 +234,7 @@ From the [gba-link-cable-dumper README](https://github.com/FIX94/gba-link-cable-
 
 ## Part 3: Verify
 
-Use the stock macOS tools (checked on macOS 26.5), from the repo root:
+Use the stock macOS tools (checked on macOS 26.5), from the repo root. Skip the BIOS lines if you haven't dumped the BIOS:
 
 ```sh
 # BIOS: must be exactly 16384 bytes with this SHA-1 (gbarecomp bios/README.md, libretro System.dat)
@@ -234,15 +254,15 @@ shasum -a 1 roms/moto-racer-advance.gba
 ```
 
 - **BIOS.** `shasum -c` prints `OK` or `FAILED`. A SHA-256 of `782eb389…856b` or an internal checksum of `BAAE1880` means a DS-family BIOS: redo the dump on a GBA-family console. Any other value means a bad dump or a non-retail BIOS: rerun the dumper, and see the troubleshooting note in Part 2. The SHA-256 and internal-checksum lines compare your file against the bios-dump README's GBA-family row. If the SHA-1 passes but either of them doesn't match, report it: it would break the inference in [Part 2](#which-console-the-bios-must-come-from).
-- **ROM.** Compare the SHA-1 with the per-region hashes in [`docs/research/game-facts.md`](../research/game-facts.md). This guide doesn't repeat them, so that file stays the single source. A check that doesn't depend on that file is the CRC32: FlashGBX's "checksum was verified successfully" message (Part 1, step 7) and the `crc32` line above both compare against FlashGBX's database (`"rc": 802940840` = `0x2FDBE7A8` for USA and `"rc": 2360450464` = `0x8CB19DA0` for Europe, [`db_AGB.json` L2623 and L2634](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/FlashGBX/config/db_AGB.json#L2619-L2640)). CRC32 catches bad reads but isn't a cryptographic hash, so the SHA-1 comparison is still needed. A dump that matches no known hash is either a bad read (dump again) or a non-genuine or unknown cartridge. Report it either way; don't use it.
-- Once both files match, record the ROM's SHA-1 and region in `docs/research/` as `CLAUDE.md` requires. Record only hashes, never file contents.
+- **ROM.** Compare the SHA-1 with the per-region hashes in [`docs/research/game-facts.md`](../research/game-facts.md). This guide doesn't repeat them, so that file stays the single source. A check that doesn't depend on that file is the CRC32: FlashGBX's "checksum was verified successfully" message (Part 1, step 7) and the `crc32` line above both compare against FlashGBX's database (`"rc": 802940840` = `0x2FDBE7A8` for USA and `"rc": 2360450464` = `0x8CB19DA0` for Europe, [`db_AGB.json` L2623 and L2634](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/FlashGBX/config/db_AGB.json#L2619-L2640)). CRC32 catches bad reads but isn't a cryptographic hash, so the SHA-1 comparison is still needed. A dump that matches no known hash is either a bad read (dump again) or a non-genuine or unknown cartridge. Report it either way; don't use it. A match shows that the dump is a good copy of a known ROM. It doesn't show that the cartridge is genuine: a reproduction cart with an unmodified ROM matches too, and it isn't an acceptable source ([Part 5](#part-5-buying-a-used-cartridge)).
+- Once the ROM matches (and the BIOS, if you dumped it), record the ROM's SHA-1 and region in `docs/research/` as `CLAUDE.md` requires. Record only hashes, never file contents.
 
 ## Part 4: Where to put the files
 
 ```
 roms/moto-racer-advance.gba   # the cartridge ROM
 roms/moto-racer-advance.sav   # optional: your cartridge save backup
-bios/gba_bios.bin             # the GBA BIOS
+bios/gba_bios.bin             # the GBA BIOS, if you dumped it
 bios/bios-dump.sav            # optional: the bios-dump save it came from
 ```
 
@@ -264,22 +284,25 @@ $ git check-ignore -v roms/moto-racer-advance.gba roms/moto-racer-advance.sav bi
 
 ## Part 5: Buying a used cartridge
 
-A bootleg or reproduction cartridge holds a copied, sometimes patched, ROM, so its dump may not match the known-good hashes, and it can't be used. FlashGBX says so directly: "Database checks will only work for genuine, unmodified game cartridges" ([README L374](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/README.md?plain=1#L374)).
+The ROM must come from a genuine cartridge you own. A bootleg or reproduction cartridge holds a copied ROM, sometimes patched. **It is not an acceptable source for this project, even if its dump matches the known hashes.** A matching hash doesn't prove the cartridge is genuine: a reproduction with an unmodified ROM passes every hash check in this guide (Part 1, step 7, and Part 3). A patched one fails them, because "Database checks will only work for genuine, unmodified game cartridges" (FlashGBX, [README L374](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/README.md?plain=1#L374)). So the checks below, on the cartridge itself, are what rule out a reproduction.
+
+The reference genuine board is the Europe cartridge documented in MAME's GBA software list ([`hash/gba.xml` L23653–L23670](https://github.com/mamedev/mame/blob/954def46685cd0276671138fbd032036b1a771fb/hash/gba.xml#L23653-L23670) at MAME `954def4`, entry `motoracr`): serial `AGB-A9MP-EUR`, PCB `AGB-E06-10`, U2 "256K SRAM [HY62WT081ED70C]", and a `CR1616` coin cell (BT1). [`docs/research/game-facts.md`](../research/game-facts.md) records the same board. That is one cartridge, so other genuine production runs may differ (**unverified**). MAME's USA entry (`motoracru`, [L23672–L23683](https://github.com/mamedev/mame/blob/954def46685cd0276671138fbd032036b1a771fb/hash/gba.xml#L23672-L23683)) gives the serial `AGB-A9ME-USA` but no board details, so the USA board is **unverified**.
 
 What to check, mostly from [Epilogue's "Spotting fakes"](https://www.epilogue.co/support/cartridges/spotting-fakes) and [Nintendo Life's guide](https://www.nintendolife.com/guides/how-to-spot-fake-nintendo-video-games). No single check is proof:
 
-- **Label.** Crisp print, correct colors, no spelling errors, and a small stamped two-digit number (Nintendo quality control) that shows in raking light. The label should carry the product code. For this game the header game code is A9ME (USA) or A9MP (Europe), so expect something like `AGB-A9ME-USA`; that exact label text is **unverified**.
+- **Label.** Crisp print, correct colors, no spelling errors, and a small stamped two-digit number (Nintendo quality control) that shows in raking light. The label should carry the product code: `AGB-A9MP-EUR` (Europe) or `AGB-A9ME-USA` (USA), the serials in MAME's software list and in `docs/research/game-facts.md`.
 - **Back of the shell.** Nintendo branding and/or "Made in Japan" (Epilogue), and a **tri-wing** screw (GB and GBC carts use a different screw). A Phillips screw or missing text is a red flag.
 - **Inside** (tri-wing screwdriver):
   - "Nintendo" spelled correctly on the PCB.
   - A properly marked mask ROM chip. A black epoxy blob ("glob-top") is a strong sign of a fake.
   - No stacked boards, no stickers inside the shell, and no oddly cut PCB.
   - Nintendo Life adds that a numbered sticker with "E4" inked on the back of the board isn't found on official GBA boards.
-  - Genuine GBA boards carry a board code, commonly in the form `AGB-Exx-xx` (**unverified** as a rule).
-- **Save chip and battery.** FlashGBX's database lists Moto Racer Advance as **256K SRAM/FRAM** (`"st": 3` in [`db_AGB.json` L2625 and L2636](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/FlashGBX/config/db_AGB.json#L2619-L2640), which `CartridgeTypes.py` L101 maps to "256K SRAM/FRAM"). That doesn't say which chip the board carries. Battery-backed SRAM needs a coin cell to keep saves. FRAM doesn't, and Nintendo Life notes that a battery is used on some GBA games, "but not every GBA game uses one".
-  - FlashGBX's dump report shows the ROM's save library string (Part 1, step 8). FlashGBX labels `SRAM_F_…` strings "256K SRAM/FRAM" and plain `SRAM_…` strings "256K SRAM" (`CartridgeTypes.py` L189–L195), so even FlashGBX treats `SRAM_F_` as either chip. `docs/research/game-facts.md` reports `SRAM_F_V102` for this game, from one source.
-  - So a board without a battery is not, on its own, a sign of a fake. Look at the save chip: an SRAM chip with no battery points to a bootleg, since FlashGBX's README says such carts need patched ROMs, which would change the hash. Which chip genuine boards carry, and whether they have a battery, is **unverified** until someone records a real board in `docs/research/game-facts.md`.
-  - A FlashGBX save type other than 256K SRAM/FRAM is a red flag. A dead battery only loses saves; the ROM still dumps fine.
+  - The board code printed on the PCB. For this game, MAME records `AGB-E06-10` on the Europe cart. Note what a USA board says.
+- **Save chip and battery.** Compare with the reference board above: an SRAM chip (U2) and a CR1616 coin cell.
+  - **On a Europe cart, a missing battery or an FRAM chip in place of the SRAM is a red flag.** Don't buy such a cart. If you already have one, record its board in `docs/research/game-facts.md` and don't use its dump until that board is shown to be a genuine variant. FlashGBX's README also says that a reproduction cart with "an SRAM memory chip but no battery" was "not designed for unmodified ROM files" ([L386](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/README.md?plain=1#L386)).
+  - On a USA cart, nobody has recorded the board yet. Expect something similar to the Europe board, and record what you find in `docs/research/game-facts.md`.
+  - Software can't tell the chips apart. FlashGBX's database lists the game as **256K SRAM/FRAM** (`"st": 3` in [`db_AGB.json` L2625 and L2636](https://github.com/Lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/FlashGBX/config/db_AGB.json#L2619-L2640), which `CartridgeTypes.py` L101 maps to "256K SRAM/FRAM"). The save library string in the dump report (Part 1, step 8) comes from the ROM, not the board: `docs/research/game-facts.md` reports `SRAM_F_V102`, from one source, and FlashGBX labels `SRAM_F_…` strings "256K SRAM/FRAM" (`CartridgeTypes.py` L189–L195). A FlashGBX save type other than 256K SRAM/FRAM is still a red flag.
+  - A dead battery isn't a red flag on a cartridge from 2002. It only loses saves; the ROM still dumps fine.
 - **Software check after purchase.** FlashGBX's header and database check (Part 1, step 4), or Playback's counterfeit detection. Epilogue says software checks "catch most fakes but not all".
 - **When buying.** Ask for clear photos of the front label, the back, and ideally the PCB. A loose cartridge is all you need.
 
@@ -300,5 +323,7 @@ Pinned commits were checked on 2026-10-10.
 - [loopj/gba-multiboot-pico](https://github.com/loopj/gba-multiboot-pico)
 - [devkitpro/devkitarm on Docker Hub](https://hub.docker.com/r/devkitpro/devkitarm) (tag `20260610`, amd64 and arm64)
 - Vendors: [GBxCart RW](https://www.gbxcart.com/), [insideGadgets FRAM flash cart](https://shop.insidegadgets.com/product/gba-32mb-256kbit-fram-save-flash-cart/) (the live page returns HTTP 403 to automated requests; prices and stock come from the Wayback Machine snapshot `20260508182251` of that URL, read on 2026-10-10), [Joey Jr](https://bennvenn.myshopify.com/collections/game-cart-to-pc-interface/products/usb-gb-c-cart-dumper-the-joey-jr), [GBFlash](https://github.com/simonkwng/GBFlash), [Game Bub](https://gamebub.net/), [GB Operator](https://www.epilogue.co/product/gb-operator), [Playback downloads](https://www.epilogue.co/downloads), [What is Playback?](https://www.epilogue.co/support/getting-started/what-is-playback), [Epilogue: Flashcart Support](https://www.epilogue.co/support/hardware/flashcart-support), [EverDrive GBA Mini](https://krikzz.com/our-products/cartridges/everdrive-gba-mini.html)
+- MAME `954def46685cd0276671138fbd032036b1a771fb` (the latest commit touching the file, checked 2026-10-10): [`hash/gba.xml`](https://github.com/mamedev/mame/blob/954def46685cd0276671138fbd032036b1a771fb/hash/gba.xml#L23653-L23670), entries `motoracr` (Europe, with board details) and `motoracru` (USA)
+- This repo: [`docs/research/open-bios.md`](../research/open-bios.md) (merged in #3), [`docs/research/game-facts.md`](../research/game-facts.md) (#4)
 - Authenticity: [Epilogue: Spotting fakes](https://www.epilogue.co/support/cartridges/spotting-fakes), [Nintendo Life: How to spot fake Nintendo video games](https://www.nintendolife.com/guides/how-to-spot-fake-nintendo-video-games)
 - [Seth Larson: Backup Game Boy ROMs and saves on Ubuntu (2024-05-06)](https://sethmlarson.dev/backup-game-boy-roms-and-saves-on-ubuntu)
