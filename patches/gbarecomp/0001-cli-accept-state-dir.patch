@@ -1,0 +1,25 @@
+Accept --state-dir on the runtime command line.
+
+parse_cli() reads --state-dir through need_value(), which refuses any flag
+missing from kCliValueFlags. --state-dir was never added to that table, so
+every launch that passes it exits with
+"internal: value flag --state-dir is missing from kCliValueFlags".
+The browser page always passes it (packaging/web/bootstrap.js:62), so at
+gbarecomp 5e89943 the stock web bundle exits with code 1 before booting.
+The flag came with the web host (7aad900), the table check with 8d75118 on
+main; the PR #16 branch merged main before landing (4855ba2), and its tip
+already has both. Observed in Chrome and in a native run; one-line fix.
+
+diff --git a/src/runtime/runtime.cpp b/src/runtime/runtime.cpp
+index 9d30f74..b0e5952 100644
+--- a/src/runtime/runtime.cpp
++++ b/src/runtime/runtime.cpp
+@@ -795,7 +795,7 @@ constexpr std::string_view kCliValueFlags[] = {
+     "--dump-png",    "--load-state",    "--view-width",    "--widescreen",
+     "--save",        "--save-path",     "--gyro-sensitivity",
+     "--sharp-filter", "--linear-filter", "--affine-filter", "--screen",
+-    "--volume",
++    "--volume",      "--state-dir",
+ };
+
+ bool cli_flag_takes_value(std::string_view flag) {

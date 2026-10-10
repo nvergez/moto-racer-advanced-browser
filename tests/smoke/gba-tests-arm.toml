@@ -1,0 +1,20 @@
+# Smoke-test config for jsmolka/gba-tests arm/arm.gba at commit a7113b6 (MIT).
+# Fetched by scripts/fetch-test-roms.sh. Exercises the same config-driven
+# gba_recompile path as game.toml, on a ROM anyone may download.
+# Values were read from the file: shasum -a 1, md5 -q, stat -f %z.
+[game]
+name = "gba-tests arm"
+short_name = "gba_tests_arm"
+
+[program]
+name = "gba-tests arm.gba"
+id = "1337"                     # header game code
+load_address = 0x08000000
+size = 0x00002278               # 8824 bytes
+entry_pc = 0x080000C0           # the header branch target, as in gbarecomp's own test_rom_arm
+speculative_literal_harvest = false
+codegen_shards = 2
+
+[identity]
+sha1 = "753d7f40f50735bf13faab215cf9268f76cf9065"
+md5 = "21074b73f8cae8b35360697d41c9fb94"
