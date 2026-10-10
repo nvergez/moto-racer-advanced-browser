@@ -1,0 +1,38 @@
+# Single race in GP mode (California track, the only one unlocked on a fresh
+# save): title > English > Solo > Single race > DOWN (GP) > track > bike > Auto.
+# A is held from frame 3600; START pauses at 4200 and resumes. Fresh empty save.
+
+until 2450
+tap START
+wait 60
+tap A                      # English -> main menu
+wait 180
+tap A                      # solo
+wait 120
+tap A                      # single race
+wait 90
+shot single_race_menu
+tap DOWN 1                 # cross -> GP
+wait 30
+shot single_race_menu_gp
+tap A                      # -> track select
+wait 90
+shot track_select
+tap A                      # -> bike select
+wait 90
+tap A                      # -> gearbox
+wait 90
+tap A                      # Auto -> race loads
+until 3600
+shot pre_go
+hold A
+until 4200
+shot r4200
+tap START                  # pause
+wait 30
+shot pause
+tap START                  # resume
+wait 60
+until 6000
+shot r6000
+end

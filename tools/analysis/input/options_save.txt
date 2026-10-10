@@ -1,0 +1,35 @@
+# Trigger a cartridge save: title > English > main menu > Options > Language >
+# Francais, then B out of Options. Leaving Options after a change makes the game
+# write its 0xCD0-byte save block to SRAM (fresh save: around frame 3415).
+# Run with --save FILE to keep the .sav, and e.g.
+#   --watch-write 0x0E000000-0x0E00FFFF --watch-read 0x0E000000-0x0E00FFFF
+# to log the backup traffic. Fresh empty save.
+
+until 2450
+tap START
+wait 60
+tap A                      # English -> main menu
+wait 180
+tap DOWN 2                 # -> options
+wait 20
+tap A
+wait 120
+tap DOWN 3                 # -> language
+wait 20
+mark options_language
+tap A
+wait 90
+shot language_menu
+tap DOWN                   # -> francais
+wait 20
+mark select_francais
+tap A
+wait 180
+shot after_select
+wait 120
+mark press_back
+tap B                      # leave options: the save happens here
+wait 120
+shot after_back
+wait 120
+end

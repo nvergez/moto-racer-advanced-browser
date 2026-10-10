@@ -1,0 +1,28 @@
+# Pause the race and choose ABORT, which returns to the front-end program.
+# Start from the mid-race savestate written by boot_to_race.txt:
+#   run_harness.sh --out DIR --load-state RUN/mid_race.state --script abort_race.txt
+# Held keys are not part of a savestate, so A is held again here.
+# Expected: the race program writes FFFFFFFF x4 to 0x03007B00 and jumps to the
+# front end at frame 4298, which reruns its crt0 and shows the Kenya track
+# select (about frame 4600).
+
+hold A
+until 4210
+release
+tap START                  # pause
+wait 30
+tap DOWN 2                 # continue / restart / abort
+wait 20
+shot abort_selected
+mark abort
+tap A
+wait 300
+shot after_abort
+tap A
+wait 200
+shot after_abort_A
+tap A
+wait 200
+shot after_abort_A2
+wait 200
+end
