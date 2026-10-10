@@ -4,7 +4,7 @@
 **Date:** 2026-10-10
 **Closes:** the Phase 1 exit in [plan.md](../plan.md) ("`docs/adr/0001-*.md` confirming static recompilation, or switching approach, with evidence").
 **Pins:** ROM Moto Racer Advance (Europe) `A9MP`, SHA-1 `b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0`; retail BIOS SHA-1 `300c20df6731a33952ded8c436f7f186d25d3492`; gbarecomp `5e89943528aee7bc1c399bdbd035364a4b41dd10`; mGBA 0.10.5 through `tools/analysis/harness`.
-**Evidence:** [phase1-findings.md](../research/phase1-findings.md), [gbarecomp-integration.md](../research/gbarecomp-integration.md), [open-bios.md](../research/open-bios.md), PR #5 (toolchain and first build), and [phase2-diagnosis.md](../research/phase2-diagnosis.md). Section references below (§) point into the diagnosis unless a file is named.
+**Evidence:** [phase1-findings.md](../research/phase1-findings.md), [gbarecomp-integration.md](../research/gbarecomp-integration.md), [open-bios.md](../research/open-bios.md), PR #5 (toolchain and first build, merged as `a7efc60`; [toolchain.md](../toolchain.md)), and [phase2-diagnosis.md](../research/phase2-diagnosis.md). Section references below (§) point into the diagnosis unless a file is named.
 
 ## Context
 
@@ -24,7 +24,7 @@ What the first build (PR #5) and the Phase 2 diagnosis showed:
 - 30 of the 35 ROM misses disappear with `static_resume_all = true` (§2.1). Five are armcc switch slots that need reviewed seeds (§2.2).
 - gbarecomp cannot tell the two IWRAM images apart. Declaring the race image alone runs the wrong code with no error (§3.1). Runtime healing runs stale code (§3.3), and running whole images through the existing RAM dispatch hook, which is meant for small position-independent routines, overflows the browser's call stack (§3.3).
 - A prototype that compiles each image as its own corpus and picks the corpus per dispatch from the live IWRAM bytes is fully static on two routes, natively and in the browser (§3.2, option C).
-- Frames differ from mGBA for identified reasons: one gbarecomp PPU bug (§5.1), blend arithmetic that differs by at most one step (§5.2), mid-frame write timing in about 0.5% of front-end frames (§5.4), a missing OBJ cycle budget (§5.6). Races leave lockstep with mGBA from the camera fly-in, in every gbarecomp backend, which points to emulation timing rather than recompilation (§6).
+- Frames differ from mGBA for identified reasons: one gbarecomp PPU bug (§5.1), blend arithmetic that differs by at most one step (§5.2), mid-frame write timing in about 0.5% of front-end frames (§5.4), a missing OBJ cycle budget (§5.6). Races leave lockstep with mGBA from the camera fly-in, in every gbarecomp backend, interpreter included, which points to emulation timing rather than recompilation (§6). The interpreter reference runs BIOS SWIs as recompiled code unless the BIOS is interpreted too; with it interpreted, the sampled race frames do not change (§7.1).
 
 ## Decision
 
@@ -35,7 +35,7 @@ We confirm static recompilation and gbarecomp. The engine stays pinned at `5e899
 Evidence that the approach works on this ROM (§3.2, option C prototype, on top of the fixes in §1.1 and §2.1):
 
 - `boot_to_race` (4,400 frames) and `full_race_cross` (25,000 frames, a whole 3-lap race and the return to the front end): `self_heal_coverage=FULLY_STATIC dispatch_misses=0 interpreted_insns=0`, and `GBARECOMP_STRICT_STATIC=1` passes on both.
-- 500 of 500 sampled frames are pixel-identical to gbarecomp's own interpreter running the whole program.
+- 500 of 500 sampled frames are pixel-identical to gbarecomp's interpreter reference (`GBARECOMP_FORCE_INTERP=1`). That reference interprets the cartridge code and the IRQ handlers but runs BIOS SWIs as the same recompiled code as the build under test (§7.1). With the BIOS interpreted too, the reference still matched option C on all 88 sampled frames of `boot_to_race` (§7.1); the full race was not re-run that way.
 - The same code in headless Chromium runs the full race with 0 misses, and 500 of 500 framebuffer CRCs equal the native frames.
 - Every gbarecomp problem that stops the game from running is fixed by a small local patch (17 lines for the call-return leak, about 40 for the overlay selector, 1 for the end-of-run watchdog) or avoided by configuration. The rest affect fidelity, not whether the game runs (§5, §6); the one PPU bug among them takes a 27-line patch.
 
@@ -48,7 +48,7 @@ What this evidence does not cover yet: the GP, Traffic, abort, restart, options-
 This is option C in §3.2.
 
 - **Race image = main corpus.** `game.toml` declares `[[code_copy]] runtime_start = 0x03000000, source_start = 0x083F6820, size = 0x49C4`, with reviewed IWRAM roots.
-- **Front-end image = second corpus.** A second config declares only `[[code_copy]] runtime_start = 0x03000000, source_start = 0x081596FC, size = 0x834` with its own roots, and `scripts/regen.sh` compiles it with the existing `gba_recompile --output-prefix fe_`. That gives a separate `fe_kDispatchTable`.
+- **Front-end image = second corpus.** A second config declares `[[code_copy]] runtime_start = 0x03000000, source_start = 0x081596FC, size = 0x834` with its own roots, plus `entry_pc = 0x03000000` and `static_resume_all = true` as in the prototype (without resume entries, returns into front-end IWRAM code after an SWI unwind would be misses, §2.1). `scripts/regen.sh` compiles it with the existing `gba_recompile --output-prefix fe_`. That gives a separate `fe_kDispatchTable`.
 - **Engine patch.** A gbarecomp patch (about 40 lines) adds a game-owned selector, `g_runtime_ram_overlay_select`, consulted for RAM PCs in `dispatch_resolve` and `runtime_has_static_entry`. It returns 0 (use the main table), 1 plus a table (look the PC up there; the engine enters the entry as it would a static hit, keeping tail calls, resume aliases and the yield ABI), or -1 (an ordinary dispatch miss).
 - **Our selector** (`src/`, about 60 lines) compares the live 32-bit IWRAM word at the target PC with the same offset in each image's ROM source. A match picks that corpus. No match is a dispatch miss, so strict static mode aborts on it instead of running the wrong body.
 
@@ -76,7 +76,13 @@ Conditions that come with it:
 
 **Fallback** if the patch has to be dropped before upstream takes it: option D (race image static, front end interpreted through `g_runtime_force_interp_hook`). It works natively and in the browser and needs no change to gbarecomp's runtime, but its predicate is game-owned code, so the browser build still needs our own main (patch 0008, or our own link step; §3.2). It is never strict-static, costs a predicate call per instruction, and dropped frames in the browser menus. A patch-free alternative that keeps the front end static, a merged dispatch table (see "Alternatives considered"), is untested and would be prototyped first if the patch had to go.
 
-**Upstream fit.** gbarecomp's documented mechanism for executable bytes that change under a static entry is `g_runtime_force_interp_hook`, that is option D (`src/armv4t/runtime_arm.h:72-78`), which lowers the odds that upstream accepts the selector (U5) as written. Upstream's own design for several programs in one session, a per-program registry that binds each program's dispatch tables and fails closed on unknown PCs (`docs/MIXED_CARTRIDGE_MULTIPLAYER.md`, "Implementation order", step 1), targets mixed-cartridge multiplayer rather than overlays, but it is the shape to align U5 with.
+**Upstream fit.** gbarecomp's documented mechanism for executable bytes that change under a static entry is `g_runtime_force_interp_hook`, that is option D (`src/armv4t/runtime_arm.h:72-78`), which lowers the odds that upstream accepts the selector (U5) as written. Upstream already has pieces of a multi-image design:
+
+- `--output-prefix` exists "so multiple immutable code images can be linked into one executable" (`tools/gba_recompile/main.cpp:139-141`; upstream commit `2be1b81`, "support namespaced multi-image output").
+- `RuntimeArmContext::program_dispatch` is documented as "Optional per-program dispatch, required when heterogeneous images are implemented" (`src/armv4t/runtime_context.h:44-46`), and `dispatch_resolve` consults it first (`runtime_arm.cpp:869-870`). It applies only with a resumable (multiplayer) context, though, and the callback runs the body itself, the contract that made option A fail in the browser.
+- A per-program registry that binds each program's dispatch tables and fails closed on unknown PCs is planned (`docs/MIXED_CARTRIDGE_MULTIPLAYER.md`, "Implementation order", step 1), for mixed-cartridge multiplayer rather than overlays.
+
+So U5 is best shaped as a resolve-style `program_dispatch` (return the entry, let the engine enter it) that also works without a resumable context, rather than as a new global.
 
 ### 3. Companion configuration and engine fixes
 
@@ -85,18 +91,18 @@ These are required whatever the overlay mechanism:
 - `static_resume_all = true` (§2.1), only together with the call-return leak patch (§1.1). Without the patch, the setting makes leaks more frequent (§2.1).
 - The leak patch (§1.1) and the one-line IRQ-depth guard on the end-of-run quit (§1.2), so that runs stop exactly at `--frames`.
 - Reviewed seeds, each with a `note` giving its evidence: the 239 armcc switch slots (§2.2), the hidden roots (`0x030004DE`, `0x0800255C`, `0x08002580`, `0x080025B0`, `0x08004168`; §2.3), `[[code_copy]]` for the two EWRAM SRAM routines, and whatever the route gates find. The 47 seeds the prototype took unreviewed from miss reports are inputs to that review, not entries to copy.
-- A project-owned main in the browser build, through a one-line `GBARECOMP_WEB_MAIN` override of `build_web.sh` (U8 in §9), so the selector exists in the browser.
+- A project-owned main in the browser build, so the selector exists in the browser: a one-line patch adding `GBARECOMP_WEB_MAIN` and `GBARECOMP_WEB_MAIN_FLAGS` overrides to `build_web.sh` (U8 in §9). A patch-free route exists: our own link step, as PR #5's smoke tests already do (`tests/smoke/CMakeLists.txt:72-80`, `gbarecomp_web_host_link_options()`) and as [toolchain.md](../toolchain.md) plans for Phase 3. But `build_web.sh` also builds the page around the binary (expected hashes, `--embed-private-rom`, `--dev`, the AudioWorklet DSP, the exported config), which our own step would have to copy and keep in step with each engine bump. Phase 2 takes the one-line patch; Phase 3, which builds the player's page, revisits it.
 
 ### 4. BIOS: the retail dump for development and testing; an open BIOS as the target for players
 
-**Development and Phase 2 testing use the owner's retail BIOS dump** (SHA-1 `300c20df…`), kept in the gitignored `bios/` directory, never committed, and loaded on both sides of every comparison (mGBA harness and gbarecomp). Runs keep the BIOS boot intro, because `[bios].skip_intro` leaves the BG2/BG3 affine matrices at zero in gbarecomp (PR #5, `docs/toolchain.md`, known issue 6) and this game draws races with affine BG2.
+**Development and Phase 2 testing use the owner's retail BIOS dump** (SHA-1 `300c20df…`), kept in the gitignored `bios/` directory, never committed, and loaded on both sides of every comparison (mGBA harness and gbarecomp). Runs keep the BIOS boot intro, because the mGBA reference boots through it and both sides must start the same way. `[bios].skip_intro` would also leave the BG2/BG3 affine matrices at zero in gbarecomp ([toolchain.md](../toolchain.md), known issue 6). Races do not depend on that, since HBlank DMA0 writes BG2PA-PD on every line (Phase 1 §2), but the mode 4 screens outside races would if the game never writes the matrix there (**unverified**).
 
 This revises [open-bios.md](../research/open-bios.md) §6, which recommended the Cult-of-GBA BIOS for development, written when no dump was available. Reasons:
 
 - The owner now has a dump.
 - All Phase 1 and Phase 2 evidence, and every mGBA baseline we have, uses the retail BIOS.
 - Phase 2 measures recompilation and emulation correctness. Swapping the BIOS at the same time would add a second source of divergence: open-bios.md §5.2 expects timing drift between BIOS implementations, and requires the same BIOS on both sides of the exit test.
-- The Cult-of-GBA boot does not reach the cartridge under gbarecomp at our pin. It halts with IME off, and gbarecomp ends HALT only on an interrupt the CPU takes (PR #5 known issue 5).
+- The Cult-of-GBA boot does not reach the cartridge under gbarecomp at our pin. It halts with IME off, and gbarecomp ends HALT only on an interrupt the CPU takes ([toolchain.md](../toolchain.md), known issue 5).
 
 **For players, the target remains an open-source BIOS**: Cult-of-GBA recompiled, in our own cleaned repository (open-bios.md option A′), so a player supplies only the ROM. It is a direction, not a validated choice. It needs, in order:
 
@@ -111,19 +117,19 @@ If it fails, the fallbacks are open-bios.md options F (player's own BIOS, interp
 
 ### 5. Differential-testing baseline
 
-**Inputs.** The harness input scripts in `tools/analysis/input/` are the source of truth for routes. One converter turns a script into a gbarecomp replay. Inputs are applied at VBlank start, and all tools name frames by the harness (mGBA) counter: a capture taken at VBlank start while gbarecomp's PPU `frame_count` is k shows harness frame k+1 (§7.3). The exact replay offset is validated by a Phase 2 task, because the two conventions used so far were not cross-checked (§7.3).
+**Inputs.** The harness input scripts in `tools/analysis/input/` are the source of truth for routes. One converter turns a script into a gbarecomp replay. Inputs are applied at VBlank start, and all tools name frames by the harness (mGBA) counter: a capture taken at VBlank start while gbarecomp's PPU `frame_count` is k shows harness frame k+1 (§7.3). The exact replay offset is validated by a Phase 2 task, because the two conventions used so far were not cross-checked (§7.3). Each route also carries checkpoints: game-state events that the captures show on both engines, such as DISPCNT becoming `0x1741` when a race starts, or the resident IWRAM image changing. A gbarecomp run counts only if they hold. Inputs are timed on mGBA's frames and races are not in lockstep (§6), so a replay can drift onto another screen, and comparison 1 cannot notice: both backends drift the same way.
 
-**Captures.** Where a headless `--frames N` run stops, and so which frame `--dump-png` writes, depends on the backend and on the game state: the recompiled build and the interpreter can end one frame apart (§7.3). Every comparison across backends or with mGBA therefore uses captures taken at VBlank start (P2-03's capture patch, at the point where gbarecomp calls `input_frame`), never `--dump-png`.
+**Captures.** Where a headless `--frames N` run stops, and so which frame `--dump-png` writes, depends on the backend and on the game state: the recompiled build and the interpreter can end one frame apart (§7.3). Every comparison across backends or with mGBA therefore uses captures taken at VBlank start, never `--dump-png`. The sample point is after the VBlank-timed DMA and before the VBlank IRQ is raised, on both engines (gbarecomp runs the VBlank DMA, then the input hook, then raises the IRQ, `runtime_bus_bridge.cpp:597-604`); P2-03 implements it and establishes the matching point in mGBA.
 
 **Reference.** mGBA 0.10.5 through our libmgba harness (deterministic), with the retail BIOS, full BIOS boot, a fresh save and the same scripted inputs.
 
 **Two comparisons, two questions:**
 
-1. **Recompilation correctness: recompiled build against gbarecomp's interpreter** (`GBARECOMP_FORCE_INTERP=1`). The target is bit-exact: framebuffer CRC and per-region RAM hashes, both taken at VBlank start, on every frame. Both sides share gbarecomp's device model, so we expect any difference to be a recompiler, dispatch or overlay bug. That expectation is **unverified** for RAM: the prototype compared 500 sampled framebuffers and no RAM (§3.2), and gbarecomp's own cross-backend state hash deliberately leaves out bookkeeping that legitimately differs between backends (`COSIM_ORACLE.md:123-131`). P2-09 measures RAM-hash equality before it becomes a gate; if some state differs for a documented backend reason, the fallback is a named list of excluded regions, each with its cause, or a different sampling point. To localize a divergence, gbarecomp's per-instruction fingerprint ring (`GBARECOMP_INSN_TRACE=1` with `GBARECOMP_FP_SAVE`, `runtime.cpp:2089-2094`, `runtime_arm.cpp:300-307`; it keeps about 8M instructions, `runtime_arm.cpp:382-388`) diffs two runs instruction by instruction. The recompiled side also runs under `GBARECOMP_STRICT_STATIC=1`.
+1. **Recompilation correctness: recompiled build against gbarecomp's interpreter** (`GBARECOMP_FORCE_INTERP=1`), **with the BIOS interpreted too.** On its own, the interpreter backend interprets the cartridge code and the IRQ handlers but sends every SWI through `runtime_swi` to the recompiled BIOS (§7.1), so a translation bug in the six BIOS SWIs would be the same on both sides. In the reference run our main therefore installs `g_runtime_force_interp_hook` returning 1 for PCs below `0x4000`; `dispatch_resolve` consults it before the BIOS table (`runtime_arm.cpp:874-880`), so this needs no engine patch (P2-02). With it, the reference's coverage banner reads `NOT_STATIC` (each BIOS entry is a bridge), so no gate reads that banner. The target is bit-exact: framebuffer CRC and per-region RAM hashes, both taken at VBlank start, on every frame. Both sides share gbarecomp's device model, so we expect any difference to be a recompiler, dispatch or overlay bug. That expectation is **unverified** for RAM: the prototype compared 500 sampled framebuffers and no RAM (§3.2), and gbarecomp's own cross-backend state hash deliberately leaves out bookkeeping that legitimately differs between backends (`COSIM_ORACLE.md:123-131`). P2-09 measures RAM-hash equality before it becomes a gate; if some state differs for a documented backend reason, the fallback is a named list of excluded regions, each with its cause, or a different sampling point. To localize a divergence, gbarecomp's per-instruction fingerprint ring (`GBARECOMP_INSN_TRACE=1` with `GBARECOMP_FP_SAVE`, `runtime.cpp:2089-2094`, `runtime_arm.cpp:300-307`; it keeps about 8M instructions, `runtime_arm.cpp:382-388`) diffs two runs instruction by instruction. The recompiled side also runs under `GBARECOMP_STRICT_STATIC=1`.
 2. **Emulation fidelity: gbarecomp against mGBA**, in two layers (§7.2):
    - *Layer 1, exact:* render-time per-scanline state (video registers with unused bits masked, palette[0], and CRCs of OAM, palette and VRAM, sampled where each engine renders the line).
    - *Layer 2, pixels at 5-bit precision:* exact on lines with no color effect; ±1 step per channel only on lines with an active brightness or alpha effect, the proven bound of the arithmetic difference (§5.2).
-   - Plus per-frame hashes of game-state RAM, excluding regions shown to differ for timing reasons only (for example the IRQ stack slot `0x03007F9C`, Phase 1 §6).
+   - Plus per-frame hashes of game-state RAM, excluding regions shown to differ for timing reasons only (for example the IRQ stack slot `0x03007F9C`, Phase 1 §6). The regions and their masked sub-ranges are part of P2-03's capture schema, because hashes are taken at capture time; P2-09 compares them.
 
    Every remaining difference is either fixed or listed in a per-route allowlist with its cause. The comparator reports the first divergence (frame, line, column).
 
@@ -131,10 +137,11 @@ If it fails, the fallbacks are open-bios.md options F (player's own BIOS, interp
 
 **Run conditions.** Headless, `SDL_AUDIODRIVER=dummy`, fresh save, `GBARECOMP_SELFHEAL_RECOMPILE=0`, RAM healing off. Both engines were deterministic under these conditions (§7.6). Store CRCs, hashes and diff summaries, never raw frames; frames show game graphics and are never committed.
 
-**Evidence rules.** A match on a static screen is not evidence (§7.4). Checkpoints are chosen where the renderer is busy (§7.5).
+**Evidence rules.** A match on a static screen is not evidence (§7.4). Frames sampled for a check are chosen where the renderer is busy (§7.5).
 
 Concretely, Phase 2's exit ("a full cup plays identically to mGBA under the input replays", [plan.md](../plan.md)) means:
 
+- the gbarecomp runs follow the cup route (its checkpoints hold);
 - comparison 1 is exact on every frame of the cup;
 - comparison 2 passes with only allowlisted, explained differences;
 - race results (finishing position and time per race) equal mGBA's.
@@ -205,4 +212,4 @@ Concretely, Phase 2's exit ("a full cup plays identically to mGBA under the inpu
 **Follow-ups**
 
 - [phase2-plan.md](../phase2-plan.md) turns these decisions into tasks.
-- Revisit this ADR if upstream takes a different overlay API (its planned per-program registry is the likely shape, decision 2), if the race-lockstep investigation changes the baseline, if P2-09 finds that RAM hashes legitimately differ between backends, or when the open-BIOS validation concludes.
+- Revisit this ADR if upstream takes a different overlay API (its planned per-program registry, or `program_dispatch` without a resumable context, is the likely shape, decision 2), if the race-lockstep investigation changes the baseline, if P2-09 finds that RAM hashes legitimately differ between backends, or when the open-BIOS validation concludes.
