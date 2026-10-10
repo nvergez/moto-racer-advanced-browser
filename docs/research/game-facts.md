@@ -11,26 +11,28 @@
 
 "Verified" means the source says it. It does not mean we confirmed it on a ROM.
 
+Under the project rules ([CLAUDE.md](../../CLAUDE.md)), every claim about the game's internals (rendering, memory layout, addresses, save format, ROM strings) is **unverified** until it has been checked on a ROM pinned by hash, whatever label it carries here. The labels only rank how much the public evidence supports each claim.
+
 ## Key facts for the port
 
 | Fact | Confidence |
 |---|---|
 | Two dumps exist: USA (`A9ME`, SHA-1 `351414650E6969C270B1339ADA7B3565CE80374C`) and Europe (`A9MP`, SHA-1 `B91BAD8EE04652D71E0610F8D1A5DEAEBD4C1FD0`), both 4 MiB, both five-language. No revisions are listed. | verified |
-| Save hardware is 32 KiB SRAM (256 Kbit SRAM/FRAM). No RTC, rumble, or other cartridge hardware. | verified (SRAM); likely (no other hardware) |
-| The save library ID string is reported as `SRAM_F_V102`. gbarecomp at the pinned commit does not recognize `SRAM_F_V`, so it would need `[save] type = "sram"` in the game config. | likely (string); verified (gbarecomp code) |
+| Save hardware is 32 KiB SRAM (256 Kbit SRAM/FRAM). MAME documents a battery-backed SRAM chip on a Europe cart. No RTC, rumble, or other cartridge hardware. | verified (SRAM); likely (no other hardware) |
+| The save library ID string is reported as `SRAM_F_V102`. gbarecomp at the pinned commit does not recognize `SRAM_F_V`. Without `[save] type = "sram"` in the game config, the game would find no save chip: reads of the save region return `0x00` and writes are dropped. | likely (string; **unverified** on a ROM); verified (gbarecomp code) |
 | The developer says the target from day one was 60 fps. IGN's E3 report, preview, and review also say 60 fps. | verified (statements) |
-| The renderer uses no polygons. Reviews describe sprites, backgrounds, scaling, and a "line-scrolling technique". | likely |
+| The renderer uses no polygons. Reviews describe sprites, backgrounds, scaling, and a "line-scrolling technique". Per-scanline backgrounds (affine, as in "Mode 7", or text-mode) plus scaled sprites fit this; which one is used is open. | likely (**unverified** on a ROM) |
 | 18 tracks (6 Cross, 6 GP, 6 Traffic), plus the unlockable "Ultimate" course. 8 riders per race. | verified |
 | Link play for up to 4 players, one cartridge per player (no single-pak mode). | verified |
 | "Ultimate" exists and is a futuristic, space-themed course. The "hover taxis" detail is still open. | likely |
-| Cheat codes point at EWRAM addresses for race position, speed, nitro, and an 18-byte unlock block at `0x0203F024`. USA ROM only. | likely |
+| Cheat codes point at EWRAM addresses for race position, speed, nitro, and an 18-byte unlock block at `0x0203F024`. USA ROM only. | likely (**unverified** on a ROM) |
 
 ## 1. Releases
 
 | Region | Publisher | Release date | Product ID | Barcode | Confidence |
 |---|---|---|---|---|---|
 | Europe (PAL) | Ubisoft | 2002-10-04 | AGB-A9MP-EUR | 3307210116123 | Date: verified [W][GF][AD]. Product ID: likely [GF] (libretro lists `AGB-A9MP` [LS]). Barcode: likely [GF] |
-| USA | Ubi Soft (MobyGames: "Ubi Soft Entertainment, Inc.") | 2002-12-04 or 2002-12-05 | AGB-A9ME-USA | 008888140313 | Product ID: verified [GF][LS][GH]. Date: **unverified**, sources disagree: Dec 4 [W][IGN-R], Dec 5 [GF][YT]. Barcode: likely [GF] |
+| USA | Ubi Soft (MobyGames: "Ubi Soft Entertainment, Inc.") | 2002-12-03, 2002-12-04, or 2002-12-05 | AGB-A9ME-USA | 008888140313 | Product ID: verified [GF][LS][GH]. Date: **unverified**, sources disagree: Dec 3 [GZ], Dec 4 [W][IGN-R][GS], Dec 5 [GF][YT]. Barcode: likely [GF] |
 
 - Developer: Adeline Software International; producer: Delphine Software International [W]. Adeline's own site gives the release as "October 2002" [AD].
 - Languages on both carts: English, French, German, Spanish, Italian (No-Intro names) [NI]. verified.
@@ -56,34 +58,46 @@ Source: the No-Intro GBA DAT as mirrored in libretro-database, commit [`bf825e3`
 
 Cross-checks:
 
-- The CRC32s also appear in the FlashGBX database [FG] (as decimal `802940840` = `0x2FDBE7A8` and `2360450464` = `0x8CB19DA0`), in a GBA dumper's game list [GD], and on GameHacking.org [GH]. Size 4194304 matches FlashGBX. **Verified** for CRC32 and size. MD5 and SHA-1 come from the No-Intro mirror only.
+- Both CRC32s also appear in the FlashGBX database [FG] (as decimal `802940840` = `0x2FDBE7A8` and `2360450464` = `0x8CB19DA0`) and in a GBA dumper's game list [GD]. GameHacking.org lists only the USA CRC32 [GH]. Size 4194304 matches FlashGBX.
+- MAME's GBA software list [MAME] gives the same size, CRC32, and SHA-1 for both regions. Its Europe entry names the ROM after the cartridge's mask ROM (`agb-a9mp-0.u1`) and documents the board, which suggests MAME's own dump. Its USA entry uses a No-Intro-style file name, so it may have been copied from No-Intro (**unverified**).
+- RetroAchievements' list of MD5s for MAME's GBA software list [RAH] gives the same MD5s: `d3b2ab65c92e18df21788c4b30128041` for `agb-a9mp-0.u1` and `77fdfc944c31ccb0270c73e801cc20b0` for the USA file.
+- BizHawk's game database [BH] lists both SHA-1s. Its names follow No-Intro's conventions, so it is probably derived from an older No-Intro DAT rather than separate dumps (**unverified**).
+- **Verified** for CRC32, size, MD5, and SHA-1. The Europe dump has the strongest support (No-Intro plus MAME's documented cart). For the USA dump, the full-file MD5 and SHA-1 we found may all trace back to No-Intro.
 - We did not query DAT-o-MATIC (datomatic.no-intro.org) directly: its search is a POST form, and we did not submit forms. The libretro file is a mirror of No-Intro.
 - The FlashGBX key is how FlashGBX looks up its database: SHA-1 of the first `0x180` bytes ([RomFileAGB.py L227–230](https://github.com/lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/FlashGBX/RomFileAGB.py#L227-L230)). It gives a quick header check on a fresh dump.
-- TOSEC: no entry in libretro's TOSEC GBA DAT at the same commit.
+- No entry in libretro's TOSEC GBA DAT or its Lost Level Archive GBA DAT (109 games) at the same commit.
 
 ## 3. Cartridge hardware
 
 | Item | Value | Confidence | Sources |
 |---|---|---|---|
 | ROM size | 4 MiB (32 Mbit) | verified | [NI][FG] |
-| Save type | 32 KiB SRAM. FlashGBX: save type 3 = "256K SRAM/FRAM", size 32768. Hades: `BACKUP_SRAM`. | verified | [FG][HD] |
-| Save ID string in ROM | `SRAM_F_V102` | likely | [GD] only |
+| Save type | 32 KiB SRAM. FlashGBX: save type 3 = "256K SRAM/FRAM", size 32768. Hades: `BACKUP_SRAM`. MAME: slot `gba_sram` for both regions. | verified | [FG][HD][MAME] |
+| Save ID string in ROM | `SRAM_F_V102` | likely (**unverified** on a ROM) | [GD] only |
 | Save slots | One ("Cartridge save (one slot)") | likely | [IGN-R] |
 | RTC, rumble, solar, tilt, other GPIO | None. Hades marks the game `GPIO_NONE`. No entry in mGBA's or VBA-M's override tables, which is where such hardware is flagged. | likely | [HD][MO][VO] |
-| Physical save chip (battery SRAM or FRAM), PCB type | Unknown. gbhwdb has no hardware submissions for either region. | **unverified** | [HW] |
+| Physical save chip, PCB type (Europe) | MAME documents one Europe cart: PCB `AGB-E06-10`, U2 "256K SRAM [HY62WT081ED70C]", battery CR1616. So battery-backed SRAM, not FRAM, on that cart. Other production runs may differ. | verified (one cart) | [MAME] |
+| Physical save chip, PCB type (USA) | Unknown. MAME's USA entry has no board details, and gbhwdb has no hardware submissions for either region. | **unverified** | [MAME][HW] |
 
 About `SRAM_F_V`: emulators treat it as 32 KiB SRAM, the same as `SRAM_V` (ares [AR], bsnes-mercury labels it `FRAM` [BM]). GBATEK's backup ID list only names `SRAM_Vnnn` [GT-B].
 
-**Porting note (verified in gbarecomp source, effect on this ROM unverified):** gbarecomp at the pinned commit `5e89943` detects saves by scanning for `EEPROM_V`, `SRAM_V`, `FLASH1M_V`, `FLASH512_V`, and `FLASH_V` ([gba_rom_header.cpp L66–75](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/gba/gba_rom_header.cpp#L66-L75)). `SRAM_F_V102` matches none of them. An unknown type resolves to a save size of 0 ([save_config.cpp](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/runtime/save_config.cpp)), and with no SRAM buffer, reads return `0xFF` and writes are dropped ([gba_save.cpp L26–32](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/gba/gba_save.cpp#L26-L32)). The game would run without saves. If the ROM's only ID string is `SRAM_F_V102`, we need `[save] type = "sram"` in the game config ([runtime.cpp L734–751](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/runtime/runtime.cpp#L734-L751)) or `GBARECOMP_SAVE_TYPE=sram` in the environment ([runtime.cpp L1509–1510](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/runtime/runtime.cpp#L1509-L1510)).
+**Porting note.** Verified in gbarecomp's source at the pinned commit `5e89943`; the effect on this ROM is **unverified**.
+
+- **Detection.** gbarecomp detects saves by scanning the ROM, at 4-byte alignment, for `EEPROM_V`, `SRAM_V`, `FLASH1M_V`, `FLASH512_V`, and `FLASH_V` ([gba_rom_header.cpp L66–75](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/gba/gba_rom_header.cpp#L66-L75)). `SRAM_F_V102` matches none of them, so the detected type is `unknown`, which has a save size of 0 ([save_config.cpp L49–58](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/runtime/save_config.cpp#L49-L58)).
+- **What the game would see.** With no save type, no SRAM is configured. The bus checks `sram_enabled()` before it touches the save object: reads of the save region (`0x0E000000`–`0x0FFFFFFF`) return `0x00` and are counted as unmapped accesses, which are printed only with `GBARECOMP_LOG_UNMAPPED` set; writes are dropped ([gba_bus.cpp L252–258, L310–320, L378–388](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/gba/gba_bus.cpp#L252-L258) for 8/16/32-bit reads; L470–480, L527–539, L607–619 for writes; L637–648 for the logging). The `0xFF` default inside `GbaSave::sram_read` ([gba_save.cpp L26–29](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/gba/gba_save.cpp#L26-L29)) is not reached on this path. At best the game runs without saves. If it checks its SRAM at boot (for example by writing and reading back a test value), it may show an error or behave differently (**unverified**).
+- **mGBA differs.** mGBA, our planned reference, has no override for `A9M` [MO], so its save type starts as "autodetect", and it sets up SRAM on the first byte read or write in the save region ([memory.c L717–723 and L1062–1071 @ 143adf5](https://github.com/mgba-emu/mgba/blob/143adf5aa2a60c6036810b0cd72445e13d74b0e6/src/gba/memory.c#L717-L723)). gbarecomp has no such fallback. Without the config below, the two would diverge in Phase 2's replay comparisons as soon as the game touches SRAM.
+- **Fix.** Set `[save] type = "sram"` in the game's `game.toml` ([runtime.cpp L734–751](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/runtime/runtime.cpp#L734-L751)). A type set in the game config overrides the ROM signature, and the `GBARECOMP_SAVE_TYPE` environment variable overrides both ([save_config.cpp L85–133](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/runtime/save_config.cpp#L85-L133); call site and `configure_sram` in [runtime.cpp L1806–1832](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/runtime/runtime.cpp#L1806-L1832)).
+- **Browser target.** `[save] type` is the route that works in a released browser bundle. `packaging/web/runtime_config.py` exports `[save]` `type` and `size` from `game.toml` into the bundle's `runtime.toml` ([L12–20](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/packaging/web/runtime_config.py#L12-L20)), which the page passes to the runtime with `--config` ([bootstrap.js L64](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/packaging/web/bootstrap.js#L64)). The environment variable works natively, but in the browser only through the `?env=` URL parameter, which the page honors only for a bundle built with `--dev` and served from a loopback address ([bootstrap.js L10–15, L60](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/packaging/web/bootstrap.js#L10-L15)).
+- **Inconsistency upstream.** gbarecomp's own browser save test already maps `SRAM_F` to a 32 KiB chip ([tests/web/test_save.py L99–100](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/tests/web/test_save.py#L99-L100)), while the runtime's detector does not recognize it.
 
 ## 4. Content
 
 ### Menus and modes
 
-- Main menu: Solo, Multiplayer, Options, Top 5. Solo: Single Race, Championship, League, Progression. Single Race, Championship, and League start locked. likely [YT] (read from video thumbnails); consistent with [W][MG].
+- Main menu: Solo, Multiplayer, Options, Top 5. Solo: Single Race, Championship, League, Progression. likely [YT] (read from video thumbnails); consistent with [W][MG].
 - Three disciplines: Cross (off-road), GP (paved circuits), Traffic (roads with traffic, either bike class). verified [IGN-R][GS][MG][W].
 - Progression is the main mode: a tree of races per discipline that unlocks bikes, tracks, and "combos". verified [IGN-R][MG][W].
-- Single Race is earned through Progression. verified [W][IGN-R].
+- Which Solo modes start locked: **unverified**, sources conflict. Wikipedia says "The single race mode must be earned through playing the progression mode" and cites IGN's review for the paragraph [W], but the IGN review says only that the three disciplines "can be accessed in single race or championship" and says nothing about earning Single Race [IGN-R]. The longplay's thumbnail at about 0:00:50, on what looks like a fresh save, shows Single Race as a solid box with white text, Championship and League hatched with grey text, and Progression selected [YT]. That suggests only Championship and League start locked, but it is a 270×180 thumbnail. Check in-game (question 16 in §7).
 
 ### Progression structure
 
@@ -123,7 +137,7 @@ Adeline's 2002 site lists the tracks by discipline (in French; translated below)
 
 ### Controls
 
-Reviewers disagree on the shoulder buttons. jeuxvideo.com says R wheelies and L shifts gears [JV]. Gaming Nexus says R wheelies, then boosts [GN]. IGN says a boost comes from holding a shoulder button and is limited by a gauge that refills [IGN-R]. MobyGames says the nitro triggers a wheelie and regenerates over time [MG]. **unverified**: check in-game.
+Reviewers disagree on the shoulder buttons. jeuxvideo.com says R wheelies and L shifts gears [JV]. Gaming Nexus says R wheelies, then boosts [GN]. IGN says a boost comes from holding a shoulder button and is limited by a gauge that refills [IGN-R]. MobyGames says the nitro triggers a wheelie and regenerates over time [MG]. **unverified**: check in the manual and in-game (question 13 in §7).
 
 ### Multiplayer
 
@@ -166,20 +180,29 @@ How the thumbnails were read: YouTube publishes preview thumbnails ("storyboards
 - IGN preview: "The game runs at a silky smooth 60 frames per second" [IGN-P].
 - IGN review: "doesn't feature any trendy texture-mapped 3D models; the developers worked with the GBA's strength of manipulating sprites and backgrounds"; graphics rating text: "smooth and fast scaling with detailed artwork flowing at 60 frames per second". Turning around is impossible, which IGN attributes to the lack of polygons [IGN-R].
 - GameFAQs reader review: "entirely presented without polygons" [GF-RR].
-- jeuxvideo.com (in French) says Cross races are "in 3D" and GP races use "Mode 7" [JV]. This contradicts the others and reads as a reviewer's impression. **unverified**.
+- jeuxvideo.com (in French) says Cross races are "in 3D" and GP races use "Mode 7" [JV]. "In 3D" contradicts the no-polygon reviews and reads as a reviewer's impression. "Mode 7" (an affine background rewritten per scanline) does not contradict IGN's "line-scrolling technique". **unverified**.
 - Reviewers note a long draw distance, steep hills, and no slowdown with many riders on screen [GS][IGN-R][JV][GF-RR].
 
 ### Implications (all unverified until Phase 1)
 
 - **Frame rate.** The developer and three IGN pieces say 60 fps, so the plan's Phase 4 frame-rate item may be moot. Confirm in mGBA.
-- **Renderer.** Everything points to a raster "road" engine: per-scanline background changes plus scaled sprites for riders and decor. That would mean HBlank DMA or HBlank IRQ writes to background registers. If so, gbarecomp's PPU must apply mid-frame register writes per scanline, and the resolution enhancement means re-rendering the per-line road and scaled sprites at higher resolution, not intercepting triangles. The 1024-pixel terrain strips match the largest affine background (1024×1024 pixels), so an affine BG driven per scanline is one candidate. Bitmap-mode software rendering is another. Phase 1 must read `DISPCNT`, the BG registers, and the DMA setup during a race.
-- **Widescreen.** Decor placement and culling are probably tied to the 240-pixel screen width. Not investigated.
+- **Renderer.** Everything points to a raster "road" engine with no polygons: per-scanline background effects plus scaled sprites for riders and decor. The per-scanline part could be an affine background (the "Mode 7" technique, which jeuxvideo.com names for GP) or text-mode backgrounds with per-line scroll; the evidence does not rule out either. Both would mean HBlank DMA or HBlank IRQ writes to background registers. If so, gbarecomp's PPU must apply mid-frame register writes per scanline, and the resolution enhancement means re-rendering the per-line road and scaled sprites at higher resolution, not intercepting triangles. The 1024-pixel terrain strips match the largest affine background (1024×1024 pixels), which fits the affine option. Bitmap-mode software rendering is a third candidate. Phase 1 must read `DISPCNT`, the BG registers, and the DMA setup during a race in mGBA.
+- **Widescreen.** Decor placement and culling are probably tied to the 240-pixel screen width. Not investigated (question 14 in §7).
+
+### BIOS calls (third-party data)
+
+A 2022 report on the Cult-of-GBA BIOS issue tracker ran many commercial ROMs in mGBA with the retail BIOS for 9000 frames with dummy inputs and recorded which SWIs each one executed ([issue #9](https://github.com/Cult-of-GBA/BIOS/issues/9); the CSV is linked from [this comment](https://github.com/Cult-of-GBA/BIOS/issues/9#issuecomment-1036609624)). The row `Motoracer Advance.gba` lists SWIs 5, 7, 12, 17, and 20: VBlankIntrWait, DivArm, CpuFastSet, LZ77UnCompWram (LZ77UnCompReadNormalWrite8bit), and RLUnCompWram (RLUnCompReadNormalWrite8bit). We re-read that row from the CSV. **unverified** for our ROM: the ROM's region and revision are unknown, and dummy inputs probably never reached a race, so race-time calls may be missing. PR #3 (`docs/research/open-bios.md`, §5.1) uses the same data to assess open BIOS replacements. See question 15 in §7.
 
 ## 6. Cheat codes
 
-**Source:** GameHacking.org game 5425, "Motoracer Advance (USA) (En,Fr,De,Es,It)", CRC32 `2FDBE7A8`, serial `AGB-A9ME-USA`. Read from the [Wayback Machine snapshot of 2026-06-17](https://web.archive.org/web/20260617202426/https://gamehacking.org/game/5425/), because the live site blocks automated requests. **All codes are for the USA ROM.** Europe addresses may differ.
+**Source:** GameHacking.org game 5425, "Motoracer Advance (USA) (En,Fr,De,Es,It)", CRC32 `2FDBE7A8`, serial `AGB-A9ME-USA`. Read from the [Wayback Machine snapshot of 2026-06-17](https://web.archive.org/web/20260617202426/https://gamehacking.org/game/5425/), because the live site blocks automated requests. **All codes are for the USA ROM**, which we pin as No-Intro SHA-1 `351414650E6969C270B1339ADA7B3565CE80374C` (§2). GameHacking matches by CRC32 only, so the SHA-1 link is through the No-Intro DAT. Europe addresses may differ.
 
-Other places checked: GameFAQs' cheats page was empty in its last archived copy (2019-12-12) [GF-C]. libretro-database has no `.cht` file for this game. No GameShark codes turned up elsewhere.
+Other places checked:
+
+- GameHacking's GBA "M" game list has only the USA entry, so there are no Europe codes there ([2016-09-09](https://web.archive.org/web/20160909000702/http://gamehacking.org/system/gba/m/6) and [2026-06-17](https://web.archive.org/web/20260617132337/https://gamehacking.org/system/gba/m/6) snapshots).
+- GameFAQs' cheats page was empty in its last archived copy (2019-12-12) [GF-C].
+- libretro-database has no `.cht` file for this game.
+- No GameShark codes turned up elsewhere.
 
 ### Codes as listed
 
@@ -202,11 +225,11 @@ Codes are copied verbatim, in GameHacking's "Original" format.
 
 - **Dualscreenman's CodeBreaker codes are plaintext.** They can be read directly using GBATEK's CodeBreaker table [GT-CB]: `3aaaaaaa 00yy` writes a byte, `7aaaaaaa yyyy` means "if the halfword equals yyyy, run the next code", and `4aaaaaaa yyyy` + `iiiicccc ssss` is a fill ("slide") code.
 - **MadCatz's CodeBreaker codes are encrypted.** The first line of the master code (`91121668 5608`, type 9) seeds the encryption. Every MadCatz line after it is encrypted and cannot be read as an address.
-- **We decrypted them** with a scratch Python port of mGBA's CodeBreaker routine (`src/gba/cheats/codebreaker.c`, mGBA commit [`143adf5`](https://github.com/mgba-emu/mgba/blob/143adf5aa2a60c6036810b0cd72445e13d74b0e6/src/gba/cheats/codebreaker.c)). The script is not committed. Three checks make the result likely:
+- **We decrypted them** with a Python port of mGBA's CodeBreaker routine (`src/gba/cheats/codebreaker.c`, mGBA commit [`143adf5`](https://github.com/mgba-emu/mgba/blob/143adf5aa2a60c6036810b0cd72445e13d74b0e6/src/gba/cheats/codebreaker.c)), now committed as [`tools/cheats/decrypt_gba_cheats.py`](../../tools/cheats/decrypt_gba_cheats.py) (MPL-2.0, like the code it ports). `python3 tools/cheats/decrypt_gba_cheats.py check` reproduces every decrypted line in this section (CodeBreaker and Action Replay) and exits with status 1 on any mismatch. A reviewer's independent port gave the same results. Three checks make the result likely:
   1. The master code decrypts to `00006A2F 000A` and `1015BC76 0007`, a valid game-ID line and a valid hook line. GBATEK says the flag byte is "usually 0Ah" and the handler slot "usually 7" [GT-CB].
   2. "End Race [Press Select+L]" decrypts to a test of `KEYINPUT` (`0x04000130`) against `0x01FB`. That value means exactly Select and L are held.
   3. The decoded addresses sit next to Dualscreenman's plaintext ones (`0x02032C..`, `0x020340..`, `0x0201A5..`).
-- **Dualscreenman's "GameShark Advance/Action Replay" codes are mislabeled or stored oddly.** With the GSA v1/v2 seeds they decrypt to nonsense (`73D5936C 7EA50D88`). With the Pro Action Replay v3 seeds (GBATEK [GT-PAR3]; mGBA [`parv3.c` L12](https://github.com/mgba-emu/mgba/blob/143adf5aa2a60c6036810b0cd72445e13d74b0e6/src/gba/cheats/parv3.c#L12)) they decrypt to `0201A58E 00000001`, then `04000130 000003FE` and `020340E5 000000C8`. Those are the same addresses and values as the plaintext CodeBreaker codes, so they add no new information.
+- **Dualscreenman's "GameShark Advance/Action Replay" codes are mislabeled or stored oddly.** With the GSA v1/v2 seeds they decrypt to nonsense (`73D5936C 7EA50D88`). With the Pro Action Replay v3 seeds (GBATEK [GT-PAR3]; mGBA [`parv3.c` L12](https://github.com/mgba-emu/mgba/blob/143adf5aa2a60c6036810b0cd72445e13d74b0e6/src/gba/cheats/parv3.c#L12)) they decrypt to `0201A58E 00000001`, then `04000130 000003FE` and `020340E5 000000C8`. These read as plain address/value pairs, the same addresses as the plaintext CodeBreaker codes. Read as real PAR v3 codes they would not address EWRAM: mGBA's PAR v3 parser takes address bits 24–27 from bits 20–23 of the first word ([`_parAddr`, parv3.c L51–53](https://github.com/mgba-emu/mgba/blob/143adf5aa2a60c6036810b0cd72445e13d74b0e6/src/gba/cheats/parv3.c#L51-L53)), so `020340E5` would map to `0x000340E5`. They add one fact: "Bike Speed Boost" writes a concrete value, `0xC8` (200), to `0x020340E5`, where the CodeBreaker "Bike Speed Modifer" leaves the value as `??`. That is the code author's example value, not a known game constant.
 
 ### Decoded meaning
 
@@ -221,7 +244,7 @@ Codes are copied verbatim, in GameHacking's "Original" format.
 | Infinite Nitro | `320340F4 00F0` | Write byte `0xF0` to `0x020340F4` |
 | Unlock Everything | `4203F024 FFFF` / `00000009 0002` | Write halfword `0xFFFF` to `0x0203F024 + n×2`, n = 0..8 (18 bytes, `0x0203F024`–`0x0203F035`) |
 
-### RAM map leads (USA ROM; meanings unverified)
+### RAM map leads (USA ROM, SHA-1 `351414650E6969C270B1339ADA7B3565CE80374C`; meanings **unverified**)
 
 | Address | Width | From | Hypothesis |
 |---|---|---|---|
@@ -229,17 +252,19 @@ Codes are copied verbatim, in GameHacking's "Original" format.
 | `0x0201A55B` | byte | End Race | Race state; 7 = finished? |
 | `0x02032CBA` + n×`0x48`, n = 0..6 | halfword | Always 1st | One field in 7 per-rider records of 72 bytes, probably the CPU riders |
 | `0x02032C8D` | byte | Drive Thru Objects | Collision flag, possibly in the player's record |
-| `0x020340E5` | byte | Bike Speed Modifier/Boost | Player speed or speed cap |
+| `0x020340E5` | byte | Bike Speed Modifier/Boost | Player speed or speed cap. Example value `0xC8` (from the Action Replay version) |
 | `0x020340F4` | byte | Infinite Nitro | Nitro gauge |
 | `0x0203F024`–`0x0203F035` | 18 bytes | Unlock Everything | Unlock bitfield, probably the RAM copy of save data |
 | ROM `0x0815BC76` | — | CodeBreaker hook | Code that runs often (frame loop or interrupt path); a candidate entry point for reverse engineering |
 
 All the RAM addresses are in EWRAM (`0x02000000`–`0x0203FFFF`). Phase 1 should confirm them in mGBA's memory viewer on the USA ROM.
 
-## 7. Open questions only the ROM can answer
+## 7. Open questions for when we have the cartridge
+
+Most need the ROM. A few can be answered from the manual or by playing.
 
 1. Which region is the owner's cart, and does its dump match the No-Intro SHA-1 exactly? Header fields: internal title, maker code, version byte (expected 0).
-2. Does the ROM contain `SRAM_F_V102` and no other save ID string? At what offset? Does gbarecomp report the save type as unknown?
+2. Does the ROM contain `SRAM_F_V102` and no other save ID string? At what offset? Does gbarecomp report the save type as unknown? gbarecomp's `gba_scan` tool prints `save_type`, `save_signature`, and `save_signature_offset` ([tools/gba_scan/main.cpp L69–71](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/tools/gba_scan/main.cpp#L69-L71)), but only for a signature it recognizes; for `SRAM_F_V` we expect `save_type=unknown` and an empty signature, so the string's offset needs a plain byte search. Without `[save] type = "sram"`, does the game check SRAM at boot and complain? Do mGBA (which autodetects SRAM on first access) and gbarecomp behave the same once the config is set? See the porting note in §3.
 3. How are races drawn? Video mode in `DISPCNT`, which layers draw the road, sky, and decor, whether decor is affine OBJ sprites, and whether HBlank DMA or HBlank IRQs rewrite BG registers per scanline.
 4. Does the game render a new frame every VBlank in all modes, including 4-player link races?
 5. How much code is copied to IWRAM or EWRAM and run from there? Is any of it generated or self-modifying?
@@ -250,6 +275,10 @@ All the RAM addresses are in EWRAM (`0x02000000`–`0x0203FFFF`). Phase 1 should
 10. What does the link protocol look like (SIO multiplayer mode, data per frame)? Can gbarecomp's multiplayer runner drive it? We know of that runner only from its file names (`src/runtime/multiplayer_runner.cpp`, `tools/link_session/`).
 11. What is in Ultimate: are the yellow vehicles hover taxis, and what is the locked "?" slot? Is there unused content?
 12. Save layout: does the 18-byte unlock block map to SRAM, and does the save carry a checksum?
+13. Controls: what do L and R do (wheelie, gear shift, nitro), and how are combos entered? Reviewers disagree (§4). Phase 3's input mapping needs the answer. The owner's manual is the cheapest source; confirm in-game.
+14. Is anything tied to the 240-pixel screen width: decor and rider culling, sprite placement, the road projection, HUD layout? This decides how much work widescreen takes (§5).
+15. Which BIOS SWIs does the game call during races, and how often per frame? The third-party list (§5, BIOS calls) comes from 9000 frames with dummy inputs on an unknown ROM revision. Trace it in mGBA during a race.
+16. On a fresh save, which Solo modes are locked (Single Race, Championship, League)? Sources conflict (§4).
 
 ## Sources
 
@@ -261,6 +290,9 @@ All the RAM addresses are in EWRAM (`0x02000000`–`0x0203FFFF`). Phase 1 should
 | LE | libretro-database [`metadat/esrb/…` L6348–6358 @ bf825e3](https://github.com/libretro/libretro-database/blob/bf825e3ec48d43557ad024da6a7b93e512043525/metadat/esrb/Nintendo%20-%20Game%20Boy%20Advance.dat#L6348-L6358) |
 | LM | libretro-database [`metadat/developer/…` L11088–11098 @ bf825e3](https://github.com/libretro/libretro-database/blob/bf825e3ec48d43557ad024da6a7b93e512043525/metadat/developer/Nintendo%20-%20Game%20Boy%20Advance.dat#L11088-L11098) (uses the "Motoracer" spelling) |
 | FG | FlashGBX [`config/db_AGB.json` L2619–2640 @ 2d9682c](https://github.com/lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/FlashGBX/config/db_AGB.json#L2619-L2640); save type table [`CartridgeTypes.py` L96–108](https://github.com/lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/FlashGBX/CartridgeTypes.py#L96-L108) |
+| MAME | MAME software list [`hash/gba.xml` L23653–23683 @ 954def4](https://github.com/mamedev/mame/blob/954def46685cd0276671138fbd032036b1a771fb/hash/gba.xml#L23653-L23683) (entries `motoracr`, Europe, and `motoracru`, USA) |
+| RAH | RetroAchievements/RAHashes [`Mamesl/Nintendo - Game Boy Advance - mamesl - 2024-12-02.txt` L181, L2064 @ cf8a9b4](https://github.com/RetroAchievements/RAHashes/blob/cf8a9b461382b2ff96cc020ba2eff38d84cec452/Mamesl/Nintendo%20-%20Game%20Boy%20Advance%20-%20mamesl%20-%202024-12-02.txt#L181) (MD5s of MAME's GBA software list) |
+| BH | BizHawk [`Assets/gamedb/gamedb_gba.txt` L1772–1773 @ 7c1b40d](https://github.com/TASEmulators/BizHawk/blob/7c1b40df1f48a07fc01d63fbfdf410c7980c4aba/Assets/gamedb/gamedb_gba.txt#L1772-L1773) (the file's last change) |
 | GD | blimjoe/gbdumper-apm32 [`host/gba.txt` L5905–5909 @ 76683a2](https://github.com/blimjoe/gbdumper-apm32/blob/76683a2b0a62efff30a39e856abbd421ff2a22dd/host/gba.txt#L5905-L5909) |
 | HD | Hades emulator [`source/gba/db.c` L1037 @ e12e42d](https://github.com/hades-emu/Hades/blob/e12e42d7c563db9c12092406b06ca015ba938f9f/source/gba/db.c#L1037) |
 | AR | ares [`mia/medium/game-boy-advance.cpp` L126–177 @ 9408cb4](https://github.com/ares-emulator/ares/blob/9408cb43d4948fc3ea6e152a307a34348df3fe04/mia/medium/game-boy-advance.cpp#L126-L177) |
@@ -281,7 +313,7 @@ All the RAM addresses are in EWRAM (`0x02000000`–`0x0203FFFF`). Phase 1 should
 | IGN-P | IGN, Craig Harris, preview, 2002-07-01, [archived](https://web.archive.org/web/20140506173840/http://www.ign.com/articles/2002/07/01/moto-racer-advance) |
 | IGN-R | IGN, Craig Harris, review, 2003-01-13, [archived](https://web.archive.org/web/20140506040857/http://www.ign.com/articles/2003/01/13/moto-racer-advance-2) |
 | GS | GameSpy, Steve Steinberg, review, [archived](https://web.archive.org/web/20051120195920/http://gba.gamespy.com/gameboy-advance/moto-racer-advance/5504p1.html) |
-| GZ | GameZone, review, 2003-01-12, [archived](https://web.archive.org/web/20090120190209/http://gameboy.gamezone.com/gzreviews/r20549.htm) |
+| GZ | GameZone, review, 2003-01-13 (the page's "Review Date"; Wikipedia gives 2003-01-12), [archived](https://web.archive.org/web/20090120190209/http://gameboy.gamezone.com/gzreviews/r20549.htm) |
 | GN | Gaming Nexus, [review](https://www.gamingnexus.com/Article/155/Moto-Racer-Advance) |
 | JV | jeuxvideo.com, review (French), 2002-10-15, [archived](https://web.archive.org/web/20201126102306/https://www.jeuxvideo.com/articles/0000/00002502_test.htm) |
 | GF | GameFAQs, release data, [archived 2018-12-31](https://web.archive.org/web/20181231061445/https://gamefaqs.gamespot.com/gba/582307-moto-racer-advance/data) |
@@ -297,5 +329,6 @@ All the RAM addresses are in EWRAM (`0x02000000`–`0x0203FFFF`). Phase 1 should
 - **The Cutting Room Floor:** no Moto Racer Advance page found by web search. tcrf.net blocks automated requests, and the Wayback Machine has no snapshot of `tcrf.net/Moto_Racer_Advance`. Absence **unverified**.
 - **GameFAQs guides:** none in the Wayback Machine's index of the game's GameFAQs URLs (no `/faqs` path). The live site blocks automated requests.
 - **GameSpot and Nintendo World Report reviews:** not found or not reachable.
-- **RetroAchievements** has a game page (ID 8210), but it blocks automated requests. If it has code notes, they may name more RAM addresses. A lead to check by hand.
+- **RetroAchievements** has a game page, ID 8210 ([archived 2022-03-09](https://web.archive.org/web/20220309175108/https://retroachievements.org/game/8210), titled "Moto Racer Advance (Game Boy Advance)"). That copy shows 0 achievements and no leaderboards, so code notes with RAM addresses are unlikely. The live site blocks automated requests, so a set added since 2022 is not ruled out.
+- **Data Crystal:** the Wayback Machine has no capture of a `Moto_Racer_Advance` or `Motoracer_Advance` page on `datacrystal.romhacking.net` or `datacrystal.tcrf.net`. Absence **unverified** (live site not checked).
 - **Live MobyGames:** blocks automated requests. Archived copies of the older URL scheme were used instead.

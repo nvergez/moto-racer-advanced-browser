@@ -21,6 +21,7 @@ generated/
 build/
 dist/
 node_modules/
+__pycache__/
 
 # --- OS / editor ---
 .DS_Store
