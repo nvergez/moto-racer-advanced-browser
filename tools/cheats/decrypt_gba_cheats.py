@@ -9,18 +9,28 @@
 #   src/gba/cheats/gameshark.c    GBACheatDecryptGameShark (TEA), GSA v1/v2 seeds (L13)
 #   src/gba/cheats/parv3.c        Pro Action Replay v3 seeds (L12)
 # Only the decryption is ported. Interpreting the decrypted lines is left to
-# the reader (see GBATEK's cheat code chapters).
+# the reader (see GBATEK's cheat code chapters). The CodeBreaker game-ID
+# checksum (cb_checksum) is not in mGBA; it is written from the formula on
+# GBATEK's "GBA Cheat Codes - Codebreaker/Xploder" page.
 """Decrypt GBA CodeBreaker and GameShark Advance / Action Replay cheat codes.
 
 Reproduces the decoded cheat codes in docs/research/game-facts.md section 6.
 Standard library only, Python 3.9+. Contains no ROM data: the inputs are the
-published cheat codes themselves.
+published cheat codes themselves. Only `cbcrc` reads a ROM, from a file you
+supply; it writes nothing.
 
 Usage:
   python3 tools/cheats/decrypt_gba_cheats.py check
       Decrypt the Moto Racer Advance (USA) codes quoted in game-facts.md and
-      compare them with the decoded values recorded there. Exit status 1 on
-      any mismatch.
+      compare the output with copies of the decoded values, kept in this
+      script (CB_EXPECTED, TEA_EXPECTED). Then check that each of those codes
+      and decoded values still appears in game-facts.md, so an edit to either
+      side is caught. Also self-tests cb_checksum. Exit status 1 on any
+      mismatch.
+  python3 tools/cheats/decrypt_gba_cheats.py cbcrc ROM [--expect HEX]
+      CodeBreaker game-ID checksum of the first 64 KiB of ROM (GBATEK's
+      formula). Compares it with HEX, by default 6A2F, the value in the
+      decrypted USA master code. Exit status 1 if it differs.
   python3 tools/cheats/decrypt_gba_cheats.py cb MASTER [LINE ...]
       CodeBreaker: MASTER is the type-9 line that seeds the encryption
       (12 hex digits, spaces allowed, e.g. "91121668 5608"). Every LINE is
@@ -32,9 +42,14 @@ Usage:
 """
 
 import argparse
+import binascii
+import os
 import sys
 
 M32 = 0xFFFFFFFF
+
+DOC_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        os.pardir, os.pardir, "docs", "research", "game-facts.md")
 
 # gameshark.c L13 @ 143adf5
 GSA_SEEDS = (0x09F4FBBD, 0x9681884A, 0x352027E9, 0xF3DEE5A7)
@@ -221,6 +236,29 @@ def decrypt_cb(master, lines):
     return [fmt_cb(*cb.decrypt(*parse_cb(line))) for line in lines]
 
 
+CB_CHECKSUM_SIZE = 0x10000  # "first 64Kbytes of cartridge"
+
+
+def _cb_crc(data):
+    """The checksum loop from GBATEK, using unsigned 16-bit values."""
+    crc = 0xFFFF
+    for byte in data:
+        x = (byte ^ (crc >> 8)) & 0xFFFF
+        x ^= x >> 4
+        crc = ((crc << 8) ^ (x * 0x1001) ^ (x * 0x20)) & 0xFFFF
+    return crc
+
+
+def cb_checksum(rom):
+    """CodeBreaker game-ID checksum ('xxxx' in '0000xxxx 000y') of a ROM image.
+
+    GBATEK: computed over the first 64 KiB; no$gba pads with FFh if the ROM is
+    smaller.
+    """
+    head = bytes(rom[:CB_CHECKSUM_SIZE])
+    return _cb_crc(head + b"\xFF" * (CB_CHECKSUM_SIZE - len(head)))
+
+
 # Codes as listed by GameHacking.org game 5425 (Motoracer Advance (USA),
 # CRC32 2FDBE7A8), Wayback snapshot 20260617202426, with the decoded values
 # recorded in docs/research/game-facts.md section 6.
@@ -245,6 +283,35 @@ TEA_EXPECTED = [
     ("Always in First Place (AR)", "gsa", "1378A3AB 53645017", "73D5936C 7EA50D88"),
 ]
 SEEDS = {"gsa": GSA_SEEDS, "par3": PAR3_SEEDS}
+# The checksum in the decrypted USA master code line "00006A2F 000A".
+USA_CB_CHECKSUM = 0x6A2F
+
+
+def _compact(text):
+    return "".join(text.split()).upper()
+
+
+def check_doc_mentions(path=DOC_PATH):
+    """Count the expected codes and decodes that no longer appear in the doc.
+
+    Whitespace is ignored, since the doc writes MadCatz's codes as one
+    12-digit group and the decoded lines with a space.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            doc = _compact(handle.read())
+    except OSError as err:
+        print("FAIL cannot read %s: %s" % (path, err))
+        return 1
+    values = [CB_MASTER]
+    values += [v for _, line, expected in CB_EXPECTED for v in (line, expected)]
+    values += [v for _, _, line, expected in TEA_EXPECTED for v in (line, expected)]
+    missing = [v for v in values if _compact(v) not in doc]
+    print("%s: %d of %d codes and decoded values found"
+          % (os.path.basename(path), len(values) - len(missing), len(values)))
+    for value in missing:
+        print("  FAIL not in %s: %s" % (os.path.normpath(path), value))
+    return len(missing)
 
 
 def check():
@@ -254,6 +321,12 @@ def check():
             if tea_decrypt(*tea_encrypt(pair[0], pair[1], seeds), seeds) != pair:
                 print("FAIL TEA round trip", pair)
                 failures += 1
+    # GBATEK's loop is CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF), which
+    # binascii.crc_hqx computes independently; 0x29B1 is its check value.
+    sample = bytes((i * 37 + 11) & 0xFF for i in range(4096))
+    if _cb_crc(b"123456789") != 0x29B1 or _cb_crc(sample) != binascii.crc_hqx(sample, 0xFFFF):
+        print("FAIL CodeBreaker checksum self-test")
+        failures += 1
     decoded = decrypt_cb(CB_MASTER, [line for _, line, _ in CB_EXPECTED])
     print("CodeBreaker, master %s" % CB_MASTER)
     for (name, line, expected), got in zip(CB_EXPECTED, decoded):
@@ -266,14 +339,29 @@ def check():
         status = "ok" if got == expected else "FAIL (expected %s)" % expected
         failures += got != expected
         print("  %-28s %-4s %s -> %s  %s" % (name, seeds, line, got, status))
+    failures += check_doc_mentions()
     print("%d mismatch(es)" % failures)
     return 1 if failures else 0
+
+
+def cbcrc(path, expect):
+    with open(path, "rb") as handle:
+        head = handle.read(CB_CHECKSUM_SIZE)
+    got = cb_checksum(head)
+    padded = "" if len(head) == CB_CHECKSUM_SIZE else " (file shorter than 64 KiB, padded with FFh)"
+    print("CodeBreaker checksum of the first 64 KiB: %04X%s" % (got, padded))
+    print("expected %04X: %s" % (expect, "match" if got == expect else "MISMATCH"))
+    return 0 if got == expect else 1
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("check", help="reproduce the decodes in game-facts.md")
+    p_crc = sub.add_parser("cbcrc", help="CodeBreaker game-ID checksum of a ROM file")
+    p_crc.add_argument("rom")
+    p_crc.add_argument("--expect", type=lambda s: int(s, 16), default=USA_CB_CHECKSUM,
+                       help="expected checksum in hex (default %04X)" % USA_CB_CHECKSUM)
     p_cb = sub.add_parser("cb", help="decrypt CodeBreaker lines")
     p_cb.add_argument("master")
     p_cb.add_argument("lines", nargs="*")
@@ -284,6 +372,11 @@ def main(argv=None):
 
     if args.command in (None, "check"):
         return check()
+    if args.command == "cbcrc":
+        try:
+            return cbcrc(args.rom, args.expect)
+        except OSError as err:
+            parser.error("cannot read %s: %s" % (args.rom, err.strerror))
     if args.command == "cb":
         for line, got in zip(args.lines, decrypt_cb(args.master, args.lines)):
             print("%s -> %s" % (line, got))
