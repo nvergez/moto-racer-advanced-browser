@@ -1,0 +1,42 @@
+# Same path as boot_to_race.txt (Solo > Single race > Cross > Kenya > Coolfix 250 >
+# Auto), then keeps A held until the 3-lap race is over. Open-loop: only one
+# RIGHT input at the first bend. With a fresh save the bike finishes in 8th
+# place (race time 4'54"36); the race display (DISPCNT 0x1741) ends at frame
+# 21788, the front end takes over at 21806 and shows the "Try again" screen
+# (mode 4) from 21813. This run writes no SRAM: the post-race save needs a
+# better result. Fresh empty save; frame numbers as in boot_to_race.txt.
+
+until 2450
+tap START                  # -> language select (English preselected)
+wait 60
+tap A                      # English -> main menu
+wait 180
+tap A                      # solo
+wait 120
+tap A                      # single race
+wait 90
+tap A                      # cross -> track select (Kenya)
+wait 90
+tap A                      # Kenya -> bike select
+wait 90
+tap A                      # Coolfix 250 -> gearbox
+wait 90
+tap A                      # Auto -> race loads
+until 3608
+mark race_go
+hold A                     # accelerate for the whole race
+until 3950
+hold RIGHT                 # first right-hand bend
+wait 70
+release RIGHT
+until 12000
+shot race_mid
+until 21700
+mark race_end_approach
+shot race_end_approach
+until 23000
+mark after_race
+shot after_race
+until 25000
+shot end
+end

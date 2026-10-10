@@ -1,0 +1,23 @@
+# Open the multiplayer screen with no link partner (P1-P4 "Not connected") and
+# stay there for a while, then go back to the main menu. The lobby is the only
+# place CpuSet (SWI 0x0B) was seen running (about 5 calls per frame).
+# Fresh empty save.
+
+until 2450
+tap START
+wait 60
+tap A                      # English -> main menu
+wait 180
+shot main_menu
+tap DOWN                   # -> multiplayer
+wait 30
+tap A
+wait 180
+shot multiplayer
+tap A
+wait 300
+shot multiplayer_waiting
+tap B                      # back to the main menu (a second B would return to the title)
+wait 120
+shot back_to_main_menu
+end

@@ -1,0 +1,39 @@
+# Single race in Traffic mode (Moscow track, the only one unlocked on a fresh
+# save): title > English > Solo > Single race > DOWN DOWN (Traffic) > track >
+# bike > Auto. A is held from frame 3600; START pauses at 4200 and resumes.
+# Fresh empty save.
+
+until 2450
+tap START
+wait 60
+tap A                      # English -> main menu
+wait 180
+tap A                      # solo
+wait 120
+tap A                      # single race
+wait 90
+shot single_race_menu
+tap DOWN 2                 # cross -> traffic
+wait 30
+shot single_race_menu_traffic
+tap A                      # -> track select
+wait 90
+shot track_select
+tap A                      # -> bike select
+wait 90
+tap A                      # -> gearbox
+wait 90
+tap A                      # Auto -> race loads
+until 3600
+shot pre_go
+hold A
+until 4200
+shot r4200
+tap START                  # pause
+wait 30
+shot pause
+tap START                  # resume
+wait 60
+until 6000
+shot r6000
+end
