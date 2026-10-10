@@ -3,7 +3,10 @@
 # submodule and the one nested submodule the build needs, apply our local
 # patches, and report which private inputs are still missing.
 #
-#   scripts/setup.sh [--with-netplay]
+#   scripts/setup.sh [--with-netplay] [--rom PATH] [--bios PATH]
+#
+# --rom and --bios only change which files the final report checks; the
+# build scripts take the same options.
 #
 # Nested submodules of gbarecomp:
 #   external/arm-recomp-core          always (the build needs it)
@@ -17,12 +20,15 @@ set -euo pipefail
 . "$(dirname "$0")/lib/common.sh"
 
 NETPLAY=0
-for arg in "$@"; do
-  case "$arg" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --with-netplay) NETPLAY=1 ;;
-    -h | --help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) die "unknown option: $arg" ;;
+    --rom | --bios) [ $# -ge 2 ] || die "$1 needs a path"; set_input "$1" "$2"; shift ;;
+    --rom=* | --bios=*) set_input "${1%%=*}" "${1#*=}" ;;
+    -h | --help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown option: $1" ;;
   esac
+  shift
 done
 
 missing=0

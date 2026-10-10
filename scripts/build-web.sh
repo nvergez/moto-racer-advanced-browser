@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Build the browser bundle with gbarecomp's packaging/web/build_web.sh.
 #
-#   scripts/build-web.sh [--no-regen] [--embed-private-rom] [--dev]
+#   scripts/build-web.sh [--rom PATH] [--bios PATH] [--no-regen]
+#                        [--embed-private-rom] [--dev]
 #
+#   --rom PATH           the ROM (default roms/moto-racer-advance.gba)
+#   --bios PATH          the 16 KiB GBA BIOS dump (default bios/gba_bios.bin)
 #   --no-regen           reuse generated/ instead of running scripts/regen.sh
 #   --embed-private-rom  copy the ROM and the BIOS into the bundle (local
 #                        testing only; the page then needs no file picker)
@@ -20,13 +23,16 @@ set -euo pipefail
 
 REGEN=1
 PASS=()
-for arg in "$@"; do
-  case "$arg" in
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --rom | --bios) [ $# -ge 2 ] || die "$1 needs a path"; set_input "$1" "$2"; shift ;;
+    --rom=* | --bios=*) set_input "${1%%=*}" "${1#*=}" ;;
     --no-regen) REGEN=0 ;;
-    --embed-private-rom | --dev) PASS+=("$arg") ;;
-    -h | --help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) die "unknown option: $arg" ;;
+    --embed-private-rom | --dev) PASS+=("$1") ;;
+    -h | --help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown option: $1" ;;
   esac
+  shift
 done
 
 # Fail on missing inputs before spending time on anything else.

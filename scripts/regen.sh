@@ -2,21 +2,26 @@
 # Regenerate the recompiled C++ from the BIOS dump and the ROM. This is the
 # only generation step: the native and the web builds compile the same output.
 #
-#   scripts/regen.sh
+#   scripts/regen.sh [--rom PATH] [--bios PATH]
 #
-# Needs roms/moto-racer-advance.gba, bios/gba_bios.bin and a filled-in
-# game.toml (see scripts/lib/common.sh for the environment overrides).
+# Needs the ROM (default roms/moto-racer-advance.gba), the BIOS dump (default
+# bios/gba_bios.bin) and game.toml (see scripts/lib/common.sh for the
+# environment overrides).
 # Writes generated/bios and generated/game (both gitignored: they are
 # translations of copyrighted code) and logs to build/logs/.
 set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 . "$(dirname "$0")/lib/common.sh"
 
-case "${1:-}" in
-  "") ;;
-  -h | --help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-  *) die "unknown option: $1" ;;
-esac
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --rom | --bios) [ $# -ge 2 ] || die "$1 needs a path"; set_input "$1" "$2"; shift ;;
+    --rom=* | --bios=*) set_input "${1%%=*}" "${1#*=}" ;;
+    -h | --help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
+  shift
+done
 
 verify_inputs
 build_tools

@@ -2,7 +2,9 @@
 # Shared helpers for scripts/*.sh. Source this file; do not run it.
 #
 # Every path can be overridden from the environment, which is how the smoke
-# test and CI reuse these helpers without the game's ROM or BIOS:
+# test and CI reuse these helpers without the game's ROM or BIOS. The scripts
+# that need the private inputs also take --rom PATH and --bios PATH, which
+# set the first two:
 #   MRA_ROM            ROM to recompile          (roms/moto-racer-advance.gba)
 #   MRA_BIOS           16 KiB GBA BIOS dump      (bios/gba_bios.bin)
 #   MRA_GAME_CONFIG    game config               (game.toml)
@@ -115,6 +117,23 @@ toml_get() {
     }' "$1"
 }
 
+# set_input <--rom|--bios> <path>: handle the --rom/--bios options. Exports the
+# result so the scripts these call (build-native.sh runs regen.sh) see it too.
+set_input() {
+  local path=$2
+  case "$path" in
+    "") die "$1 needs a path" ;;
+    /*) ;;
+    *) path="$PWD/$path" ;;
+  esac
+  case "$1" in
+    --rom) MRA_ROM=$path ;;
+    --bios) MRA_BIOS=$path ;;
+    *) die "set_input: unknown option $1" ;;
+  esac
+  export MRA_ROM MRA_BIOS
+}
+
 require_submodule() {
   if [ ! -f "$GBARECOMP_DIR/CMakeLists.txt" ] ||
      [ ! -f "$GBARECOMP_DIR/external/arm-recomp-core/cmake/ArmRecompCore.cmake" ]; then
@@ -128,13 +147,15 @@ require_inputs() {
   if [ ! -f "$MRA_ROM" ]; then
     problems="$problems
   - ROM not found: $(rel "$MRA_ROM")
-    Dump Moto Racer Advance from a cartridge you own and copy the dump there."
+    Dump Moto Racer Advance (Europe) from a cartridge you own and copy the
+    dump there, or pass --rom PATH."
   fi
   if [ ! -f "$MRA_BIOS" ]; then
     problems="$problems
   - GBA BIOS not found: $(rel "$MRA_BIOS")
-    Dump it from GBA-family hardware you own and copy it there. gbarecomp
-    recompiles it at build time and loads it at run time."
+    Dump it from GBA-family hardware you own and copy it there, or pass
+    --bios PATH. gbarecomp recompiles it at build time and loads it at run
+    time."
   else
     size=$(file_size "$MRA_BIOS")
     if [ "$size" != "$GBA_BIOS_SIZE" ]; then
@@ -144,7 +165,7 @@ require_inputs() {
   fi
   if [ -n "$problems" ]; then
     die "this step needs the private inputs, which are not in place:$problems
-  Both paths are gitignored. Never download either file.
+  roms/ and bios/ are gitignored. Never download either file.
   See docs/toolchain.md, \"Inputs\"."
   fi
 }

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Build the native (macOS/Linux) executable from the ROM and the BIOS dump.
 #
-#   scripts/build-native.sh [--no-regen] [--lle] [--debug]
+#   scripts/build-native.sh [--rom PATH] [--bios PATH] [--no-regen] [--lle] [--debug]
 #
+#   --rom PATH  the ROM (default roms/moto-racer-advance.gba)
+#   --bios PATH the 16 KiB GBA BIOS dump (default bios/gba_bios.bin)
 #   --no-regen  reuse generated/ instead of running scripts/regen.sh first
 #   --lle       per-pixel (LLE) scanline renderer instead of gbarecomp's HLE
 #               default, into build/native-lle, for frame comparisons
@@ -16,14 +18,17 @@ set -euo pipefail
 REGEN=1
 SCANLINE=HLE
 BUILD_TYPE=Release
-for arg in "$@"; do
-  case "$arg" in
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --rom | --bios) [ $# -ge 2 ] || die "$1 needs a path"; set_input "$1" "$2"; shift ;;
+    --rom=* | --bios=*) set_input "${1%%=*}" "${1#*=}" ;;
     --no-regen) REGEN=0 ;;
     --lle) SCANLINE=LLE ;;
     --debug) BUILD_TYPE=Debug ;;
-    -h | --help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) die "unknown option: $arg" ;;
+    -h | --help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown option: $1" ;;
   esac
+  shift
 done
 
 if [ "$REGEN" = 1 ]; then
@@ -63,9 +68,11 @@ cmake --build "$build_dir" --target MotoRacerAdvanceRecomp --parallel "$(job_cou
 
 info "Built $(rel "$build_dir")/MotoRacerAdvanceRecomp"
 cat << EOF
-Headless run of 1800 frames (30 s of game time), healing off, fresh save:
+Headless run to the title screen (2700 frames), runtime healing off, fresh
+save, last frame kept as a PNG under build/ (it shows the game: never commit it):
   cd $build_dir && GBARECOMP_SELFHEAL_RECOMPILE=0 ./MotoRacerAdvanceRecomp \\
     --bios $MRA_BIOS --rom $MRA_ROM \\
-    --frames 1800 --no-window --save-path $MRA_BUILD_DIR/saves/smoke.sav \\
-    $MRA_GAME_CONFIG
+    --frames 2700 --no-window --save-path $MRA_BUILD_DIR/saves/smoke.sav \\
+    --dump-png $build_dir/frame-2700.png $MRA_GAME_CONFIG
+Then read the coverage banner it prints (docs/toolchain.md, "First real-ROM smoke test").
 EOF
