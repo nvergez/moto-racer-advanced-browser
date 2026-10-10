@@ -1,34 +1,35 @@
-# Moto Racer Advance: gbarecomp game config (scaffold).
+# Moto Racer Advance: gbarecomp game config.
 #
 # One file read by two parsers: gba_recompile (toml++; [program], [identity]
 # and the [[...]] arrays) and the gbarecomp runtime (a line-based reader for
 # [game], [bios], [rom], [save], [video], [audio]; see
-# docs/research/gbarecomp-integration.md, section 2).
+# docs/research/gbarecomp-integration.md, section 2). The runtime drops
+# everything after '#' on a line, so no value may contain '#'.
 #
-# Every "TBD" below depends on the ROM, which nobody has dumped yet. The build
-# scripts refuse to run while any "TBD" value is left. Fill them in from the
-# owner's dump (docs/toolchain.md, "Filling in game.toml"); never copy values
-# from the internet. The runtime treats "TBD" as empty.
+# Pinned ROM revision: "Moto Racer Advance (Europe) (En,Fr,De,Es,It)",
+# SHA-1 b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0. Every value below was read
+# from the owner's dump on 2026-10-10 (commands in docs/toolchain.md, "The
+# game config") and matches the No-Intro entry recorded in the game-facts
+# research (PR #4): SHA-1, MD5, CRC32 8CB19DA0, 4194304 bytes, serial A9MP.
+# The USA cartridge (A9ME) is a different binary: this config refuses it.
 #
 # Rules for later edits: no tool ever writes this file. Every [[extra_func]],
 # [[jump_table]], [[code_copy]], [[data_range]] entry is reviewed by a human
 # and carries a `note` with its evidence (ROM SHA-1 and how it was found).
+# The build scripts refuse to run while any value is still "TBD".
 
 [game]
 name = "Moto Racer Advance"
 short_name = "moto_racer_advance"
 
 [program]
-# TODO(rom): region, from the header and the cartridge label.
-name = "TBD"
-# TODO(rom): 4-character game code, from `gba_scan` (game_code=). The
-# game-facts research (PR #4) lists A9ME (USA) and A9MP (Europe).
-id = "TBD"
+name = "Moto Racer Advance (Europe) (En,Fr,De,Es,It)"
+# Header game code (gba_scan: game_code=A9MP, title MOTORACERADV, maker 41).
+id = "A9MP"
 load_address = 0x08000000
-# TODO(rom): ROM size in bytes as hex, e.g. 0x00400000 for 4 MiB.
-# `stat -f %z roms/moto-racer-advance.gba`; it must match the file exactly.
-size = "TBD"
-# The header branch at 0x08000000, as MKSC and MMZ use.
+# 4194304 bytes (stat -f %z; gba_scan: rom_size=0x400000).
+size = 0x00400000
+# The header branch at 0x08000000 (gba_scan: entry_target=0x080000c0).
 entry_pc = 0x08000000
 # Evidence-only discovery: no heuristic harvest of code pointers from literal
 # pools (both reference games turn it off). An A/B run with it on is a
@@ -37,30 +38,46 @@ speculative_literal_harvest = false
 codegen_shards = 16
 
 [identity]
-# TODO(rom): `shasum -a 1 roms/moto-racer-advance.gba`. gba_recompile aborts
-# when the ROM does not match. Keep it equal to [rom].sha1 below. Compare it
-# with the known dumps in the game-facts research (PR #4) before trusting it.
-sha1 = "TBD"
-# TODO(rom): `md5 -q roms/moto-racer-advance.gba`.
-md5 = "TBD"
+# shasum -a 1 / md5 -q of the dump. gba_recompile aborts on any other ROM.
+# Keep sha1 equal to [rom].sha1 below.
+sha1 = "b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0"
+md5 = "d3b2ab65c92e18df21788c4b30128041"
 
 [bios]
 # Paths are relative to this file. The dump never enters git (bios/ is ignored).
 path = "bios/gba_bios.bin"
 sha1 = "300c20df6731a33952ded8c436f7f186d25d3492"
 hle = false
+# Keep the real boot intro: with skip_intro, gbarecomp leaves the BG2/BG3
+# affine matrices at zero, and this game draws its races in mode 1 affine
+# (docs/toolchain.md, known issue 6).
 
 [rom]
 path = "roms/moto-racer-advance.gba"
-# TODO(rom): same value as [identity].sha1.
-sha1 = "TBD"
+sha1 = "b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0"
 
-# [save] is left out until the save type is confirmed on the dump. Without it
-# the runtime detects the type from the save library ID string that `gba_scan`
-# also reports (save_type=). The game-facts research (PR #4) expects 32 KiB
-# SRAM with the ID string SRAM_F_V102, which that scan does not recognize, so
-# this game will most likely need type = "sram" here (unverified until the
-# owner's dump is checked with a byte search and in mGBA).
-# [save]
-# type = "TBD"   # sram | eeprom | flash512 | flash1m
-# size = "TBD"   # bytes: sram 32768, eeprom 512 or 8192, flash512 65536, flash1m 131072
+[save]
+# 32 KiB battery-backed SRAM. The ROM carries Nintendo's save library ID
+# string "SRAM_F_V102" (at ROM offset 0x1C6D0 in this dump, found with a byte
+# search), and the game reads 0x0E000000 byte by byte during boot. gbarecomp's
+# detector only knows the "SRAM_V" prefix, so gba_scan reports
+# save_type=unknown: without this section the game would find no save chip.
+# 32768 is the only size gbarecomp accepts for sram.
+type = "sram"
+size = 32768
+
+# TODO(phase1): IWRAM code images. The game copies ARM code from ROM to IWRAM
+# 0x03000000 and runs most of a race from there. Two different images share
+# that base address: the front end's (ROM 0x081596FC, 0x834 bytes) and the
+# race program's (ROM 0x083F6820, 0x49C4 bytes). [[code_copy]] maps one
+# runtime range to one source, so declaring both needs a decision on how
+# recompiled dispatch tells the overlays apart. Until then they are left
+# out, and IWRAM code reaches gbarecomp's interpreter and self-heal path
+# (docs/toolchain.md, "First real-ROM smoke test").
+#
+# TODO(phase1): the race program is a second, separately linked program
+# entered through 0x08159F30. Seed it, and anything else found only at run
+# time, as reviewed [[extra_func]] entries from the runtime's miss reports.
+#
+# TODO(phase1): [[data_range]] entries for large data and compressed assets,
+# if discovery ever decodes them as code.
