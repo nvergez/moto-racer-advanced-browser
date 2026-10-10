@@ -73,7 +73,7 @@ scripts/test-engine.sh
 
 `scripts/test-engine.sh` configures gbarecomp in `build/gbarecomp` (Release, Ninja), builds every target and runs `ctest`. Expected: `100% tests passed out of 52`, or `out of 50` without the test ROMs. Without Node, the ten browser JS tests are not registered. On the M4 Pro: configure about 4 s, build about 7 s (56 s of CPU time), tests about 10 s.
 
-The build prints about 140 compiler warnings from gbarecomp's own sources, mostly `-Wmismatched-tags`, and the macOS linker warns `ignoring duplicate libraries`. Neither is an error.
+With the test ROMs fetched first, the build prints about 520 compiler warnings (524 in a fresh build tree on the M4 Pro, summing the `N warnings generated` lines): 296 `-Wunused-but-set-variable` and 196 `-Wunused-variable`, nearly all in generated test code. 394 come from the recompiled test ROMs (`build/gbarecomp/test_rom_{arm,thumb}_gen`, built only when the test ROMs are present) and 92 from `codegen_tests_generated`. The other 38 come from gbarecomp's own sources and tests and from toml++. The macOS linker also warns `ignoring duplicate libraries`. None of these is an error.
 
 By hand, without the scripts:
 
@@ -148,14 +148,15 @@ What it does:
 1. `scripts/regen.sh`: checks both inputs against `game.toml` (hashes, sizes, no placeholder left), builds `gba_recompile` and `gba_scan`, recompiles the BIOS into `generated/bios` with `gbarecomp/bios/gba_bios.toml`, and the ROM into `generated/game` with `--max-functions 65536`. It fails if the number of emitted functions reaches that cap, because `gba_recompile` drops seeds past it without a warning. Logs: `build/logs/recompile-bios.log`, `build/logs/recompile.log`.
 2. Configures the top-level `CMakeLists.txt` into `build/native` and builds `MotoRacerAdvanceRecomp`. Configuring fails unless the recompiled BIOS is picked up. The executable links through gbarecomp's `target_link_gbarecomp_runtime_stack()`, gets a 16 MiB main-thread stack on macOS, and compiles the generated shards at `-O1 -g0` as MKSC does.
 
-`generated/` is gitignored: it is a translation of copyrighted code. The script prints a headless run command at the end, which runs to the title screen with runtime healing off:
+`generated/` is gitignored: it is a translation of copyrighted code. The script prints a headless run command at the end, which runs to the title screen with runtime healing off. With the default paths it is this, which the script prints with absolute paths, quoted for the shell:
 
 ```sh
+rm -f build/saves/smoke.sav   # start from no save
 cd build/native
 GBARECOMP_SELFHEAL_RECOMPILE=0 ./MotoRacerAdvanceRecomp \
   --bios ../../bios/gba_bios.bin --rom ../../roms/moto-racer-advance.gba \
   --frames 2700 --no-window --save-path ../saves/smoke.sav \
-  --dump-png ../frame-2700.png ../../game.toml
+  --dump-png frame-2700.png ../../game.toml
 ```
 
 Run from `build/native` so the runtime's working-directory files (`recomp_cache/`, `recomp_coverage_A9MP.json`, `recomp_master_misses_A9MP.toml.frag`, `bios.cfg`, `rom.cfg`) stay under `build/`. At exit the runtime prints a coverage banner (`self_heal_coverage=... dispatch_misses=... interpreted_insns=...`); read it after every run. `--dump-png` writes the last frame, which is a picture of the game: keep it under `build/`. Phase 1 discovery runs need more care with saves and coverage files; the integration study's playbook (docs/research/gbarecomp-integration.md, §10, PR #2) covers them.
@@ -170,9 +171,9 @@ scripts/serve-web.sh [port]        # http://127.0.0.1:8080/ by default
 
 `scripts/build-web.sh` runs gbarecomp's `packaging/web/build_web.sh` with `web/game-lib` as the project, so the browser compiles the same `generated/game` as the native build. It keeps every build product under `build/` (`build/web/runtime`, `build/web/game`) and writes the bundle to `build/web-PRIVATE/`. `--embed-private-rom` copies the ROM and the BIOS into the bundle so the page needs no file picker; `--dev` lets a page on localhost take `?args=` and `?env=`. `scripts/serve-web.sh` uses gbarecomp's `serve.py`, which listens on 127.0.0.1 only and sends the COOP/COEP headers that pthreads need.
 
-**Do not publish `build/web-PRIVATE/`**, with or without `--embed-private-rom`: `game.wasm` is compiled from the recompiled ROM and the recompiled Nintendo BIOS. Whether anything is ever published is the owner's decision (integration study, §5.6). `web-PRIVATE/` is gitignored wherever it appears.
+**Do not publish `build/web-PRIVATE/`**, with or without `--embed-private-rom`: `game.wasm` is compiled from the recompiled ROM and the recompiled Nintendo BIOS. Whether anything is ever published is the owner's decision (integration study, §5.6, PR #2). `web-PRIVATE/` is gitignored wherever it appears.
 
-The stock page links gbarecomp's generic `main()`, so no game-owned code reaches the browser yet. That will need our own link step (Phase 3); `tests/smoke/CMakeLists.txt` already links the browser host that way, with `gbarecomp_web_host_link_options()`.
+With the game, the page currently stops at the title screen (known issue 13). The stock page links gbarecomp's generic `main()`, so no game-owned code reaches the browser yet. That will need our own link step (Phase 3); `tests/smoke/CMakeLists.txt` already links the browser host that way, with `gbarecomp_web_host_link_options()`.
 
 ## How the game-dependent scripts were verified
 
@@ -189,7 +190,7 @@ That run used neither the retail BIOS nor the game ROM; the next section does, n
 A time-boxed session (about 45 minutes) on 2026-10-10, to see how far the scaffold gets with the real inputs. Outcomes only: the generated code, logs, miss reports and screenshots stay out of git, in ignored directories or outside the repository.
 
 - **Inputs**: the owner's dump of the Europe ROM (SHA-1 `b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0`, `A9MP`) and the retail BIOS (SHA-1 `300c20df6731a33952ded8c436f7f186d25d3492`), passed with `--rom` and `--bios`. gbarecomp at `5e89943` with `patches/gbarecomp/` applied. M4 Pro, macOS 26.5.2, Apple clang 21.
-- **Reference**: libmgba 0.10.5 through a small headless harness (not in this repository), real BIOS boot, no input, screenshots at the same frame numbers. Frames were compared pixel by pixel after reducing both to 5 bits per channel, because the two tools expand GBA colors to 8 bits differently.
+- **Reference**: libmgba 0.10.5 through a small headless harness, real BIOS boot, no input, screenshots at the same frame numbers and in windows around them. Frames were compared pixel by pixel after reducing both to 5 bits per channel, because the two tools expand GBA colors to 8 bits differently. **This is a local check: it cannot be repeated from this repository alone.** The harness exists only as a binary on the machine used for this work, and neither it nor the comparison script is committed. Stock mGBA 0.10.5 can capture comparable frames with its Lua scripting (Tools > Scripting...): a `callbacks:add("frame", ...)` handler that calls `emu:screenshot(path)` when `emu:currentFrame()` reaches the wanted frame (all three exist in `src/core/scripting.c`, `src/core/thread.c` and `src/script/stdlib.c` at tag 0.10.5), with the BIOS intro enabled. That route was not tried, and whether its frame numbers line up with the harness's is **unverified**.
 - **No input was given.** Everything below is the boot, the intro and the title screen's attract loop.
 
 ### Generation and build
@@ -204,17 +205,27 @@ A time-boxed session (about 45 minutes) on 2026-10-10, to see how far the scaffo
 
 This is the command `scripts/build-native.sh` prints (`GBARECOMP_SELFHEAL_RECOMPILE=0`): every dispatch miss is run by the interpreter, nothing is compiled at run time, and the banner reports coverage honestly.
 
-**It boots through the real BIOS intro to the title screen.** The runtime starts with `bios_boot=LLE (real intro)` and `save_config source=game-config type=SRAM size=32768`. Last frame of each run against mGBA at the same frame:
+**It boots through the real BIOS intro to the title screen.** The runtime starts with `bios_boot=LLE (real intro)` and `save_config source=game-config type=SRAM size=32768`. Last frame of each run against mGBA at the same frame, and against every mGBA frame captured around it (frames 170-330, 440-460, 1290-1400, 1795-1810, 2445-2455 and 2695-2712). The mGBA windows and gbarecomp's frames 180 to 320 come from two later sessions the same day (the review of this branch and its fixes), each with a fresh build of the branch; the 240- and 1300-frame runs gave byte-identical PNGs in the first and the last session.
 
-| Frame | Screen | Pixels that differ from mGBA |
-|---|---|---|
-| 240 | BIOS logo | 3,622 of 38,400: mGBA is mid-fade, gbarecomp shows the logo at full brightness (cause **unverified**) |
-| 450 | License screen | 0 |
-| 1800 | Intro animation | 0 |
-| 2450 | Title, "Press start" | 0 |
-| 2700 | Title, "Press start" | 0 |
+| Frame | Screen | Pixels that differ from mGBA's same frame (of 38,400) | mGBA frames it matches exactly |
+|---|---|---|---|
+| 180 | BIOS logo, appearing | 2,750 | 181 |
+| 220, 240, 260 | BIOS logo | 3,622 in each: gbarecomp keeps the logo at full brightness while mGBA fades it | 216-219, the logo before mGBA's fade starts |
+| 270 | White, end of the BIOS fade | 0 | 250-279 |
+| 280 | Black | 24,240 | 281-296 |
+| 300 | License screen, fading in | 2,034, each off by one 5-bit step | none |
+| 320 | License screen, fading in | 2,652, off by one or two steps | none |
+| 450 | License screen | 0 | 440-460, all captured |
+| 1391 (end of the 1300-frame run) | Publisher logo, fading out | 36,305, each off by one step | none |
+| 1800 | Intro animation | 0 | 1799-1805 |
+| 2450, 2700 | Title, "Press start" | 0 | 2445-2455 and 2695-2712, all captured |
 
-2,700 frames took 10.5 s wall; headless runs are not paced to 60 Hz.
+Every frame that matches mGBA is a screen that stays the same for at least 7 mGBA frames, so these matches cannot show a frame offset or a blending difference. Two kinds of difference show up elsewhere:
+
+- **Brightness fades** (frames 220-260, 300, 320, 1391). mGBA's register trace (same harness) shows the BIOS brightening the logo to white from frame 220 to 250 (`BLDCNT=0x3FBF`, `BLDY` rising from 1 to 16; 0x0B at frame 240), and the game darkening with `BLDCNT=0x00FF` and `BLDY` 0x0D, 0x03 and 0x0F at frames 300, 320 and 1391. gbarecomp shows none of the BIOS fade, and in the game's fades its pixels are off by one or two 5-bit steps. Whether both come from how gbarecomp applies `BLDY` is **unverified**.
+- **A frame of offset** (frames 180 and 280). gbarecomp's frames 180 and 280 equal mGBA's 181 and 281: the two tools number frames differently, or gbarecomp is one frame ahead there (**unverified**).
+
+The `--lle` build (per-pixel scanline renderer) gives the same counts at frames 240 and 300 (3,622 and 2,034, in the review run of this branch). 2,700 frames took 10.5 s wall; headless runs are not paced to 60 Hz.
 
 Coverage at exit (`self_heal_coverage`):
 
@@ -225,7 +236,7 @@ Coverage at exit (`self_heal_coverage`):
 | 900 | `NOT_STATIC` | 37 (2 in IWRAM, 35 in ROM) | 4,485,773 |
 | 2700 | `NOT_STATIC` | 37 | 228,577,755 |
 
-- **IWRAM**: two entry points, `0x030004DC` (Thumb, bridged 4,349 times by frame 2700) and `0x03000708` (ARM, 4,512 times). Both lie in the front end's IWRAM image (`0x03000000`-`0x03000833`, copied from ROM `0x081596FC`). Once the interpreter enters IWRAM it keeps going, and nearly all of the 228 million interpreted instructions come from there (see the healing runs below). That is expected without `[[code_copy]]` entries.
+- **IWRAM**: two entry points, `0x030004DC` (Thumb, bridged 4,349 times by frame 2700) and `0x03000708` (ARM, 4,512 times). Both lie in the front end's IWRAM image (`0x03000000`-`0x03000833`, copied from ROM `0x081596FC`: the literal pool at `0x080002C8`-`0x080002D0` holds source, destination and size, and an mGBA write watch shows the loop at `0x08000260`-`0x08000264` copying those 0x834 bytes at frame 293; see the comments in `game.toml`). Once the interpreter enters IWRAM it keeps going, and nearly all of the 228 million interpreted instructions come from there (see the healing runs below). That is expected without `[[code_copy]]` entries.
 - **ROM**: 35 misses, each 0x4 to 0x1C0 bytes past the start of a function that discovery did find (the runtime names the nearest one: the busiest miss, `0x08012460`, bridged 12,180 times, sits next to the function at `0x0801245C`). The runtime flags 4 groups as jump-table candidates. None was reviewed or added to `game.toml` yet.
 
 Problems seen, all repeatable (the same `--frames` gives the same output every time):
@@ -238,20 +249,24 @@ Problems seen, all repeatable (the same `--frames` gives the same output every t
 
 By default gbarecomp also compiles each missed function with the host C++ compiler (its banner says `backend=gcc`) into `build/native/recomp_cache/`, and a later run loads them from there at start (`warm_loaded=` in the banner). RAM-resident code is healed only with `GBARECOMP_RAM_OVERLAY_HEAL=1`. `GBARECOMP_HEAL_CACHE` moves the cache, which is how the RAM-healing pair below got a cache of its own.
 
-| Run | Frames reached | Distinct misses | Healed to native | Interpreted instructions | Watchdog | Wall |
-|---|---|---|---|---|---|---|
-| Healing on, empty cache, 2700 frames | 2706 | 37 | 35 (failed: the 2 in IWRAM) | 228,577,755 | 1 | 11 s |
-| Healing on, that cache, 3600 frames | 3605 | 16 | 47 | 218,628,312 | 1 | 11 s |
-| Healing and RAM healing on, empty cache, 3600 frames | 3600 | 102 | 102 | 82,501 | 0 | 29 s |
-| Healing and RAM healing on, that cache, 3600 frames | 3600 | 55: 52 IWRAM, 2 EWRAM, 1 ROM | 55 | 12 | 0 | 5 s |
+"Loaded from cache", "Native at exit" and "Failed" are the banner's `warm_loaded` (functions loaded from the cache at start), `healed_native` and `failed`. `healed_native` counts the native functions at exit, the ones loaded from the cache included: it is the size of the runtime's healed-function table (`overlay_counters()`, `src/runtime/overlay_loader.cpp:601-603`).
 
-Healing ROM misses alone leaves almost all interpretation in place (218 million instructions), which shows that the interpreted instructions come from the IWRAM entries. With RAM healing as well, the second run interpreted 12 instructions, the watchdog stayed quiet, the 3600-frame run finished, and frame 3600 (the title's attract animation) is identical to mGBA's in both RAM-healing runs. One EWRAM entry, `0x0203D7EA`, is where the mGBA harness saw the game read the save area during boot. Coverage still reads `NOT_STATIC`: healed code is not statically recompiled code, so this is a diagnostic result, not a build.
+| Run | Frames reached | Distinct misses | Loaded from cache | Native at exit | Failed | Interpreted instructions | Watchdog | Wall |
+|---|---|---|---|---|---|---|---|---|
+| Healing on, empty cache, 2700 frames | 2706 | 37 | 0 | 35 | 2 (the IWRAM ones) | 228,577,755 | 1 | 11 s |
+| Healing on, that cache, 3600 frames | 3605 | 16 | 35 | 47 | 4 | 218,628,312 | 1 | 11 s |
+| Healing and RAM healing on, empty cache, 3600 frames | 3600 | 102 | 0 | 102 | 0 | 82,501 | 0 | 29 s |
+| Healing and RAM healing on, that cache, 3600 frames | 3600 | 55: 52 IWRAM, 2 EWRAM, 1 ROM | 50 | 105 | 0 | 12 | 0 | 5 s |
+
+Unlike runs with healing off, runs with healing on are not exact to the instruction: the review run of row 2 interpreted 218,628,297 instructions with 46,723 native calls, against 218,628,312 and 46,720 here. Healing compiles on a worker thread, so a function can come into use at a slightly different point in each run (a likely cause, **unverified**).
+
+Healing ROM misses alone leaves almost all interpretation in place (218 million instructions), which shows that the interpreted instructions come from the IWRAM entries. With RAM healing as well, the second run interpreted 12 instructions, the watchdog stayed quiet, the 3600-frame run finished, and frame 3600 (the title's attract animation) is identical to mGBA's in both RAM-healing runs (it matches mGBA frames 3600-3608 and none of 3590-3599). One EWRAM entry, `0x0203D7EA`, is the Thumb code that reads the save area during boot: an mGBA read watch shows it making 3,280 one-byte reads of `0x0E000000`-`0x0E000CCF` at frame 596. Coverage still reads `NOT_STATIC`: healed code is not statically recompiled code, so this is a diagnostic result, not a build.
 
 ### Not reached
 
-- **The race program and its IWRAM image** (ROM `0x083F6820`), which needs input to reach a race. Whether recompiled dispatch can tell the two IWRAM images apart is still open.
+- **Race code running from IWRAM**, which needs input to reach a race. The race program's startup does run at boot: in mGBA it enters `0x08159F30` at frame 271 and copies its image (ROM `0x083F6820`, 0x49C4 bytes) to IWRAM at frames 279-280, before the front end copies its own image over the first 0x834 bytes at frame 293 (watches and literal pools in the `game.toml` comments). Whether recompiled dispatch can tell the two IWRAM images apart is still open.
 - **Saves**: no SRAM write happened in 3,600 frames, as in mGBA up to frame 4,400, so no save file was written.
-- **The game in a browser.** `scripts/build-web.sh --no-regen --rom ... --bios ...` built the bring-your-own-ROM bundle from the same generated code in 19 s (`game.wasm` 4.4 MB, no ROM or BIOS inside), but it was not opened in a browser.
+- **The game in a browser, past the title screen.** `scripts/build-web.sh --no-regen --rom ... --bios ...` built the bring-your-own-ROM bundle from the same generated code in 19 s (`game.wasm` 4.4 MB, no ROM or BIOS inside). Built again with `--embed-private-rom --dev`, served with `scripts/serve-web.sh` and opened in the Claude desktop app's browser pane (Chromium), it boots through the BIOS intro and the license screen to the title, "Press start", then stops: the page shows `failed: WebAssembly runtime aborted` after 1,332 published frames. The console has the same abort as the native 3600-frame run, `SELF-HEAL bridge for 0x08003E70 exceeded 200000000 instructions without returning to stop_pc=0x08004E10 (current pc=0x00000364)`, then `Aborted()`. Runtime healing does not exist in the browser: the page logs `self_heal_recompile=UNAVAILABLE host=wasm` (`src/runtime/overlay_loader.cpp:427-431`, under `__EMSCRIPTEN__`), so it always runs as a native run with healing off does, and reaches this abort every time. Seen in two runs on 2026-10-10 (the review's and the fix's), both at 1,332 published frames.
 
 Next steps, for Phase 1: declare the IWRAM images (`[[code_copy]]`), review the ROM misses and jump-table candidates into `[[extra_func]]` / `[[jump_table]]` entries, and find out what the IRQ watchdog and the never-returning bridge are.
 
@@ -259,17 +274,17 @@ Next steps, for Phase 1: declare the IWRAM images (`[[code_copy]]`), review the 
 
 1. **The stock browser bundle exits at launch at our pin.** The page always passes `--state-dir` (`gbarecomp/packaging/web/bootstrap.js:62`), and the runtime's argument parser rejects it: `internal: value flag --state-dir is missing from kCliValueFlags`, exit code 1 (`src/runtime/runtime.cpp:791-799`, check at lines 868-871). Seen in the browser and natively. `patches/gbarecomp/0001-cli-accept-state-dir.patch` adds the flag to the table; `scripts/setup.sh` and the build scripts apply it, and the smoke test fails without it. Upstreamable.
 2. **The other game repositories do not link on macOS as written.** They pass `-Wl,--start-group`, which Apple's linker rejects. Our `CMakeLists.txt` uses gbarecomp's `target_link_gbarecomp_runtime_stack()` instead.
-3. **Stack size on macOS.** A macOS main thread gets 8 MiB; Windows and the web reserve 16 MiB. Our executable links with `-stack_size 0x1000000`. The game thread that `--tcp` creates still gets 512 KiB (integration study, §7.2), so prefer `--tcp-observe` for debugging.
+3. **Stack size on macOS.** A macOS main thread gets 8 MiB; Windows and the web reserve 16 MiB. Our executable links with `-stack_size 0x1000000`. The game thread that `--tcp` creates still gets 512 KiB (integration study, §7.2, PR #2), so prefer `--tcp-observe` for debugging.
 4. **`gba_recompile` caps function discovery at 4096 by default, silently.** `scripts/regen.sh` passes `--max-functions 65536` and checks the emitted count against it.
 5. **HALT ends only on an interrupt the CPU takes** (seen with the stand-in BIOS). gbarecomp's single-player loop clears HALT only when IME is set and CPSR.I is clear (`src/runtime/runtime_bus_bridge.cpp:774-793`, `src/gba/gba_io.h:151-153`). On hardware HALT ends as soon as `IE AND IF` is non-zero, whatever IME and CPSR say ([GBATEK, BIOS Halt Functions](https://problemkaputt.de/gbatek-bios-halt-functions.htm)); gbarecomp's own multiplayer loop does that (`src/runtime/multiplayer_session.cpp:157-160`). The Cult-of-GBA boot screen halts with IME off and never reaches the cartridge (PC stays at `0x00000C08`). This matters for an open-BIOS build. Whether the game ever halts with IME off is **unverified**.
 6. **`--bios-skip-intro` / `[bios].skip_intro` leaves the BG2 and BG3 affine matrices at zero.** The handoff it synthesizes sets only CPU state (`src/runtime/bios_hle.cpp:518-540`). After a real boot, BG2PA, BG2PD, BG3PA and BG3PD should be 0x100: mGBA initializes them so (`GBAIOInit`, `src/gba/io.c:339-342` at tag 0.10.5), and the Cult-of-GBA BIOS source lists the same values as what the official BIOS leaves, as measured by its authors on emulators. Not checked against the retail BIOS (**unverified**). In the stand-in run, `arm.gba` drew its result text into mode 4 VRAM, but every frame came out one flat color, with BG2PA = BG2PD = 0 over the debug server. A game that uses bitmap or affine modes without writing those registers itself would render wrong with the intro skipped. Keep the intro until this is fixed or ruled out for the game.
 7. **Homebrew Emscripten is not the validated version** (6.0.12 against 6.0.10). Use emsdk.
 8. **The co-simulation coordinator fails on macOS** (`oracle/gba_cosim.py` passes Windows-only `creationflags`). A one-line patch is described in `patches/gbarecomp/README.md`; it will be added when the co-simulation is first used.
 9. **The runtime writes into its working directory**: `recomp_cache/`, `recomp_coverage_*.json`, `recomp_master_misses_*.toml.frag`, `bios.cfg`, `rom.cfg`. Run it from `build/native`. `.gitignore` covers these names in case a run starts at the repository root.
-10. **Warnings that are not errors**: about 140 compiler warnings in gbarecomp's sources; about 2,000 more (`-Wunused-variable`, `-Wunused-but-set-variable`) when compiling the recompiled BIOS and game; `ld: warning: ignoring duplicate libraries` on macOS; em++ `-pthread + ALLOW_MEMORY_GROWTH may run non-wasm code slowly`, from gbarecomp's own browser link options.
+10. **Warnings that are not errors**: about 520 compiler warnings in `scripts/test-engine.sh` with the test ROMs present, nearly all unused-variable warnings in generated test code (see [Engine build and tests](#engine-build-and-tests)); about 2,000 more (`-Wunused-variable`, `-Wunused-but-set-variable`) when compiling the recompiled BIOS and game; `ld: warning: ignoring duplicate libraries` on macOS; em++ `-pthread + ALLOW_MEMORY_GROWTH may run non-wasm code slowly`, from gbarecomp's own browser link options.
 11. **gbarecomp's `web_bootstrap_tests` is timing-sensitive.** The test waits a fixed 40 event-loop turns after each simulated file pick, but the page hashes the file with `crypto.subtle.digest`, which Node finishes on its thread pool. On the `ubuntu-24.04` CI runner it failed in both runs, at a different check each time; on the M4 Pro it passes. Delaying every digest by 1 ms reproduces the failure on macOS every time. `patches/gbarecomp/0002-web-test-wait-for-pick.patch` makes the test wait for the line each pick logs (10 s deadline); the page itself is unchanged. Upstreamable.
 12. **gbarecomp clones toml++ into every new build tree** unless `gbarecomp/third_party/tomlpp/toml.hpp` exists. Its configure step then runs FetchContent, a full `git clone` from GitHub, in each build directory (`build/gbarecomp`, `build/native`, the smoke test's trees, the web build's). Usually that takes a few seconds, but in the first clean-clone check one configure took 595 s, and later the clone for `build/smoke/native-host` hung for more than 11 minutes, while a manual clone right after took 2 s. So `scripts/setup.sh` now puts the pinned header in place once (step 5 of setup), and a fresh configure takes about 1 s with no network.
-13. **Runtime problems seen with the game ROM**: the IRQ watchdog, a self-heal bridge that never returns, and results that depend on `--frames`. See [First real-ROM smoke test](#first-real-rom-smoke-test).
+13. **Runtime problems seen with the game ROM**: the IRQ watchdog, a self-heal bridge that never returns, and results that depend on `--frames`. The bridge that never returns also stops the stock browser bundle: it boots to the title screen, then aborts at the same bridge for `0x08003E70`, because runtime healing is unavailable in WebAssembly. See [First real-ROM smoke test](#first-real-rom-smoke-test).
 
 ## CI
 
@@ -285,12 +300,12 @@ The full gbarecomp build is small (186 build steps), so CI builds all of it and 
 
 | Path | Tracked | Contents |
 |---|---|---|
-| `gbarecomp/` | Submodule | gbarecomp at the pin |
+| `gbarecomp/` | Submodule | gbarecomp at the pin; PolyForm Noncommercial 1.0.0 (`gbarecomp/LICENSE`, <https://polyformproject.org/licenses/noncommercial/1.0.0>) |
 | `CMakeLists.txt`, `src/` | Yes | Native host: `main.cpp` and the build-config template |
 | `game.toml` | Yes | Game config for the Europe ROM (`A9MP`); Phase 1 TODOs as comments |
 | `web/game-lib/` | Yes | The generated game as a library for `build_web.sh` |
 | `tests/smoke/` | Yes | Smoke test project and test ROM configs |
-| `patches/gbarecomp/` | Yes | Local fixes to gbarecomp, applied by `scripts/apply-patches.sh` |
+| `patches/gbarecomp/` | Yes | Local fixes to gbarecomp, applied by `scripts/apply-patches.sh`. They contain excerpts of gbarecomp's source and are distributed under its license, PolyForm Noncommercial 1.0.0 |
 | `scripts/` | Yes | Everything above |
 | `roms/`, `bios/` | No | Private inputs |
 | `generated/` | No | Recompiled BIOS and game |

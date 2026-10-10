@@ -16,7 +16,7 @@
 # DO NOT PUBLISH the output. Even without --embed-private-rom, game.wasm is
 # compiled from the recompiled ROM and the recompiled Nintendo BIOS. Whether
 # and how anything is ever published is the owner's decision
-# (docs/research/gbarecomp-integration.md, section 5.6).
+# (docs/research/gbarecomp-integration.md, section 5.6, in PR #2).
 set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 . "$(dirname "$0")/lib/common.sh"

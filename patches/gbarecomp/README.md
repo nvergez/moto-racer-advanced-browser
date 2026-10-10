@@ -2,6 +2,8 @@
 
 Fixes we need in gbarecomp before upstream has them. `scripts/apply-patches.sh` applies every `*.patch` here, in name order, to the submodule's working tree, and `scripts/setup.sh` runs it. We never commit inside the submodule: the repository records only the pinned gbarecomp commit. After setup, `git status` shows `gbarecomp (modified content)`; that is the applied patches.
 
+**License.** gbarecomp is Copyright (c) 2026 Matthew Stanley and licensed under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) (`gbarecomp/LICENSE`). These patches change gbarecomp and contain excerpts of its source, so they are distributed under the same terms, for noncommercial purposes only.
+
 The native build and gbarecomp's own tests pass on macOS arm64 without any patch at the pin (`5e89943528aee7bc1c399bdbd035364a4b41dd10`). `0001` is for running the browser bundle; `0002` makes one of gbarecomp's browser unit tests reliable on a busy Linux CI runner.
 
 ## Current patches
@@ -13,7 +15,7 @@ The native build and gbarecomp's own tests pass on macOS arm64 without any patch
 
 ## Known candidate
 
-`oracle/gba_cosim.py` passes the Windows-only `creationflags=0x00000200` to `subprocess.Popen`, which raises `ValueError` on macOS and Linux before the co-simulation starts. The one-line fix is `creationflags=0x00000200 if os.name == "nt" else 0` (gbarecomp integration study, §7.2). Nothing runs the co-simulation before Phase 2, so it is not added yet. Add it as the next patch when the co-simulation is first used. It looks upstreamable.
+`oracle/gba_cosim.py` passes the Windows-only `creationflags=0x00000200` to `subprocess.Popen`, which raises `ValueError` on macOS and Linux before the co-simulation starts. The one-line fix is `creationflags=0x00000200 if os.name == "nt" else 0` (gbarecomp integration study, `docs/research/gbarecomp-integration.md`, §7.2, PR #2). Nothing runs the co-simulation before Phase 2, so it is not added yet. Add it as the next patch when the co-simulation is first used. It looks upstreamable.
 
 ## Adding a patch
 

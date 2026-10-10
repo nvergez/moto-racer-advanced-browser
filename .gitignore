@@ -23,6 +23,9 @@ generated/
 # Browser bundles: game.wasm is compiled from the ROM and the BIOS. Never publish.
 web-PRIVATE/
 build-web-host/
+# Where gbarecomp's build_web.sh writes a bundle without --embed-private-rom
+# when it is run on web/game-lib directly (scripts/build-web.sh writes to build/).
+/web/game-lib/web/
 
 # --- gbarecomp runtime output, in case a run starts from the repository root ---
 recomp_cache/

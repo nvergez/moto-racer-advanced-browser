@@ -10,9 +10,9 @@
 # by hash instead. Their headers carry the standard GBA header logo bytes, like
 # every GBA ROM, which is one more reason they stay out of git.
 #
-# Also links gbarecomp/third_party/gba_suite to them (gitignored inside
-# gbarecomp), which enables gbarecomp's own test_rom_arm and test_rom_thumb
-# ctest targets. --no-link skips that.
+# Also copies arm.gba and thumb.gba into gbarecomp/third_party/gba_suite
+# (gitignored inside gbarecomp), which enables gbarecomp's own test_rom_arm
+# and test_rom_thumb ctest targets. --no-link skips that.
 set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 . "$(dirname "$0")/lib/common.sh"

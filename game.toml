@@ -3,7 +3,7 @@
 # One file read by two parsers: gba_recompile (toml++; [program], [identity]
 # and the [[...]] arrays) and the gbarecomp runtime (a line-based reader for
 # [game], [bios], [rom], [save], [video], [audio]; see
-# docs/research/gbarecomp-integration.md, section 2). The runtime drops
+# docs/research/gbarecomp-integration.md, section 2, in PR #2). The runtime drops
 # everything after '#' on a line, so no value may contain '#'.
 #
 # Pinned ROM revision: "Moto Racer Advance (Europe) (En,Fr,De,Es,It)",
@@ -59,25 +59,40 @@ sha1 = "b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0"
 [save]
 # 32 KiB battery-backed SRAM. The ROM carries Nintendo's save library ID
 # string "SRAM_F_V102" (at ROM offset 0x1C6D0 in this dump, found with a byte
-# search), and the game reads 0x0E000000 byte by byte during boot. gbarecomp's
-# detector only knows the "SRAM_V" prefix, so gba_scan reports
-# save_type=unknown: without this section the game would find no save chip.
-# 32768 is the only size gbarecomp accepts for sram.
+# search), and the game reads the save area byte by byte during boot (mGBA
+# 0.10.5 read watch on 0x0E000000-0x0E007FFF, no input: at frame 596, Thumb
+# code at EWRAM 0x0203D7EA makes 3,280 one-byte reads, 0x0E000000 to
+# 0x0E000CCF). gbarecomp's detector only knows the "SRAM_V" prefix, so
+# gba_scan reports save_type=unknown: without this section the game would
+# find no save chip. 32768 is the only size gbarecomp accepts for sram.
 type = "sram"
 size = 32768
 
 # TODO(phase1): IWRAM code images. The game copies ARM code from ROM to IWRAM
-# 0x03000000 and runs most of a race from there. Two different images share
-# that base address: the front end's (ROM 0x081596FC, 0x834 bytes) and the
-# race program's (ROM 0x083F6820, 0x49C4 bytes). [[code_copy]] maps one
-# runtime range to one source, so declaring both needs a decision on how
-# recompiled dispatch tells the overlays apart. Until then they are left
-# out, and IWRAM code reaches gbarecomp's interpreter and self-heal path
-# (docs/toolchain.md, "First real-ROM smoke test").
+# 0x03000000 and runs most of a race from there (**unverified** here; it is
+# a Phase 1 research lead). Two different images share that base address:
+# the front end's (ROM 0x081596FC, 0x834 bytes) and the race program's (ROM
+# 0x083F6820, 0x49C4 bytes). How the bounds were found, in this dump:
+#   - literal pools: 0x080002C8, 0x080002CC, 0x080002D0 hold 0x081596FC,
+#     0x03000000, 0x834; 0x0815A070, 0x0815A074, 0x0815A078 hold
+#     0x083F6820, 0x03000000, 0x49C4 (read from the ROM file);
+#   - mGBA 0.10.5 read/write watches, no input: at frames 279-280 the loop
+#     at 0x08159FFC-0x0815A008 copies 0x49C4 bytes from 0x083F6820 to
+#     0x03000000; at frame 293 the loop at 0x08000260-0x08000264 copies
+#     0x834 bytes from 0x081596FC over the start of it.
+# [[code_copy]] maps one runtime range to one source, so declaring both
+# needs a decision on how recompiled dispatch tells the overlays apart.
+# Until then they are left out, and IWRAM code reaches gbarecomp's
+# interpreter and self-heal path (docs/toolchain.md, "First real-ROM smoke
+# test").
 #
 # TODO(phase1): the race program is a second, separately linked program
-# entered through 0x08159F30. Seed it, and anything else found only at run
-# time, as reviewed [[extra_func]] entries from the runtime's miss reports.
+# (**unverified** here; a Phase 1 research lead) entered through 0x08159F30,
+# the first byte after the front end's image (0x081596FC + 0x834). In the
+# same mGBA run, 0x08159F30 first executes at frame 271 and calls the
+# routine that does the copy above. Seed it, and anything else found only
+# at run time, as reviewed [[extra_func]] entries from the runtime's miss
+# reports.
 #
 # TODO(phase1): [[data_range]] entries for large data and compressed assets,
 # if discovery ever decodes them as code.

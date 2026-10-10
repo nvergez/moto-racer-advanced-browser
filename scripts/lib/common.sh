@@ -189,8 +189,8 @@ require_game_config() {
   if [ -n "$placeholders" ]; then
     die "$(rel "$MRA_GAME_CONFIG") still has placeholders that depend on the ROM:
 $placeholders
-  Fill them in from the ROM you dumped (docs/toolchain.md, \"Filling in
-  game.toml\"), then run this script again."
+  Fill them in from the ROM you dumped (docs/toolchain.md, \"The game
+  config\"), then run this script again."
   fi
 }
 
@@ -258,14 +258,58 @@ run_logged() {
   fi
 }
 
-# Empty a generated-output directory. Refuses anything that is not strictly
-# inside the repository or the build directory.
-reset_dir() {
-  local dir=$1
-  case "$dir" in
-    "$MRA_ROOT"/?* | "$MRA_BUILD_DIR"/?*) ;;
-    *) die "refusing to delete $dir (not inside $MRA_ROOT or $MRA_BUILD_DIR)" ;;
+# Path with repeated slashes squeezed and no trailing slash, so that the
+# prefix checks in reset_dir compare like with like.
+norm_path() {
+  local p
+  p=$(printf '%s' "$1" | tr -s /)
+  case "$p" in
+    / | "") ;;
+    */) p=${p%/} ;;
   esac
+  printf '%s\n' "$p"
+}
+
+# Empty a generated-output directory: the only `rm -rf` in the scripts. The
+# directory comes from MRA_GENERATED_DIR or MRA_BUILD_DIR, which the
+# environment can override, so check it rather than trust it. It must be an
+# absolute path with no "." or ".." component, strictly inside the
+# repository or the build directory, outside gbarecomp/, roms/ and bios/, and
+# it must not be or contain the repository root, the ROM, the BIOS or a
+# config in use.
+reset_dir() {
+  local dir root build tree keep
+  dir=$(norm_path "$1")
+  root=$(norm_path "$MRA_ROOT")
+  build=$(norm_path "$MRA_BUILD_DIR")
+  case "$dir" in
+    /*) ;;
+    *) die "refusing to delete $dir: not an absolute path (set MRA_BUILD_DIR and MRA_GENERATED_DIR to absolute paths)" ;;
+  esac
+  case "$dir/" in
+    */./* | */../*) die "refusing to delete $dir: it has a '.' or '..' component" ;;
+  esac
+  case "$dir" in
+    "$root"/?* | "$build"/?*) ;;
+    *) die "refusing to delete $dir: not inside $root or $build" ;;
+  esac
+  for tree in "$GBARECOMP_DIR" "$MRA_ROOT/roms" "$MRA_ROOT/bios"; do
+    tree=$(norm_path "$tree")
+    case "$dir" in
+      "$tree" | "$tree"/*) die "refusing to delete $dir: it is inside $tree" ;;
+    esac
+  done
+  for keep in "$MRA_ROOT" "$GBARECOMP_DIR" "$MRA_ROOT/roms" "$MRA_ROOT/bios" \
+              "$MRA_ROM" "$MRA_BIOS" "$MRA_GAME_CONFIG" "$MRA_BIOS_CONFIG"; do
+    case "$keep" in
+      /*) ;;
+      *) keep="$PWD/$keep" ;;
+    esac
+    keep=$(norm_path "$keep")
+    case "$keep" in
+      "$dir" | "$dir"/*) die "refusing to delete $dir: it contains $keep" ;;
+    esac
+  done
   rm -rf "$dir"
   mkdir -p "$dir"
 }

@@ -67,12 +67,17 @@ info "Building MotoRacerAdvanceRecomp"
 cmake --build "$build_dir" --target MotoRacerAdvanceRecomp --parallel "$(job_count)"
 
 info "Built $(rel "$build_dir")/MotoRacerAdvanceRecomp"
+# The same command as docs/toolchain.md, "Native build", with absolute paths,
+# quoted for the shell.
+q() { printf '%q' "$1"; }
+save="$MRA_BUILD_DIR/saves/smoke.sav"
 cat << EOF
 Headless run to the title screen (2700 frames), runtime healing off, fresh
 save, last frame kept as a PNG under build/ (it shows the game: never commit it):
-  cd $build_dir && GBARECOMP_SELFHEAL_RECOMPILE=0 ./MotoRacerAdvanceRecomp \\
-    --bios $MRA_BIOS --rom $MRA_ROM \\
-    --frames 2700 --no-window --save-path $MRA_BUILD_DIR/saves/smoke.sav \\
-    --dump-png $build_dir/frame-2700.png $MRA_GAME_CONFIG
+  rm -f $(q "$save")
+  cd $(q "$build_dir") && GBARECOMP_SELFHEAL_RECOMPILE=0 ./MotoRacerAdvanceRecomp \\
+    --bios $(q "$MRA_BIOS") --rom $(q "$MRA_ROM") \\
+    --frames 2700 --no-window --save-path $(q "$save") \\
+    --dump-png frame-2700.png $(q "$MRA_GAME_CONFIG")
 Then read the coverage banner it prints (docs/toolchain.md, "First real-ROM smoke test").
 EOF
