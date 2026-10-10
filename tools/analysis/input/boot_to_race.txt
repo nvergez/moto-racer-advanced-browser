@@ -1,0 +1,69 @@
+# Boot -> title -> language -> main menu -> Solo -> Single race -> Cross ->
+# Kenya -> Coolfix 250 -> Auto gearbox -> race (Moto Racer Advance, A9MP,
+# ROM SHA-1 b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0, real BIOS boot,
+# fresh empty save). Run with harness/run_harness.sh (see ../README.md).
+#
+# Frame numbers are mGBA frame-counter values after reset (see ../README.md);
+# "until N" runs to frame N. The run is deterministic: same frames every time.
+# tap = hold the keys 6 frames, then release 6 frames.
+
+until 2450                 # title screen with "Press start" (visible ~2400-2760)
+mark title
+dump title
+tap START                  # -> language select (English preselected)
+wait 60
+mark language_menu
+shot language_menu
+tap A                      # English -> main menu (solo/multiplayer/options/top 5)
+wait 180
+mark main_menu
+dump main_menu
+tap A                      # solo -> single race/championship/league/progression
+wait 120
+mark solo_menu
+shot solo_menu
+tap A                      # single race -> cross/gp/traffic/Ultimate(locked)
+wait 90
+mark single_race_menu
+shot single_race_menu
+tap A                      # cross -> track select (Kenya)
+wait 90
+mark track_select
+shot track_select
+tap A                      # Kenya -> bike select (Coolfix 250)
+wait 90
+mark bike_select
+shot bike_select
+tap A                      # Coolfix 250 -> gearbox (Auto/Manual)
+wait 90
+mark gearbox_select
+shot gearbox_select
+tap A                      # Auto -> race loads, camera fly-in
+until 3356
+mark race_intro
+dump race_intro
+until 3560                 # countdown: start lights filling up, all bikes still
+mark countdown
+shot countdown
+until 3608                 # rivals have already left (~3590-3598); light panel disappears at 3609
+mark race_go
+dump race_go
+hold A                     # A = accelerate; speedometer shows 001 km/h at frame 3610
+until 3800
+savestate race_running.state
+until 3830                 # crossed the start line at 3826: LAP 1, lap timer running
+mark lap1
+dump lap1
+until 3950                 # first right-hand bend
+hold RIGHT
+wait 70
+release RIGHT
+until 4200                 # on track, rivals in view
+mark mid_race
+dump mid_race
+savestate mid_race.state
+until 4300
+dump mid_race_2
+until 4400
+shot mid_race_3
+end
