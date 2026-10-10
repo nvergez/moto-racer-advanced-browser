@@ -25,6 +25,7 @@ Conventions:
 | `MC` | [mstan/MinishCapRecomp](https://github.com/mstan/MinishCapRecomp) | `1aa1128e14cbcc40140a518ed426092ac85b26a6` | Skimmed only |
 | `UI` | [mstan/recomp-ui](https://github.com/mstan/recomp-ui) | `6374aae201b930c97425718249f5d39b2275ca13` | The commit `MKSC` pins |
 | `BOK` | [Shy/BoktaiRecomp](https://github.com/Shy/BoktaiRecomp) | `69ff053841c9e5b0f5eb1ac42cfc1f008a94c010` | Third-party game repo with macOS CI; read through the GitHub API only |
+| `MGBA` | [mgba-emu/mgba](https://github.com/mgba-emu/mgba) | `26b7884bc25a5933960f3cdcd98bac1ae14d42e2` (tag `0.10.5`) | The version installed here; one debugger file read |
 
 Machine used for the build check in §7: Apple M4 Pro, macOS 26.5.2, Apple clang 21.0.0 (`clang-2100.1.1.101`), Apple ld `ld-1267`, CMake 4.4.0, Ninja 1.13.2, Python 3.11.6, Node 24.14.0, Homebrew SDL2 2.32.10.
 
@@ -35,15 +36,17 @@ Machine used for the build check in §7: Apple M4 Pro, macOS 26.5.2, Apple clang
 3. **The browser target is one day old at our pin.** It first appears on `main` at `4855ba2` (PR #16, merged 2026-10-09). Our pin `5e89943` is two merges later: PR #29 (opt-in DMA batching) and PR #31, which makes the HLE scanline renderer the build default. That default was not part of PR #16's web validation. We recommend keeping the pin plus a second LLE build to compare frames against (§9). Neither `MKSC` nor `MMZ` pins an engine that has the web host, so we would be the first game repo on it. The supported web flow links a generic `main()` and a CLI-exported library. Game-owned hooks such as MKSC's mods are **not** included unless we write our own web link step (§5).
 4. **Legal: a "bring your own ROM" web bundle still contains the game's code.** `game.wasm` is compiled from the recompiled ROM and the recompiled BIOS. gbarecomp's docs contradict each other on whether such a bundle can be published, while `MKSC` already publishes native binaries with the same kinds of code. §5.6 compares four options. Our recommendation: local builds only through Phase 3; if the owner later wants a public page, a bundle with an open-source BIOS instead of Nintendo's. The owner decides before Phase 3 hosting.
 5. **The BIOS dump is needed twice:** at build time, to recompile it (LLE path, and required by `build_web.sh`), and at runtime, where it is always loaded, even with the opt-in BIOS HLE. Generating the *game's* C++ does not need it (§2.3).
-6. **MKSC's enhancements are specific to MKSC. What transfers is the framework's seams, not MKSC's work.**
+6. **MKSC's enhancements are specific to MKSC. Some framework seams transfer, MKSC's own work does not, and no seam exists for higher resolution.**
    - The 60 FPS mod overrides one Thumb immediate in an affine-background road renderer. The patch came from a researcher who also worked on the MKSC decomp, which we do not have for our game.
    - Adaptive Widescreen is 344 lines of MKSC-specific code (scene detection by tile IDs, HUD rectangles, sprite moves) on top of the engine's PPU providers.
    - In bitmap modes 3/4/5, gbarecomp draws the widescreen margins as plain backdrop.
-   - The framework has no internal-resolution upscaling and no CPU overclock.
-   - *(inferred)* If Moto Racer Advance draws its races in software (**unverified**; playbook step 2 measures it), resolution and widescreen need a host-side renderer behind a `[[mod_function_hook]]`. A higher frame rate could come from that renderer or from a new engine feature that scales guest cycles, which risks breaking game logic tied to frame timing. Either way it is new work (§6).
+   - The framework has no internal-resolution upscaling and no CPU overclock. *(inferred)* Higher resolution is new work however the game renders.
+   - *(inferred)* Widescreen can only show objects the game still draws. If it culls opponents and trackside objects at its 240-pixel view (**unverified**), filling the margins means reverse engineering game logic.
+   - *(inferred)* If Moto Racer Advance draws its races in software (**unverified**; playbook step 2 measures it), resolution and widescreen need a host-side renderer behind a `[[mod_function_hook]]`, which must not change guest timing. A higher frame rate could come from that renderer or from a new engine feature that scales guest cycles, which risks breaking game logic tied to frame timing. Either way it is new work (§6).
 7. **`gba_recompile` stops discovering functions at 4096 by default, without saying so.** MKSC passes `--max-functions 65536` and discovers 13,717 to 20,815 functions, depending on whether decomp seeds are used. We must do the same (§3.1).
 8. **Several debugging tools in `TCP.md` do not exist in the code at our pin.** These include the per-frame ring, `rdb_*`, and the `*_diff` commands. The coverage report, strict-static mode, input record/replay, save states, `state_hash` and the co-simulation engine do exist. The NanoBoyAdvance oracle binary is not in any public repo (§4).
 9. **macOS gives the game the smallest host stack of any platform.** Windows and the web reserve 16 MiB and Android 256 MiB; a macOS main thread has 8 MiB and a `std::thread` 512 KiB (measured). The engine maps guest calls onto the host stack. The playbook links with a 16 MiB main-thread stack. The game thread that `--tcp` creates stays at 512 KiB, so we recommend `--tcp-observe` for debugging (§7.2).
+10. **Static coverage cannot see RAM code that changes.** Dispatch looks a function up by PC and instruction set only. If the game copies different routines to one RAM address over time, or patches a copy, the static body runs stale code with no miss, and the run still reports `FULLY_STATIC`. Only game-owned hooks can handle it, and the engine installs none. For a 3D racer that may run its renderer from RAM, this is the main Phase 1 risk *(inferred)*. Playbook steps 2 and 10 measure it as an input to ADR 0001 (§3.3).
 
 ---
 
@@ -209,21 +212,28 @@ These are the rules in `GR@5e89943:PRINCIPLES.md:134-226` ("Honest self-healing"
 2. **ROM** misses are compiled on the fly in the background into `recomp_cache/<sha1>/<gcc|tcc>/<os-arch>/abi6-ram3/<pc>_<crc>_<a|t>.dll`. They are loaded warm on the next run (`src/runtime/overlay_loader.cpp:117-125`). The `.dll` suffix is used on every OS (`overlay_compile.cpp:327`).
    - On macOS the compiler is `c++` from `PATH`, called with `-O2 -std=gnu++17 -shared`, and loaded with `dlopen` (`overlay_compile.cpp:54-75, 365-386`; fixed for non-Windows hosts in `GR` commit `b75bb63`).
    - The overlay ABI hands every host symbol over as a pointer, so a dylib has no undefined symbols (`src/runtime/overlay_abi.h:1-15`).
-3. Healing **RAM-resident** code is opt-in (`GBARECOMP_RAM_OVERLAY_HEAL=1`; `overlay_loader.cpp:90-93, 209-211`). *(inferred)* By default, code running from IWRAM/EWRAM that no `[[code_copy]]` covers stays on the interpreter. That matters if Moto Racer Advance runs its renderer from IWRAM (**unverified**). Two kinds of RAM code need telling apart:
-   - **Verbatim copies of ROM bytes.** `[[code_copy]]` maps them to their ROM source, and `[[extra_func]].source_addr` covers position-independent copies (§3.5), so they can become static.
-   - **Code generated or patched at runtime.** Its bytes exist nowhere in the ROM. *(inferred)* No static path exists for it at our pin. On native it is interpreted, or healed at runtime with `GBARECOMP_RAM_OVERLAY_HEAL=1`. On the web, which has no healing, it is always interpreted. Either way a route that runs it is never `FULLY_STATIC`.
+3. Healing **RAM-resident** code is opt-in (`GBARECOMP_RAM_OVERLAY_HEAL=1`; `overlay_loader.cpp:90-93, 209-211`). *(inferred)* By default, code running from IWRAM/EWRAM that no `[[code_copy]]` covers stays on the interpreter. That matters if Moto Racer Advance runs its renderer from IWRAM (**unverified**). Three kinds of RAM code need telling apart:
+   - **Verbatim copies of ROM bytes, one routine per address.** `[[code_copy]]` maps them to their ROM source, and `[[extra_func]].source_addr` covers position-independent copies (§3.5), so they can become static.
+   - **Code generated at runtime.** Its bytes exist nowhere in the ROM. *(inferred)* No static path exists for it at our pin. On native it is interpreted, or healed at runtime with `GBARECOMP_RAM_OVERLAY_HEAL=1`. On the web, which has no healing, it is always interpreted. Either way the miss is reported, and a route that runs it is never `FULLY_STATIC`.
+   - **Overlays and patched copies.** An overlay is several ROM routines copied to the same RAM address at different times. A patched copy is a ROM routine changed after it was copied. `[[code_copy]]` cannot describe either. The recompiler maps an address through the first `[[code_copy]]` range that contains it (`src/recompile/function_finder.cpp:105-125`), does not reject overlapping ranges (`tools/gba_recompile/config.cpp:337-369`), and drops an overlay config's `[[code_copy]]` whose `runtime_start` matches the base's as a duplicate, even when its source differs (`config.cpp:941-947`). At runtime, both the static table and the heal tier look a function up by PC and instruction set only, with no check of the bytes in RAM (`src/armv4t/runtime_arm.cpp:860-920`; `overlay_loader.cpp:620-631`). We found no code that drops a healed entry when the guest rewrites its RAM. *(inferred)* Once a RAM address has a static or healed body, any other code later placed there runs that stale body and records no miss. With a static body the run still reports `FULLY_STATIC`. Upstream lists the "Self-modifying / dynamic-RAM code path" as out of scope until the static case is solid (`GBA_ACCURACY_BURNDOWN.md:252-254`).
+
+   Two game-owned hooks can handle the third kind. The engine declares them and resets them when `run_game()` returns (`runtime.cpp:1278-1282`), but never installs either:
+   - **`g_runtime_ram_dispatch_hook`** (`src/armv4t/runtime_arm.h:65-70`) runs in `runtime_dispatch` for RAM PCs, before the static table (`runtime_arm.cpp:882-894`). It can compare the live RAM with known ROM sources and dispatch to the compiled body of the one that matches. MKSC does this for SDK flash helpers copied to the stack (`MKSC@b89fbb4:src/main.cpp:27`, `src/mksc_flash_dispatch.h`). It dispatches to the ROM copy's compiled body. MKSC's comment lists why that is valid for these helpers: branches stay inside the copy, and no instruction exposes its code address as data (`src/mksc_flash_dispatch.h:7-11`). *(inferred)* A routine that depends on its RAM address would need another approach, such as the next hook. The engine consults this hook only in `runtime_dispatch`.
+   - **`g_runtime_force_interp_hook`** (`runtime_arm.h:72-79`) is a predicate for "executable regions whose bytes can change underneath a static dispatch entry". A non-zero result sends that PC to the interpreter. It is checked in `runtime_dispatch` (`runtime_arm.cpp:875-880`) and in the per-instruction prologue of generated code, so it also catches a generated direct call into the region (`src/runtime/runtime_bus_bridge.cpp:1020-1031`). It records no miss. The `FULLY_STATIC` verdict depends only on misses and heals (`runtime_arm_default_aborts.cpp:259-261`), and in that case the banner prints a literal `interpreted_insns=0` (lines 120-123). *(inferred)* A run that uses this hook can read `FULLY_STATIC` while interpreting, so a game that installs it has to report its own count.
+
+   Playbook steps 2 and 10 measure which kinds Moto Racer Advance uses. The answer is an input to ADR 0001.
 4. At exit the runtime prints `self_heal_coverage=FULLY_STATIC …` or `self_heal_coverage=NOT_STATIC dispatch_misses=N interpreted_insns=… healed_native=…` (`src/runtime/runtime_arm_default_aborts.cpp:119-135`). It writes:
    - `recomp_coverage_<CODE>.json`, on every exit (`runtime_arm_default_aborts.cpp:312`)
    - `recomp_master_misses_<CODE>.toml.frag`, only when the run had at least one dispatch miss (`runtime_arm_default_aborts.cpp:179`). It holds proposed `[[extra_func]]` entries, with jump-table candidates flagged where several misses sit next to each other.
 
-   Both go in the working directory, and `GBARECOMP_MISS_FRAG` / `GBARECOMP_COVERAGE_JSON` override the paths (`runtime.cpp:2105-2116`). A run that was served from the heal cache is still reported `NOT_STATIC`, even with zero misses and so no fragment.
+   Both go in the working directory, and `GBARECOMP_MISS_FRAG` / `GBARECOMP_COVERAGE_JSON` override the paths (`runtime.cpp:2105-2116`). A run with no misses leaves an existing fragment at that path untouched (`runtime_arm_default_aborts.cpp:179`), so a stale one can survive from an earlier run. A run that was served from the heal cache is still reported `NOT_STATIC`, even with zero misses and so no fragment. The heal tier answers before the miss handler (`runtime_arm.cpp:912, 919`), so a PC already in the cache is not recorded as a miss. That is why every discovery run in the playbook turns healing off.
 5. A human reviews the fragment and merges the real entries into `game.toml`. No tool ever writes `game.toml`. Then regenerate and rebuild. (`GR@5e89943:CLAUDE.md` still mentions a `recomp_seed_proposals.toml`. No code at `GR` writes that file. The fragment is the actual output.)
 
 Healing is on by default (`CMakeLists.txt:105`, `GBARECOMP_SELFHEAL_RECOMPILE_DEFAULT`). MKSC forces it on (`CMakeLists.txt:20`). `GBARECOMP_SELFHEAL_RECOMPILE=0` turns it off for one run.
 
 ### 3.4 Strict static mode
 
-With `GBARECOMP_STRICT_STATIC=1`, cache loading, background healing and interpreter bridging are all off, and the first miss aborts (`overlay_loader.cpp:420-425`). A pass proves that the linked static corpus covered every PC that ran on that route.
+With `GBARECOMP_STRICT_STATIC=1`, cache loading, background healing and interpreter bridging are all off, and the first miss aborts (`overlay_loader.cpp:420-425`, `runtime_arm_default_aborts.cpp:899-909`). The abort happens before the exit report, so a failed strict run writes no fragment and no coverage JSON. A pass proves that every PC dispatched on that route had a static entry. It does not prove that the entry matched the code in RAM at that moment (overlays and patched copies, §3.3), or that the generated code is correct. Upstream's own checklist calls "fully static" "a per-run tally" and says the correctness of generated code "is bounded by the codegen test set" (`GBA_ACCURACY_BURNDOWN.md:248-249`).
 
 MKSC's acceptance script (`MKSC@b89fbb4:tools/test-attract-gameplay.ps1`):
 
@@ -277,7 +287,7 @@ Two special mechanisms appear along the way:
 | Per-frame ring and reverse debugger (`history`, `get_frame`, `rdb_*`, `*_diff`) | **Documented, not implemented** | none | `TCP.md` and `DEBUG.md` describe them, but none of these command names occurs anywhere in `src/`, `tools/` or `oracle/`. `src/debug/trace_ring.h` is a stub. `debug.ini` is never read, and `GBARECOMP_DEFAULT_DEBUG_PORT` is defined but unused (`runtime.cpp:104-105`). |
 | Opt-in traces | **Implemented** | none | `GBARECOMP_INSN_TRACE` + `GBARECOMP_FP_SAVE`, `GBARECOMP_MMIO_CAP` / `_DUMP`, `GBARECOMP_IRQ_LOG`, `GBARECOMP_SWI_LOG`, `GBARECOMP_RUNTIME_TRACE`, `GBARECOMP_AUDIO_FIFO_TRACE`, `GBARECOMP_WRAM_TRACE` (JSONL), `GBARECOMP_FRAMEDUMP_DIR`, `GBARECOMP_IWRAM_DUMP`, `GBARECOMP_HANG_WATCHDOG` (all found via `getenv` in `src/`) |
 | `state_hash` | **Implemented** | none | FNV-1a-64 over IWRAM+EWRAM+VRAM+PAL+OAM and the cycle count (`tcp_debug_server.cpp:582-600`). It does not cover CPU or device state (`COSIM_ORACLE.md`). |
-| Co-simulation (first divergence) | **Implemented, opt-in** | Python 3 | Build with `-DGBA_COSIM=ON`. Compares recomp against recomp, or against the in-tree interpreter (`GBARECOMP_FORCE_INTERP`), at cycle-stride checkpoints. Coordinator: `oracle/gba_cosim.py`, configured with `GBA_COSIM_EXE/ROM/BIOS/CONFIG/CWD`. The status line at the top of `COSIM_ORACLE.md` still reads "DESIGN … no engine code yet", but its own log records §1–§6 built on 2026-07-01, and `src/debug/cosim.cpp` has the engine. **Limit:** the interpreter shares `src/gba` with the recomp, so device-model bugs show up identically on both sides (`tools/gbaref/README.md`). |
+| Co-simulation (first divergence) | **Implemented, opt-in; coordinator fails on macOS as shipped** | Python 3 | **macOS:** the coordinator passes a Windows-only `creationflags` to `subprocess.Popen` (`oracle/gba_cosim.py:82-84`). Python 3.11.6 on this Mac raises `ValueError: creationflags is only supported on Windows platforms` before any process starts (checked). A one-line local patch fixes it (§7.2). Build with `-DGBA_COSIM=ON`. Compares recomp against recomp, or against the in-tree interpreter (`GBARECOMP_FORCE_INTERP`), at cycle-stride checkpoints. Coordinator: `oracle/gba_cosim.py`, configured with `GBA_COSIM_EXE/ROM/BIOS/CONFIG/CWD`. The status line at the top of `COSIM_ORACLE.md` still reads "DESIGN … no engine code yet", but its own log records §1–§6 built on 2026-07-01, and `src/debug/cosim.cpp` has the engine. **Limit:** the interpreter shares `src/gba` with the recomp, so device-model bugs show up identically on both sides (`tools/gbaref/README.md`). |
 | mGBA oracle (`gbarecomp_oracle`) | **Implemented, opt-in** | mGBA 0.10.5 built from source with `oracle/setup-mgba.sh`; MPL-2.0; separate process on TCP 19843 | `-DGBARECOMP_BUILD_ORACLE=ON` (`CMakeLists.txt:1106`). Accepts `--bios`, `--rom`, `--port` and serves the `emu_*` / `read_emu_*` commands (`oracle/main.cpp`). Made buildable on macOS arm64 in `GR` commit `f4a065e` ("Verified on macOS arm64 (M4, macOS 26, AppleClang 21)"). 12 Python scripts in `oracle/` still contain `.exe` strings; some route through `recomp_paths.exe_name()`. |
 | gbaref (libretro reference) | **Implemented, Windows-oriented** | SDL2 and a libretro mGBA core binary (not in the repo) | `tools/gbaref/`: a human plays both builds to the same scene, then `oracle/ref_diff.py` diffs the WRAM traces. `build.sh` hardcodes MSYS2 and `.exe`. *(inferred)* Porting it to macOS is small. |
 | NanoBoyAdvance oracle | **Not available to us** | GPL-3.0 | Python comparators exist (`oracle/*_nba.py`, `nba_common.py`, port 19844). The server lives in a private `_nba_oracle/` directory outside the public repos (`GBA_ACCURACY_BURNDOWN.md:75`; `MMZ@218adfd:tools/run-nba-oracle.ps1:2`, `$OracleRoot = ..\..\_nba_oracle`). `COSIM_ORACLE.md` §8 lists the NBA co-sim peer as unbuilt. |
@@ -403,10 +413,11 @@ All options except (a) distribute compiled code derived from the game ROM. *(inf
 
 | Framework (`GR`) | Game (`MKSC`) |
 |---|---|
-| Wide PPU surface up to 896×160 (`gba_ppu.h:120-137`). Live resize policy. Provider seams. | Which scenes are wide, the HUD rectangles, sprite identification |
+| Wide PPU surface up to 896 pixels wide, and up to 864 tall with game-authored vertical margins (`gba_ppu.h:120-137`). Live resize policy. Provider seams. | Which scenes are wide, the HUD rectangles, sprite identification |
 | `[[thumb_alu_immediate_override]]` codegen and runtime hook | The address, the override value, when to enable |
 | Mod loader: `.gbamod` ZIPs hold data and manifests only. Checks ROM SHA-1, feature dependencies and plugin IDs before activation. Mods page in recomp-ui. (`docs/MOD_PACKAGES.md`) | Trusted plugins, statically linked and registered by ID; built-in manifests |
 | `[[mod_function_hook]]`: replace a reviewed guest function entry with a native callback that writes the post-call CPU state, including R15 (`docs/MOD_PACKAGES.md`, "Trusted function-entry hooks") | (not used by MKSC) |
+| `g_runtime_ram_dispatch_hook` and `g_runtime_force_interp_hook`: declared and reset by the engine, never installed by it (§3.3) | Which RAM ranges change, how to recognise each copy. MKSC installs the RAM dispatch hook for stack-copied flash helpers (`src/main.cpp:27`). |
 | `RunOptions::extended_view_frame`, `host_overlay` (2D lines, rects, circles, text; no textures; `src/runtime/host_overlay.h`), `g_ws_obj_margin_provider`, `gba_mod_publish_foreign_background` (240×160 BGR555) | Their use |
 
 ### 6.4 Transferability to Moto Racer Advance
@@ -421,27 +432,33 @@ How the game draws its races is **unverified**. It is the first Phase 1 measurem
 
 mGBA's I/O register viewer, tile and map viewers, memory viewer and write watchpoints show all three without a recompile. Two cases follow.
 
-**Case A: affine or tiled backgrounds, like MKSC** (`DISPCNT` mode 1 or 2 during races). The framework seams transfer. MKSC's own work does not *(inferred)*:
+**Case A: affine or tiled backgrounds, like MKSC** (`DISPCNT` mode 1 or 2 during races). The framework has seams for widescreen and the frame-rate patch type, but nothing for resolution. MKSC's own work does not transfer *(inferred)*:
 
-- The affine road extends into the margins for free.
-- HUD layers can be moved with the same providers. But which scenes are races, where the HUD sits, and which sprites to move is game-specific. In MKSC that is 344 lines (`MKSC@b89fbb4:src/mksc_extended_view.cpp`, with scene detection keyed to MKSC's "LAP"/"TIME" tile IDs). We would have to find our equivalents by reverse engineering, without a decomp.
-- If the game double-buffers per-scanline affine tables the way MKSC does, a similar one-instruction override might raise the visible frame rate. Finding the instruction and the buffer logic requires our own reverse engineering, for the same reason.
+- **Widescreen, backgrounds.** The affine road extends into the margins for free.
+- **Widescreen, HUD.** HUD layers can be moved with the same providers. But which scenes are races, where the HUD sits, and which sprites to move is game-specific. In MKSC that is 344 lines (`MKSC@b89fbb4:src/mksc_extended_view.cpp`, with scene detection keyed to MKSC's "LAP"/"TIME" tile IDs). We would have to find our equivalents by reverse engineering, without a decomp.
+- **Widescreen, world objects.** The OBJ seams only re-place or clip sprites the game has already put in OAM, or draw game-authored pixels in the margins (`GR@5e89943:src/gba/gba_ppu.h:276-305`). MKSC moves only HUD sprites (§6.2). If the game culls opponents and trackside objects at the edge of its 240-pixel view (**unverified**; `docs/plan.md` Phase 4 already expects something like it), the margins show road with no bikes. Two fixes, both reverse engineering of game logic *(inferred)*: patch the culling, or read object positions from game RAM and draw them in the margins through `g_ws_obj_margin_provider`.
+- **Resolution.** No internal-resolution path exists in either case. `docs/plan.md` Phase 4 wants affine layers re-rendered at higher resolution. The engine's PPU writes one output pixel per GBA pixel. Margins make the canvas wider (up to 896 columns, `gba_ppu.h:120-137`) but add no pixels inside the original view. The affine filter interpolates texture samples at that same density (`gba_ppu.cpp:1716-1721`). *(inferred)* A higher-resolution affine or tile renderer is new engine-side work, in our fork or a local patch of the submodule.
+- **Frame rate.** If the game double-buffers per-scanline affine tables the way MKSC does, a similar one-instruction override might raise the visible frame rate. Finding the instruction and the buffer logic requires our own reverse engineering, for the same reason.
 
 **Case B: software-drawn 3D** (in a bitmap mode, `DISPCNT` mode 4 or 5, or rasterized into tiles). Little transfers, and the framework lacks several pieces:
 
 - **Widescreen.** In bitmap modes the wide renderer draws the margins as backdrop: "A bitmap has a fixed width … the margins fall outside its bounds, staying backdrop" (`GR@5e89943:src/gba/gba_ppu.cpp:1794-1799`). The game's rasterizer only fills a 240-wide (mode 4) or 160×128 (mode 5) page in VRAM, so there is nothing to reveal. A wider view needs the camera to project wider and a renderer that draws into a host-side buffer wider than VRAM.
-- **Resolution.** No internal-resolution or upscaling path exists. Presentation filters only: sharp, linear, affine filter, colour profiles. `host_overlay` cannot draw textured triangles.
+- **Resolution.** No internal-resolution or upscaling path exists, as in case A. Presentation filters only: sharp, linear, affine filter, colour profiles. `host_overlay` cannot draw textured triangles.
 - **Frame rate.**
   - Every guest instruction advances the master clock by its ARM7TDMI cost (`docs/CPU_TIMING.md:3-7`; `COSIM_ORACLE.md`, "shared alignment clock"). *(inferred)* A CPU-bound software renderer therefore keeps the frame rate it has on hardware.
   - There is no overclock or cycle-scaling option. A search for `overclock`, `cycle_scale` and similar terms finds only the host fast-forward ("Turbo") key, which speeds up everything, game logic included.
-  - *(inferred)* Two paths could raise the frame rate. One is a native renderer that costs no guest cycles (below). The other is a new engine feature that discounts guest cycles, an overclock in effect. That changes timing for the whole game, and game logic tied to frame counts or timers may break.
+  - *(inferred)* Two paths could raise the frame rate. One is a native renderer that replaces the original and charges fewer guest cycles than it did (below). The other is a new engine feature that discounts guest cycles, an overclock in effect. Both change guest timing on purpose, so mGBA comparisons stop matching. The overclock changes it for the whole game, and game logic tied to frame counts or timers may break.
 - **Likely path for case B** *(inferred)*:
   1. Find the rasterizer entry points with mGBA's debugger and Ghidra.
   2. Declare them as `[[mod_function_hook]]`.
-  3. Implement the callback in game-owned C++: read the guest's transformed geometry, draw it natively (into VRAM first, to stay pixel-identical, then into a host buffer at higher resolution or wider), and return through R15.
+  3. Implement the callback in game-owned C++: read the guest's transformed geometry and draw it natively. A callback that handles the call skips the original body, and with it the body's guest cycles: the generated hook returns before the first instruction charges any (`GR@5e89943:src/recompile/emit_function.cpp:498-519`). Pixel-identical VRAM is then not enough. The game would run ahead of hardware timing, and input replays and mGBA comparisons could desync. Two options *(inferred, neither tried)*:
+     - **Observe, do not replace.** Read the geometry, then return 0. The original body runs and charges its own cycles, and guest state and timing stay identical. The native renderer draws only into a host buffer at higher resolution or wider. This serves resolution and widescreen, but not frame rate. `MC` registers read-only entry hooks of this kind (`MC@1aa1128:src/mods/minish_zelda1_foreign_world_plugin.cpp:802, 1265-1280`).
+     - **Replace.** Only needed when the original body must not run, as for a frame-rate gain. Draw into VRAM and the host buffer. To keep timing and replays identical, the callback must charge the replaced function's measured cycle cost, for example with `runtime_tick()` (declared in `src/armv4t/runtime_arm.h:404`; never called from a hook in any repo we read). The cost depends on the scene, so it has to be measured per call, and IRQs that would have fired during the function then fire at its end. Charging less is what would raise the frame rate, and it changes timing on purpose (see "Frame rate" above).
+
+     A wider host buffer needs geometry outside the original view, which the game may cull (see case A, world objects).
   4. Write a WebGL presentation path in the web host for the high-resolution buffer. The current host only displays the 240×160 (or wider) RGB frame.
 
-  All of this is new work in our repo, and possibly upstream. MKSC's 49-line plugin is not a model for its size.
+  All of this is new work in our repo. Upstream has no such path. Its roadmap lists "internal-resolution scaling" as out of scope "for now" (`GR@5e89943:docs/ROADMAP.md:521-525`), but the same line lists widescreen, which has since shipped, so the list says little about future plans. MKSC's 49-line plugin is not a model for its size.
 - **Watchdog false positive.** Per mstan/gbarecomp PR #2 (bitmap modes), a software rasterizer "legitimately never HALTs", and the hang watchdog can mistake that for a busy-spin. The watchdog is opt-in (`GBARECOMP_HANG_WATCHDOG=1`, `runtime_bus_bridge.cpp:1100-1104`).
 - **Bitmap modes are young.** They were added in July 2026 (PR #2, merge `80725f9`). Only mode 4 was exercised then, by Boktai's intro; "Modes 3 and 5 are untested". The later scanline-HLE comparison covered modes 0–5 on synthetic frames (`docs/ENGINE_HLE_DMA.md:10-16`), and that HLE renderer is the default at our pin. That is one more reason to keep an LLE build for comparison while bitmap rendering is investigated (§9, "Engine pin").
 
@@ -473,7 +490,8 @@ mGBA's I/O register viewer, tile and map viewers, memory viewer and write watchp
 | Homebrew `sdl2` may become `sdl2-compat`, which loads SDL3 with `dlopen` | `packaging/README.md`. This machine still has SDL2 2.32.10, which links CoreAudio directly per `otool -L`; `brew info` shows the formula is now an alias of `sdl2-compat 2.32.74`. | Fine for development builds. Packaging must bundle `libSDL3.dylib`, which `package_macos.sh` does. |
 | `.app` bundle cannot be signed with the launcher assets beside the executable | `packaging/README.md` | Ship a flat directory. Irrelevant for the browser target. |
 | `oracle/*.py` with `.exe` strings; `tools/gbaref/build.sh` hardcodes MSYS2 | §4 | Patch locally or upstream when we need them |
-| NanoBoyAdvance oracle | Private | Use the mGBA oracle and co-sim instead |
+| Co-sim coordinator launches its two runtimes with `creationflags=0x00000200` (Windows `CREATE_NEW_PROCESS_GROUP`) | `oracle/gba_cosim.py:82-84`. On this Mac, `subprocess.Popen(..., creationflags=0x200)` under Python 3.11.6 raises `ValueError: creationflags is only supported on Windows platforms` (checked). The `ctypes.windll` priority call that follows is inside `try`/`except` (lines 88-93), so it is harmless. | One-line local patch to line 84: `creationflags=0x00000200 if os.name == "nt" else 0`. With it, the script's `launch()` starts its process on this Mac (checked with a stand-in executable; no full co-sim run). Keep it as a patch file in our repo and apply it to the submodule's working tree; do not commit inside the submodule. |
+| NanoBoyAdvance oracle | Private | Use the mGBA oracle and co-sim (with the patch above) instead |
 | Netplay (`GBARECOMP_NETPLAY`, off by default in the engine; MKSC turns it on) | `cmake/GbaNetplay.cmake:1`; `MKSC@b89fbb4:CMakeLists.txt:7-12` | Keep it off. Untested on macOS by us. |
 | Host stack size (likelihood: plausible) | The engine says "Recompiled guest code maps guest calls (and some tail-call loops) onto the host call stack, so game executables reserve a large stack" (`src/runtime/mobile_platform.h:36-41`). Natively, generated code transfers control with `f(); return`, which the compiler is not required to turn into a tail call; only wasm builds get guaranteed tail calls (`src/armv4t/runtime_arm.h:195-229`). Every other platform reserves a large stack: 16 MiB on Windows through the executable's stack reserve (`CMakeLists.txt:332-366`, applied to `gbarecomp_runtime` users at line 404), which is also the default for new threads *(inferred, general Windows behavior)*; 16 MiB on the web through `-sSTACK_SIZE` and `-sDEFAULT_PTHREAD_STACK_SIZE` (`cmake/web_host_link_options.cmake:12-13`); 256 MiB on Android for the game thread (`src/runtime/mobile_platform.h:42`, `mobile_platform.cpp:34-44`). `MKSC` and `MMZ` set 16 MiB again for Windows only (`MKSC@b89fbb4:CMakeLists.txt:137-141`, `MMZ@218adfd:CMakeLists.txt:126-130`). macOS gets nothing. Measured on this Mac with a test program: main thread 8,372,224 bytes, `std::thread` 536,576 bytes (512 KiB + one page). Linked with `-Wl,-stack_size,0x1000000`, the main thread gets 16,777,216 bytes and `std::thread` still 536,576. With `--tcp`, the game core runs on a plain `std::thread`, with no stack size set (`runtime.cpp:2449-2472`), so by the measurement above it gets 512 KiB on macOS. | Link our executable with `-Wl,-stack_size,0x1000000` on Apple (playbook step 9). That covers headless and windowed runs, including `--tcp-observe`, where the game stays on the main thread. It does not cover `--tcp`. For observation, use `--tcp-observe`. Oracle lockstep needs `--tcp` and its `step` command, and it may need an upstream change that creates the game thread with an explicit stack size. |
 | Self-heal compiler | Uses `c++` (Apple clang) through `PATH`. `gcc_toolchain_available()` probes `g++`/`gcc`/`cc`/`clang` (`overlay_loader.cpp:131-165`). | Works per `b75bb63`. Disable it for strict runs. |
@@ -582,7 +600,7 @@ moto-racer-advanced-browser/
 
 Prerequisite: `roms/moto-racer-advance.gba` and `bios/gba_bios.bin` exist; the paths are already ignored.
 
-Every command and flag below exists at `GR@5e89943`. Only steps 3–4 were run for this study, using a scratch clone instead of a submodule. Steps 1–2 and 5–11 need the ROM or the BIOS, so what they produce is **expected from reading the code, not yet observed**. The same applies to the optional items at the end.
+Every command, flag and environment variable below exists at `GR@5e89943`, and mGBA's debugger commands at `MGBA@26b7884`. Only steps 3–4 were run for this study, using a scratch clone instead of a submodule. Steps 1–2 and 5–11 need the ROM or the BIOS, so what they produce is **expected from reading the code, not yet observed**. The same applies to the optional items at the end.
 
 **1. Check the inputs.**
 
@@ -599,9 +617,10 @@ Expected: BIOS `300c20df6731a33952ded8c436f7f186d25d3492`, 16384 bytes. Record t
 
 - **I/O register viewer:** the `DISPCNT` mode and enabled layers; the BG2/BG3 affine registers (`BG2PA`–`BG2PD`, `BG2X`, `BG2Y` and the BG3 set); the DMA control registers, looking for HBlank-timed transfers into those affine registers.
 - **Tile, map and memory viewers:** whether tile or bitmap VRAM changes every frame, or only tilemaps and scroll values.
-- **Debugger write watchpoints** on a VRAM range: which code stores to it, and whether that code runs from ROM (`0x08…`) or RAM (`0x02…`/`0x03…`). Whether mGBA's watchpoints also fire on DMA writes is **unverified**. If VRAM changes but no CPU store hits, read the source address from the DMA registers.
+- **Debugger write watchpoints** on VRAM addresses: which code stores to them, and whether that code runs from ROM (`0x08…`) or RAM (`0x02…`/`0x03…`). mGBA 0.10.5's command-line debugger sets one watchpoint per address: `watch/w` fires on every write, `watch/c` only when the value changes (`MGBA@26b7884:src/debugger/cli-debugger.c:113-116, 640-667`). Whether they also fire on DMA writes is **unverified**. If VRAM changes but no CPU store hits, read the source address from the DMA registers.
+- **RAM code that changes.** For each routine seen running from RAM, note its address range. After it has run once, put `watch/c` watchpoints on a few of its words, such as the first instruction and the literal pool, and keep playing through menus and several tracks. A hit means a different routine was copied over it (an overlay) or the copy was patched. Static recompilation cannot see either, and the coverage report stays `FULLY_STATIC` (§3.3). The DMA caveat above applies here too; playbook step 10 has a check that does not depend on it.
 
-Record the mode, the per-frame VRAM write pattern and any per-scanline affine updates in `docs/research/` with the ROM SHA-1. Classify by the pattern, not the mode number alone (§6.4). The writer PCs are also a first look at open question 4 in the findings doc, "how much code runs from RAM".
+Record the mode, the per-frame VRAM write pattern, any per-scanline affine updates, and the RAM code ranges with any watchpoint hits in `docs/research/` with the ROM SHA-1. Classify by the pattern, not the mode number alone (§6.4). The writer PCs are also a first look at open question 4 in the findings doc, "how much code runs from RAM". The RAM code results are an input to ADR 0001.
 
 **3. Get the engine at the pin.** Use a submodule, as in §9, or a scratch clone for pure investigation.
 
@@ -732,14 +751,15 @@ cmake --build build/native --target MotoRacerAdvanceRecomp
 
 - **10a. Coverage with the interpreter bridge, no healing.** The number to record.
 - **10b. Strict.** Aborts at the first miss and prints its PC.
-- **10c. Default.** Healing on; `c++` compiles overlays into `recomp_cache/`.
+- **10c. Default.** Healing on; `c++` compiles overlays into `build/heal-cache/`.
 
-Each run gets its own `--save-path` and starts with no save file there, so all three start from the same state and none touches `roms/moto-racer-advance.sav`. Each also names its own coverage and miss files. By default every run writes the same two files in the working directory, and the later runs would overwrite the first (`runtime.cpp:2105-2116`).
+Each run gets its own `--save-path` and starts with no save file there, so all three start from the same state and none touches `roms/moto-racer-advance.sav`. Each also names its own coverage and miss files. By default every run writes the same two files in the working directory, and the later runs would overwrite the first (`runtime.cpp:2105-2116`). Old fragments are deleted first, because a run with no misses leaves an existing one in place (§3.3). Run 10c points its heal cache at `build/heal-cache/` with `GBARECOMP_HEAL_CACHE` (`overlay_loader.cpp:455-460`). Under the default `recomp_cache/` in `build/native/`, any later run with healing on would load it warm, and the PCs it holds would never show up as misses again (§3.3).
 
 ```sh
 cd build/native
 mkdir -p ../saves
 rm -f ../saves/smoke-bridge.sav ../saves/smoke-strict.sav ../saves/smoke-heal.sav
+rm -f ../logs/smoke-bridge.toml.frag ../logs/smoke-strict.toml.frag ../logs/smoke-heal.toml.frag
 GBARECOMP_SELFHEAL_RECOMPILE=0 \
 GBARECOMP_COVERAGE_JSON=../logs/smoke-bridge.json GBARECOMP_MISS_FRAG=../logs/smoke-bridge.toml.frag \
 ./MotoRacerAdvanceRecomp --bios ../../bios/gba_bios.bin \
@@ -751,6 +771,7 @@ GBARECOMP_COVERAGE_JSON=../logs/smoke-strict.json GBARECOMP_MISS_FRAG=../logs/sm
 ./MotoRacerAdvanceRecomp --bios ../../bios/gba_bios.bin \
   --rom ../../roms/moto-racer-advance.gba --frames 1800 --no-window \
   --save-path ../saves/smoke-strict.sav ../../game.toml 2>&1 | tee ../logs/smoke-strict.log
+GBARECOMP_HEAL_CACHE=../heal-cache \
 GBARECOMP_COVERAGE_JSON=../logs/smoke-heal.json GBARECOMP_MISS_FRAG=../logs/smoke-heal.toml.frag \
 ./MotoRacerAdvanceRecomp --bios ../../bios/gba_bios.bin \
   --rom ../../roms/moto-racer-advance.gba --frames 1800 --no-window \
@@ -765,38 +786,66 @@ Each run should print:
 - `final_pc=… unmapped=… io_unhandled=… ppu_frames=1800 …`, `pal_nonzero=… vram_nonzero=…`
 - a `self_heal_coverage=` line
 
-Each run writes its coverage JSON, and its miss fragment only if it had at least one dispatch miss (§3.3). Record these in `docs/research/` with the ROM SHA-1:
+Each run that reaches its last frame writes its coverage JSON, and its miss fragment only if it had at least one dispatch miss (§3.3). A strict run that aborts writes neither (§3.4). Record these in `docs/research/` with the ROM SHA-1:
 
 - the coverage verdict
 - the number of misses
 - how many misses are in IWRAM (`0x03…`) or EWRAM (`0x02…`); this is open question 4 in the findings doc, "how much code runs from RAM"
-- for each RAM miss, whether the code bytes at that PC also occur in the ROM. A match is a verbatim copy that `[[code_copy]]` or `source_addr` can cover; no match means code built or patched at runtime, which has no static path (§3.3). `GBARECOMP_IWRAM_DUMP=<path>` writes IWRAM at exit (`runtime.cpp:2129-2140`). EWRAM can be read with the TCP `read_ewram` command. The byte search needs a small script we have not written yet. *(inferred)* An exit dump can mislead if a RAM region holds different code at different times, so re-check doubtful cases at the frame of the miss.
+- for each RAM miss, which of the three kinds in §3.3 it is. Two checks:
+  - **Bytes.** Compare the whole live routine, up to its last instruction and its literal pool, with the ROM, not only the bytes at the PC. A full match at one ROM offset is a verbatim copy that `[[code_copy]]` or `source_addr` can cover. A partial match is a patched copy, and no match means generated code. Neither may get a `[[code_copy]]`, which would make the static body stale (§3.3). `GBARECOMP_MISS_IWRAM_DUMP=<path>` and `GBARECOMP_MISS_EWRAM_DUMP=<path>` save live RAM at the first IWRAM or EWRAM miss of the run (`runtime_arm_default_aborts.cpp:868-897`; `MMZ` sets the IWRAM one in every discovery session, `MMZ@218adfd:tools/play-discovery.ps1:101`). `GBARECOMP_IWRAM_DUMP=<path>` writes IWRAM at exit (`runtime.cpp:2129-2140`), and the TCP `read_ewram` command reads EWRAM. The comparison needs a small script we have not written yet.
+  - **Stability.** A match at one moment does not rule out an overlay. Set `GBARECOMP_WRAM_TRACE=<path>` with `GBARECOMP_WRAM_TRACE_LO` and `_HI` around the routine's range. The runtime then writes one JSONL record per changed byte per frame, with the frame number (`runtime.cpp:2262-2323`). Any change after the routine first ran means an overlay or a patch. *(inferred from the code)* The trace compares memory once per frame, so it sees DMA writes too, but not a change that is undone within the same frame.
 - `unmapped` and `io_unhandled`
 
-**11. Play and record, then replay strictly.**
+**11. Play and record, then replay until the route is static.**
 
 The trace holds input only. The runtime's comment says strict acceptance replays it "from the same initial SRAM" (`runtime.cpp:3212-3216`). But the runtime loads the save file at boot when it exists and writes it back during play and at exit (`runtime.cpp:1834-1844, 1961-1989`). Without `--save-path`, every run shares `roms/moto-racer-advance.sav`, and a replay would start from whatever earlier runs left there. Both reference repositories pin the initial save:
 
 - `MMZ` snapshots it at the start of each discovery session and restores it before the strict replay (`MMZ@218adfd:tools/play-discovery.ps1:45-54`, `tools/verify-strict.ps1:47-51`, `-InitialSave`).
 - `MKSC` deletes the save and passes a fresh `--save-path` on every strict run (`MKSC@b89fbb4:tools/test-attract-gameplay.ps1:39-40, 65`).
 
-We start every route from no save file:
+We start every route from no save file.
+
+Discovery runs in bridge mode: healing off, so no heal cache can hide a miss, and named coverage and miss files (§3.3). `MMZ` records its discovery sessions the same way (`MMZ@218adfd:tools/play-discovery.ps1:92-100`). Each command deletes its fragment first, because a run with no misses leaves an old one in place.
+
+**11a. Record** the route while playing:
 
 ```sh
-rm -f ../saves/route-menu-race1.sav
-GBARECOMP_INPUT_RECORD=../logs/route-menu-race1.input ./MotoRacerAdvanceRecomp --window \
-  --save-path ../saves/route-menu-race1.sav \
+rm -f ../saves/route-menu-race1.sav ../logs/route-menu-race1.record.toml.frag
+GBARECOMP_SELFHEAL_RECOMPILE=0 GBARECOMP_INPUT_RECORD=../logs/route-menu-race1.input \
+GBARECOMP_COVERAGE_JSON=../logs/route-menu-race1.record.json \
+GBARECOMP_MISS_FRAG=../logs/route-menu-race1.record.toml.frag \
+./MotoRacerAdvanceRecomp --window --save-path ../saves/route-menu-race1.sav \
   --bios ../../bios/gba_bios.bin --rom ../../roms/moto-racer-advance.gba ../../game.toml \
   2>&1 | tee ../logs/route-menu-race1.record.log
-# review the .frag, merge real entries into game.toml with notes, regenerate (step 8), rebuild (step 9), then:
+```
+
+**11b. Fix and replay in bridge mode, until no miss is left.** Review the newest fragment, merge the real entries into `game.toml` with notes, regenerate (step 8) and rebuild (step 9). Then replay the trace with the same bridge settings. One run lists every miss that reaches dispatch on the route, not only the first:
+
+```sh
+rm -f ../saves/replay.sav ../logs/route-menu-race1.bridge.toml.frag
+GBARECOMP_SELFHEAL_RECOMPILE=0 GBARECOMP_INPUT_REPLAY=../logs/route-menu-race1.input \
+GBARECOMP_COVERAGE_JSON=../logs/route-menu-race1.bridge.json \
+GBARECOMP_MISS_FRAG=../logs/route-menu-race1.bridge.toml.frag \
+./MotoRacerAdvanceRecomp --no-window --frames <ppu_frames from the recording log> \
+  --save-path ../saves/replay.sav \
+  --bios ../../bios/gba_bios.bin --rom ../../roms/moto-racer-advance.gba ../../game.toml \
+  2>&1 | tee ../logs/route-menu-race1.bridge.log
+```
+
+Repeat 11b until the replay writes no fragment and prints `self_heal_coverage=FULLY_STATIC`. Expect a few rounds. The bridge interprets a missed function and everything it calls until control returns to its caller (`runtime_arm_default_aborts.cpp:434, 464, 511-625`). A function reached only from inside that call tree never reaches dispatch, so it shows up as a miss once its caller is static. *(inferred)* The recompiler follows direct `BL` calls in the same instruction set (§3.1), so most such callees are found as soon as their caller is seeded. Computed calls and mode switches need another round.
+
+**11c. Strict gate.**
+
+```sh
 rm -f ../saves/replay.sav
 GBARECOMP_STRICT_STATIC=1 GBARECOMP_SELFHEAL_RECOMPILE=0 \
 GBARECOMP_INPUT_REPLAY=../logs/route-menu-race1.input ./MotoRacerAdvanceRecomp --no-window \
   --frames <ppu_frames from the recording log> --save-path ../saves/replay.sav \
-  --bios ../../bios/gba_bios.bin --rom ../../roms/moto-racer-advance.gba ../../game.toml
+  --bios ../../bios/gba_bios.bin --rom ../../roms/moto-racer-advance.gba ../../game.toml \
+  2>&1 | tee ../logs/route-menu-race1.strict.log
 ```
 
-Repeat until the strict replay ends in `self_heal_coverage=FULLY_STATIC dispatch_misses=0 interpreted_insns=0 healed_native=0`.
+It must end in `self_heal_coverage=FULLY_STATIC dispatch_misses=0 interpreted_insns=0 healed_native=0`. A strict run stops at the first miss and writes no fragment and no coverage JSON (§3.4). If it fails, go back to 11b rather than fixing one PC per rebuild.
 
 Avoid save-state loads while recording; replays do not capture them (`MMZ@218adfd:README.md`). Before copying a finished trace to `tests/`, name its initial save in a header. The replay reader skips lines that start with `#` (`runtime.cpp:3268`):
 
@@ -812,7 +861,7 @@ Avoid save-state loads while recording; replays do not capture them (`MMZ@218adf
 
 - **Rendering mode in the recompiled build**, to cross-check step 2. Run windowed with `--tcp-observe 19881`, play or replay a route into a race (`GBARECOMP_INPUT_REPLAY` also drives windowed runs, `runtime.cpp:3830-3834`), and send `{"cmd":"ppu_state"}`. It returns `dispcnt` and the BG registers (`src/debug/tcp_debug_server.cpp:924-945`). Do not use `--tcp` here: its game thread has only 512 KiB of stack on macOS (§7.2), and it ignores `GBARECOMP_INPUT_REPLAY` (§4). Driving the game to a race there would take hand-written `set_keyinput` or `run_frames` commands with a `keyinput` field.
 - **LLE scanline build for comparison** (§9, "Engine pin"). Configure `build/native-lle` with the step 9 command plus `-DGBARECOMP_SCANLINE_IMPLEMENTATION=LLE`, replay the same route with `--dump-png` or `GBARECOMP_FRAMEDUMP_DIR` in both builds, and compare the frames.
-- **Co-simulation.** Configure a second build directory with `-DGBA_COSIM=ON`, then run `python3 gbarecomp/oracle/gba_cosim.py --a recomp --b recomp …` with `GBA_COSIM_EXE/ROM/BIOS/CONFIG/CWD` set (`oracle/gba_cosim.py:1-40`).
+- **Co-simulation.** Apply the one-line `creationflags` patch first; without it the script fails on macOS before starting anything (§7.2). Configure a second build directory with `-DGBA_COSIM=ON`, then run `python3 gbarecomp/oracle/gba_cosim.py --a recomp --b recomp …` with `GBA_COSIM_EXE/ROM/BIOS/CONFIG/CWD` set (`oracle/gba_cosim.py:1-40`). The script starts both runtimes with `--rom` and no `--save-path` (`oracle/gba_cosim.py:80-81`). *(inferred)* Both would then read and write the save next to the ROM (`runtime.cpp:1834-1838`), so point `GBA_COSIM_ROM` at a copy of the ROM in a scratch directory under `build/`.
 - **Local web smoke test**, once Emscripten is installed. It compiles the same `generated/game` as the native build, through a small game-library project, instead of regenerating with `tools/cli.py` (§9). *(inferred, untested)* It relies only on what `build_web.sh` checks of a project: a `CMakeLists.txt` that contains `-mtail-call`, and a `gbarecomp_game` library in the game build directory (`build_web.sh:202-221`). Generated code includes only `<cstdint>`, `runtime_arm.h` and its own generated header (`tools/gba_recompile/main.cpp:568-569, 829-830`), hence the two include directories below. Never publish the output until the owner has decided (§5.6).
 
   `web/game-lib/CMakeLists.txt`:
@@ -867,6 +916,8 @@ For the orchestrator to reconcile. This PR does not edit those files.
 
   The remaining Phase 3 work is our own link step for game hooks, a player-facing shell, and the hosting decision.
 - `docs/plan.md` Phase 2 plans to record inputs in mGBA and replay them in the recompiled build. gbarecomp records and replays its own format, and drives the mGBA oracle over TCP. Replaying mGBA's own recordings needs a converter we do not have (§4).
+- `docs/plan.md` Phase 1, "Measure how much code runs from RAM", should also ask whether that code changes after it is copied. Overlays and patched copies run stale static code that coverage reports cannot detect (§3.3).
+- `docs/plan.md` Phase 4, "Resolution": gbarecomp has no internal-resolution path for affine backgrounds either, so that item is new engine-side work in both rendering cases (§6.4).
 
 ## Open questions
 
@@ -881,3 +932,4 @@ For the orchestrator to reconcile. This PR does not edit those files.
    - **MIT (or similar) for original code and docs**, with a notice that builds link PolyForm NC code and that any code adapted from gbarecomp, `MKSC` or `MMZ` keeps their license. Our own tools and docs become freely reusable, at the cost of per-file license tracking.
 
    Recommendation: PolyForm Noncommercial 1.0.0 for everything, while most of our code is glue around gbarecomp. Revisit if we write tools that stand on their own. The owner decides.
+8. **RAM code that changes** (§3.3). If the race code runs from RAM regions that receive overlays or patches, static recompilation gives no correctness guarantee there until we write a game-owned dispatch or force-interpreter hook, and the coverage report will not flag it. Playbook steps 2 and 10 measure it. The result belongs in ADR 0001 next to the rendering mode.
