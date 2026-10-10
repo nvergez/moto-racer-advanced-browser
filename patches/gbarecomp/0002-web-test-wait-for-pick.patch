@@ -1,0 +1,36 @@
+Make the web bootstrap test wait for each file pick to finish.
+
+tests/web/bootstrap_test.js simulates a file pick, then waits a fixed 40
+setImmediate turns before checking what the page logged. The page hashes
+the file with crypto.subtle.digest, which Node completes on the libuv
+thread pool, so on a busy machine the result can arrive after those 40
+turns and the test fails at whichever check comes next. On GitHub's
+ubuntu-24.04 runner (ctest --parallel 4) it failed in both runs: once at
+the "ROM refused: Wrong ROM" check in test_bring_your_own_rom, once at
+`Module.arguments` in test_developer_parameters. It passes on an idle
+M4 Pro. Delaying every digest by 1 ms (a `node -r` preload) makes it
+fail every time on macOS too.
+
+Every outcome of a pick logs one line (accepted, refused or check
+failed), so wait for that line, with a 10 s deadline, before the
+original 40 turns. Only the test changes; the page is untouched. With
+the patch the test passes with digests delayed by 0, 2, 20 and 200 ms.
+
+diff --git a/tests/web/bootstrap_test.js b/tests/web/bootstrap_test.js
+index d8b22e6..50780ef 100644
+--- a/tests/web/bootstrap_test.js
++++ b/tests/web/bootstrap_test.js
+@@ -42,8 +42,13 @@ function page({search = '', hostname = 'games.example', build = {}, confirmAnswe
+   for (const file of ['save_store.js', 'asset_store.js', 'bootstrap.js']) vm.runInContext(source(file), context);
+   const get = id => document.getElementById(id);
+   const pick = async (id, bytes, name) => {
++    const before = logs.length;
+     get(id).files = [{name, arrayBuffer: async () => bytes.slice().buffer}];
+     get(id).onchange();
++    // The page hashes the file with crypto.subtle, which completes on the
++    // libuv thread pool, so no fixed number of turns is enough on a busy
++    // machine. Every outcome of a pick logs a line: wait for it.
++    for (const deadline = Date.now() + 10000; logs.length === before && Date.now() < deadline;) await turn();
+     for (let i = 0; i < 40; ++i) await turn();
+   };
+   return {context, get, logs, listeners, requests, scripts, confirms, pick, reloads: () => reloads,

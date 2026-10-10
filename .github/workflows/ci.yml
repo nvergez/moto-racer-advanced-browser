@@ -1,0 +1,103 @@
+# ROM-free and BIOS-free checks. Nothing here may ever need the game ROM or a
+# BIOS dump: CI runs on a public repository.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The release gbarecomp's web host was validated with (packaging/web/README.md).
+  EMSCRIPTEN_VERSION: 6.0.10
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Lint the scripts
+        run: |
+          shellcheck --version
+          shellcheck -x scripts/*.sh scripts/lib/*.sh
+
+  native:
+    name: native (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-15 is Apple silicon, like the development machine. Ubuntu
+        # covers the GNU ld link path and a build without SDL2.
+        os: [macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja sdl2
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+      - name: Set up submodules
+        run: scripts/setup.sh
+      - name: Fetch the free test ROMs
+        run: scripts/fetch-test-roms.sh
+      - name: Build gbarecomp and run its tests
+        run: scripts/test-engine.sh
+      - name: Smoke test, native
+        run: scripts/smoke-test.sh --native-only
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: logs-native-${{ matrix.os }}
+          path: |
+            build/smoke/logs/
+            build/gbarecomp/Testing/Temporary/
+          if-no-files-found: ignore
+
+  web:
+    name: web smoke (Emscripten)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+      - name: Cache emsdk
+        id: emsdk-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/emsdk
+          key: emsdk-${{ runner.os }}-${{ env.EMSCRIPTEN_VERSION }}
+      - name: Install Emscripten
+        if: steps.emsdk-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$EMSCRIPTEN_VERSION" \
+            https://github.com/emscripten-core/emsdk.git ~/emsdk
+          ~/emsdk/emsdk install "$EMSCRIPTEN_VERSION"
+          ~/emsdk/emsdk activate "$EMSCRIPTEN_VERSION"
+      - name: Set up submodules
+        run: scripts/setup.sh
+      - name: Smoke test, web (scripts source ~/emsdk/emsdk_env.sh)
+        run: scripts/smoke-test.sh --web-only
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: logs-web
+          path: build/smoke/logs/
+          if-no-files-found: ignore

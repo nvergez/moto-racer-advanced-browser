@@ -1,0 +1,20 @@
+# Smoke-test config for jsmolka/gba-tests thumb/thumb.gba at commit a7113b6 (MIT).
+# Fetched by scripts/fetch-test-roms.sh. Exercises the same config-driven
+# gba_recompile path as game.toml, on a ROM anyone may download.
+# Values were read from the file: shasum -a 1, md5 -q, stat -f %z.
+[game]
+name = "gba-tests thumb"
+short_name = "gba_tests_thumb"
+
+[program]
+name = "gba-tests thumb.gba"
+id = "1337"                     # header game code
+load_address = 0x08000000
+size = 0x00000E60               # 3680 bytes
+entry_pc = 0x080000C0           # the header branch target, as in gbarecomp's own test_rom_thumb
+speculative_literal_harvest = false
+codegen_shards = 2
+
+[identity]
+sha1 = "bdcf58182e9a99b388acba5fbca87ac31e8f58eb"
+md5 = "b8e0ee5467808a8af7cb15c6e65827e5"
