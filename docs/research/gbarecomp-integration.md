@@ -5,9 +5,11 @@
 
 Conventions:
 
-- *(inferred)* marks a conclusion drawn from reading code or docs, not observed by running it.
+- Most of this study comes from reading code and docs. A statement with a citation and no tag says what the cited file says or does. It was read, not observed by running it, unless the text says it was run.
+- *(inferred)* marks a conclusion that goes beyond what the cited source states, such as a consequence we drew from code we did not run.
+- Recommendations are our judgment. They are worded as recommendations ("we recommend", "Recommendation:", "prefer", "use"), not as facts.
 - **unverified** marks a claim we have not checked at all.
-- Citations use `repo@sha:path:line`. Line numbers are valid at the cited commit only.
+- Citations use `repo@sha:path:line`. A bare `path:line` refers to `GR` unless the sentence names another repository. Line numbers are valid at the cited commit only.
 
 ## Sources
 
@@ -30,17 +32,18 @@ Machine used for the build check in §7: Apple M4 Pro, macOS 26.5.2, Apple clang
 
 1. **gbarecomp builds and passes its tests on our Mac.** At `GR`, configure + build + `ctest` finished in under 30 seconds of wall time, with **50/50 tests passing**, the browser JS unit tests among them (§7).
 2. **None of the three game repositories we read can link on macOS as written** *(inferred: we did not build them)*. They pass `-Wl,--start-group` unconditionally, and Apple's linker rejects that flag (checked on this machine). gbarecomp's own `target_link_gbarecomp_runtime_stack()` handles this. Our repo must use it (§7, §9).
-3. **The browser target is one day old at our pin.** It landed on `main` on 2026-10-09 (PR #16, merge `4855ba2`). Neither `MKSC` nor `MMZ` pins an engine that has it, so we would be the first game repo on it. The supported web flow links a generic `main()` and a CLI-exported library. Game-owned hooks such as MKSC's mods are **not** included unless we write our own web link step (§5).
-4. **Legal: a "bring your own ROM" web bundle still contains the game's code.** `game.wasm` is compiled from the recompiled ROM and the recompiled BIOS. gbarecomp's docs contradict each other on whether such a bundle can be published. The owner must decide before Phase 3 hosting (§5.6, open questions).
+3. **The browser target is one day old at our pin.** It first appears on `main` at `4855ba2` (PR #16, merged 2026-10-09). Our pin `5e89943` is two merges later: PR #29 (opt-in DMA batching) and PR #31, which makes the HLE scanline renderer the build default. That default was not part of PR #16's web validation. We recommend keeping the pin plus a second LLE build to compare frames against (§9). Neither `MKSC` nor `MMZ` pins an engine that has the web host, so we would be the first game repo on it. The supported web flow links a generic `main()` and a CLI-exported library. Game-owned hooks such as MKSC's mods are **not** included unless we write our own web link step (§5).
+4. **Legal: a "bring your own ROM" web bundle still contains the game's code.** `game.wasm` is compiled from the recompiled ROM and the recompiled BIOS. gbarecomp's docs contradict each other on whether such a bundle can be published, while `MKSC` already publishes native binaries with the same kinds of code. §5.6 compares four options. Our recommendation: local builds only through Phase 3; if the owner later wants a public page, a bundle with an open-source BIOS instead of Nintendo's. The owner decides before Phase 3 hosting.
 5. **The BIOS dump is needed twice:** at build time, to recompile it (LLE path, and required by `build_web.sh`), and at runtime, where it is always loaded, even with the opt-in BIOS HLE. Generating the *game's* C++ does not need it (§2.3).
-6. **MKSC's enhancements do not transfer to a software-rasterized 3D renderer.**
-   - The 60 FPS mod overrides one Thumb immediate in an affine-background road renderer.
-   - Adaptive Widescreen widens tile and affine background layers and moves HUD elements.
+6. **MKSC's enhancements are specific to MKSC. What transfers is the framework's seams, not MKSC's work.**
+   - The 60 FPS mod overrides one Thumb immediate in an affine-background road renderer. The patch came from a researcher who also worked on the MKSC decomp, which we do not have for our game.
+   - Adaptive Widescreen is 344 lines of MKSC-specific code (scene detection by tile IDs, HUD rectangles, sprite moves) on top of the engine's PPU providers.
    - In bitmap modes 3/4/5, gbarecomp draws the widescreen margins as plain backdrop.
    - The framework has no internal-resolution upscaling and no CPU overclock.
-   - If Moto Racer Advance draws its races in software into a bitmap mode (**unverified**), every enhancement needs a host-side renderer behind a `[[mod_function_hook]]`. That is new work (§6).
+   - *(inferred)* If Moto Racer Advance draws its races in software (**unverified**; playbook step 2 measures it), resolution and widescreen need a host-side renderer behind a `[[mod_function_hook]]`. A higher frame rate could come from that renderer or from a new engine feature that scales guest cycles, which risks breaking game logic tied to frame timing. Either way it is new work (§6).
 7. **`gba_recompile` stops discovering functions at 4096 by default, without saying so.** MKSC passes `--max-functions 65536` and discovers 13,717 to 20,815 functions, depending on whether decomp seeds are used. We must do the same (§3.1).
 8. **Several debugging tools in `TCP.md` do not exist in the code at our pin.** These include the per-frame ring, `rdb_*`, and the `*_diff` commands. The coverage report, strict-static mode, input record/replay, save states, `state_hash` and the co-simulation engine do exist. The NanoBoyAdvance oracle binary is not in any public repo (§4).
+9. **macOS gives the game the smallest host stack of any platform.** Windows and the web reserve 16 MiB and Android 256 MiB; a macOS main thread has 8 MiB and a `std::thread` 512 KiB (measured). The engine maps guest calls onto the host stack. The playbook links with a 16 MiB main-thread stack. The game thread that `--tcp` creates stays at 512 KiB, so we recommend `--tcp-observe` for debugging (§7.2).
 
 ---
 
@@ -57,7 +60,7 @@ Machine used for the build check in §7: Apple M4 Pro, macOS 26.5.2, Apple clang
 
 Every repo exposes the engine path as a CMake cache variable (`GBARECOMP_ROOT`) and pulls it in with `add_subdirectory("${GBARECOMP_ROOT}" gbarecomp_build EXCLUDE_FROM_ALL)` (`MKSC@b89fbb4:CMakeLists.txt:14-31`). The engine's own nested submodules come in through `--recurse-submodules`. `arm-recomp-core` uses a relative URL (`../arm-recomp-core.git`), which resolved to `https://github.com/mstan/arm-recomp-core.git` when we cloned.
 
-Neither engine commit pinned by a game repo (`29efc02` for MKSC, `7c9a1eb` for MMZ and MC) contains `packaging/web/` (checked with `git cat-file -e`). Of the commits studied, only `GR` has the web host.
+Neither engine commit pinned by a game repo (`29efc02` for MKSC, `7c9a1eb` for MMZ and MC) contains `packaging/web/` (checked with `git cat-file -e`). The web host first appears at `4855ba2`, two merges before our pin (§9, "Engine pin").
 
 ### 1.2 Top-level files (MKSC)
 
@@ -94,7 +97,7 @@ Neither engine commit pinned by a game repo (`29efc02` for MKSC, `7c9a1eb` for M
 
 The small importer outputs in `symbols/` are tracked. `MMZ` ignores `third_party/` and `*.csv` as well, and un-ignores `docs/screenshots/*.png`.
 
-Inside the engine, BIOS-derived output is ignored. `GR@5e89943:src/runtime/generated_bios/.gitignore` says `bios_recompiled.cpp` "embeds Nintendo's BIOS bytes as instruction-by-instruction lowerings". `bios_dispatch_table.cpp` and `bios_dispatch_stub.cpp` are tracked.
+Inside the engine, BIOS-derived output is ignored. `GR@5e89943:src/runtime/generated_bios/.gitignore` says `bios_recompiled.cpp` "embeds Nintendo's BIOS bytes as instruction-by-instruction lowerings", and it ignores `bios_symbol_map.cpp` as BIOS-derived too. `bios_dispatch_table.cpp` and `bios_dispatch_stub.cpp` are tracked.
 
 ### 1.4 Release packaging
 
@@ -118,7 +121,7 @@ Inside the engine, BIOS-derived output is ignored. `GR@5e89943:src/runtime/gener
   - `[video] screen, view_width, resize_view, sharp_filter, affine_filter, widescreen`
   - `[audio] shadow`
 
-  Paths resolve relative to the config file's directory. The value `TBD` counts as empty. MKSC's `[runtime] debug_port/window_title` are **ignored** by both readers. They only document the compile-time defines.
+  Paths resolve relative to the config file's directory. The value `TBD` counts as empty. MKSC's `[runtime] debug_port/window_title` are **ignored** by both readers. They only document compile-time defines, and those defines do not reach the runtime library either (playbook step 9).
 - **The web build** exports the runtime's scalar subset to `runtime.toml` (`GR@5e89943:packaging/web/runtime_config.py`, described in `packaging/web/README.md`).
 
 ### 2.2 Recompiler fields (`GR@5e89943:docs/TOML_SCHEMA.md`, `tools/gba_recompile/config.cpp`)
@@ -146,7 +149,7 @@ The code also accepts `[[alu_immediate_override]]` (`config.cpp:223-252, 488-490
 
 | Key | Meaning | Source |
 |---|---|---|
-| `[rom].sha1` | **Required.** The runtime refuses to launch without it ("per-game TOML must set [rom].sha1"). | `runtime.cpp:1411-1420` |
+| `[rom].sha1` | One of three sources for the expected ROM SHA-1, which **is required**: `[rom].sha1`, `RunOptions::builtin_rom_sha1` in `main.cpp`, or `--rom-sha1`. With none of them, the runtime refuses to launch ("per-game TOML must set [rom].sha1"). On the web, `main()` passes no `RunOptions`. The page passes `--rom-sha1`. `build_web.sh` takes that value from `[rom].sha1` or from the ROM given at build time, and refuses to build when it has neither. | `runtime.cpp:1315-1316, 902-907, 1411-1416`; `packaging/web/main.cpp:5`; `build_web.sh:138-152`; `packaging/web/bootstrap.js:8, 64` |
 | `[bios].path`, `.sha1` | BIOS file and expected hash. Wrong size (≠ 16384) is fatal; a SHA-1 mismatch is only a warning. Without the recomp-ui launcher, macOS and Linux have no file dialog: pass `--bios`/`--rom` or set the paths. | `runtime.cpp:1385-1409`; `asset_picker.cpp:141-173, 203-205, 244-249` |
 | `[bios].hle` | Opt-in SWI HLE ported from mGBA (MPL-2.0). The dump is **still required**. | `ENHANCEMENTS.md` §1 "The BIOS dump is still required, even with HLE on" |
 | `[bios].skip_intro` | Skips the boot logo without changing SWI behaviour. MMZ ships it on. It shifts IRQ timing, so the strict-static gate has to be re-run. | `PRINCIPLES.md:68-96` |
@@ -186,7 +189,7 @@ MKSC's first `game.toml` (`MKSC@328b915:game.toml`) had only `[game]`, `[program
 
 The finder follows direct branches and BL within the same ARM/Thumb mode. It refuses to enter `[[data_range]]`. It decodes `[[code_copy]]` RAM addresses from their ROM source bytes. Output: `recompiled_NNN.cpp` shards, `recompiled.h`, `dispatch_table.cpp`, `symbol_map.cpp`, and `data_symbol_map.cpp` when `--data-symbols` is given (`GR@5e89943:tools/gba_recompile/main.cpp:104-141`).
 
-- **The function cap is silent.** The default `--max-functions` is 4096 (`tools/gba_recompile/main.cpp:97`; `src/recompile/function_finder.h:227`). Past the cap, non-required seeds are skipped with `continue` and no warning (`src/recompile/function_finder.cpp:1952`). MKSC uses 65536 (`MKSC@b89fbb4:tools/regen.ps1:3`). MKSC discovers 13,717 functions without decomp seeds and 20,815 with them (`GR@5e89943:docs/SYMBOL_OVERLAY.md:6, 141-155`). MMZ's README reports 10,885.
+- **The function cap is silent.** The default `--max-functions` is 4096 (`tools/gba_recompile/main.cpp:97`; `src/recompile/function_finder.h:227`). Past the cap, non-required seeds are skipped with `continue` and no warning (`src/recompile/function_finder.cpp:1952`). MKSC uses 65536 (`MKSC@b89fbb4:tools/regen.ps1:4, 54`). MKSC discovers 13,717 functions without decomp seeds and 20,815 with them (`GR@5e89943:docs/SYMBOL_OVERLAY.md:6, 141-155`). MMZ's README reports 10,885.
 - **Misses are cheap; false positives are not.** Decoding data as code produces junk C. The finder is built to be conservative, and the TOML fills the gaps (`docs/TOML_SCHEMA.md`, "False-positive policy").
 - Generated code is evidence, not authority. Never hand-edit it. Fix the config or the recompiler and regenerate (`GR@5e89943:CLAUDE.md`, `PRINCIPLES.md`).
 
@@ -206,12 +209,14 @@ These are the rules in `GR@5e89943:PRINCIPLES.md:134-226` ("Honest self-healing"
 2. **ROM** misses are compiled on the fly in the background into `recomp_cache/<sha1>/<gcc|tcc>/<os-arch>/abi6-ram3/<pc>_<crc>_<a|t>.dll`. They are loaded warm on the next run (`src/runtime/overlay_loader.cpp:117-125`). The `.dll` suffix is used on every OS (`overlay_compile.cpp:327`).
    - On macOS the compiler is `c++` from `PATH`, called with `-O2 -std=gnu++17 -shared`, and loaded with `dlopen` (`overlay_compile.cpp:54-75, 365-386`; fixed for non-Windows hosts in `GR` commit `b75bb63`).
    - The overlay ABI hands every host symbol over as a pointer, so a dylib has no undefined symbols (`src/runtime/overlay_abi.h:1-15`).
-3. Healing **RAM-resident** code is opt-in (`GBARECOMP_RAM_OVERLAY_HEAL=1`; `overlay_loader.cpp:90-93, 209-211`). *(inferred)* By default, code running from IWRAM/EWRAM that no `[[code_copy]]` covers stays on the interpreter. That matters if Moto Racer Advance runs its renderer from IWRAM (**unverified**).
+3. Healing **RAM-resident** code is opt-in (`GBARECOMP_RAM_OVERLAY_HEAL=1`; `overlay_loader.cpp:90-93, 209-211`). *(inferred)* By default, code running from IWRAM/EWRAM that no `[[code_copy]]` covers stays on the interpreter. That matters if Moto Racer Advance runs its renderer from IWRAM (**unverified**). Two kinds of RAM code need telling apart:
+   - **Verbatim copies of ROM bytes.** `[[code_copy]]` maps them to their ROM source, and `[[extra_func]].source_addr` covers position-independent copies (§3.5), so they can become static.
+   - **Code generated or patched at runtime.** Its bytes exist nowhere in the ROM. *(inferred)* No static path exists for it at our pin. On native it is interpreted, or healed at runtime with `GBARECOMP_RAM_OVERLAY_HEAL=1`. On the web, which has no healing, it is always interpreted. Either way a route that runs it is never `FULLY_STATIC`.
 4. At exit the runtime prints `self_heal_coverage=FULLY_STATIC …` or `self_heal_coverage=NOT_STATIC dispatch_misses=N interpreted_insns=… healed_native=…` (`src/runtime/runtime_arm_default_aborts.cpp:119-135`). It writes:
-   - `recomp_master_misses_<CODE>.toml.frag`: proposed `[[extra_func]]` entries, with jump-table candidates flagged where several misses sit next to each other
-   - `recomp_coverage_<CODE>.json`
+   - `recomp_coverage_<CODE>.json`, on every exit (`runtime_arm_default_aborts.cpp:312`)
+   - `recomp_master_misses_<CODE>.toml.frag`, only when the run had at least one dispatch miss (`runtime_arm_default_aborts.cpp:179`). It holds proposed `[[extra_func]]` entries, with jump-table candidates flagged where several misses sit next to each other.
 
-   Both go in the working directory, and `GBARECOMP_MISS_FRAG` / `GBARECOMP_COVERAGE_JSON` override the paths (`runtime.cpp:2105-2116`). A run that was served from the heal cache is still reported `NOT_STATIC`.
+   Both go in the working directory, and `GBARECOMP_MISS_FRAG` / `GBARECOMP_COVERAGE_JSON` override the paths (`runtime.cpp:2105-2116`). A run that was served from the heal cache is still reported `NOT_STATIC`, even with zero misses and so no fragment.
 5. A human reviews the fragment and merges the real entries into `game.toml`. No tool ever writes `game.toml`. Then regenerate and rebuild. (`GR@5e89943:CLAUDE.md` still mentions a `recomp_seed_proposals.toml`. No code at `GR` writes that file. The fragment is the actual output.)
 
 Healing is on by default (`CMakeLists.txt:105`, `GBARECOMP_SELFHEAL_RECOMPILE_DEFAULT`). MKSC forces it on (`CMakeLists.txt:20`). `GBARECOMP_SELFHEAL_RECOMPILE=0` turns it off for one run.
@@ -268,7 +273,7 @@ Two special mechanisms appear along the way:
 | Strict static mode | **Implemented** | none | §3.4 |
 | Input record/replay | **Implemented** | none | `GBARECOMP_INPUT_RECORD` / `_REPLAY`. Not compatible with mGBA movie files *(inferred: no converter in the tree)*. |
 | Save states | **Implemented** | none | `GBAS` container, F1–F9 / Shift+F1–F9, `savestate_save/load` over TCP. Refuses a state from a different ROM SHA-1 (`TCP.md`, "Save states"). |
-| TCP debug server | **Implemented (subset)** | none | Enable with `--tcp <port>` (command-driven) or `--tcp-observe <port>` / `GBARECOMP_TCP_OBSERVE` (alongside a window) (`runtime.cpp:943-1000, 1649-1652`). Commands in `src/debug/tcp_debug_server.cpp`: `ping frame registers read_{iwram,ewram,vram,pal,oam,io} ppu_state audio_{state,samples,cap,trace} runtime_trace cyc_anchor irq_cap mmio_cap state_hash counters misses m4a_detect m4a_dump matrix_state symbol screenshot pause continue resume step step_inst step_to_vblank run_frames run_status set_keyinput set_break_pc savestate_save savestate_load fp_save quit`. Games can add commands through `RunOptions::tcp_command`. |
+| TCP debug server | **Implemented (subset)** | none | Enable with `--tcp <port>` (command-driven) or `--tcp-observe <port>` / `GBARECOMP_TCP_OBSERVE` (alongside a window) (`runtime.cpp:943-1000, 1649-1652`). With `--tcp`, the game core runs on a separate `std::thread` (`runtime.cpp:2449-2472`), and `GBARECOMP_INPUT_REPLAY` has no effect: that branch returns at line 2615, before the trace is read at 3212-3297. With `--tcp-observe`, the game stays on the main thread of a windowed run, and the server answers reads, including `ppu_state`, but cannot step (`runtime.cpp:2907-2942`). Commands in `src/debug/tcp_debug_server.cpp`: `ping frame registers read_{iwram,ewram,vram,pal,oam,io} ppu_state audio_{state,samples,cap,trace} runtime_trace cyc_anchor irq_cap mmio_cap state_hash counters misses m4a_detect m4a_dump matrix_state symbol screenshot pause continue resume step step_inst step_to_vblank run_frames run_status set_keyinput set_break_pc savestate_save savestate_load fp_save quit`. Games can add commands through `RunOptions::tcp_command`. |
 | Per-frame ring and reverse debugger (`history`, `get_frame`, `rdb_*`, `*_diff`) | **Documented, not implemented** | none | `TCP.md` and `DEBUG.md` describe them, but none of these command names occurs anywhere in `src/`, `tools/` or `oracle/`. `src/debug/trace_ring.h` is a stub. `debug.ini` is never read, and `GBARECOMP_DEFAULT_DEBUG_PORT` is defined but unused (`runtime.cpp:104-105`). |
 | Opt-in traces | **Implemented** | none | `GBARECOMP_INSN_TRACE` + `GBARECOMP_FP_SAVE`, `GBARECOMP_MMIO_CAP` / `_DUMP`, `GBARECOMP_IRQ_LOG`, `GBARECOMP_SWI_LOG`, `GBARECOMP_RUNTIME_TRACE`, `GBARECOMP_AUDIO_FIFO_TRACE`, `GBARECOMP_WRAM_TRACE` (JSONL), `GBARECOMP_FRAMEDUMP_DIR`, `GBARECOMP_IWRAM_DUMP`, `GBARECOMP_HANG_WATCHDOG` (all found via `getenv` in `src/`) |
 | `state_hash` | **Implemented** | none | FNV-1a-64 over IWRAM+EWRAM+VRAM+PAL+OAM and the cycle count (`tcp_debug_server.cpp:582-600`). It does not cover CPU or device state (`COSIM_ORACLE.md`). |
@@ -303,7 +308,7 @@ Requirements: Bash, Python ≥3.9, CMake, a native C++ toolchain, the Emscripten
 
 ### 5.2 What `build_web.sh` does (`GR@5e89943:packaging/web/build_web.sh`)
 
-1. Writes `runtime.toml` from the config and reads the expected ROM SHA-1 from `[rom].sha1`. The ROM argument is only hashed. The BIOS hash defaults to `300c20df…` (line 155).
+1. Writes `runtime.toml` from the config and takes the expected ROM SHA-1 from `[rom].sha1` or from the ROM argument, which is only hashed (lines 138-152). The BIOS hash defaults to `300c20df…` (line 155).
 2. Configures the engine with `emcmake`, `-DGBARECOMP_WEB_HOST=ON` and `-DGBARECOMP_GENERATED_BIOS_DIR=<dir>` (line 187). It fails if the recompiled BIOS is missing.
 3. Builds the exported project's `libgbarecomp_game.a`. It refuses one whose `CMakeLists.txt` lacks `-mtail-call` (line 204).
 4. Links `packaging/web/main.cpp` (`return gbarecomp::run_game(argc, argv);`) with the engine archives and the game library (lines 212-222). Link options come from `cmake/web_host_link_options.cmake`:
@@ -318,7 +323,7 @@ Consequences for us:
 - **`tools/cli.py build` takes only one `--config` and one `--symbols`, and no `--data-symbols`** (`tools/cli.py:258-266`). If `--max-functions` is omitted, the recompiler's 4096 default applies.
 - **Game-owned code is not linked.** No `src/*.cpp`, no trusted plugins, no `RunOptions`. The engine refuses recomp-ui on wasm (`CMakeLists.txt:472`), and `build_web.sh` does not enable `GBARECOMP_ENABLE_MODS`.
 - *(inferred)* To ship any game hook or enhancement on the web, we will write our own Emscripten link step. Two ways: follow `build_web.sh` with our `main.cpp`, or use `gbarecomp_add_runtime_target()` from `runtime.cmake`, which already applies the web link options when the core is configured with `GBARECOMP_WEB_HOST` (`cmake/runtime.cmake.in:56-148`). Enhancements would be wired directly in `main()` or read from `runtime.toml`, not through the `.gbamod` UI.
-- Web has no self-healing (`self_heal_recompile=UNAVAILABLE host=wasm interpreter_bridge=NOT_STATIC`, `overlay_loader.cpp:428-431`). The script's own comment says a web build "is only honest for a game whose coverage is FULLY STATIC" (`build_web.sh:37-39`). Every route has to pass strict-static on native first.
+- Web has no self-healing. Uncovered code still runs, through the interpreter bridge, with no healing and at lower speed (`self_heal_recompile=UNAVAILABLE host=wasm interpreter_bridge=NOT_STATIC`, `overlay_loader.cpp:428-431`). The script's own comment says a web build "is only honest for a game whose coverage is FULLY STATIC" (`build_web.sh:37-39`). We recommend treating strict-static coverage on native as the quality bar for every route we ship on the web. It is a bar we set, not a hard requirement of the engine.
 
 ### 5.3 Hosting
 
@@ -331,24 +336,41 @@ Consequences for us:
 - Start/Pause/Fullscreen/Enable audio. The audio context needs a real click.
 - Volume, filter (Nearest/Linear/Sharp), 9 save-state slots, export/import/restore of battery saves, and a log area. `?autostart=1` starts as soon as stored files are present.
 - Rendering uses WebGL from a shared triple buffer. Keyboard bindings follow the native defaults. `navigator.getGamepads()` and an on-screen touch pad are supported (`host_web.js:80-88, 239, 449`). Saves go to IDBFS under `/saves/<ROM SHA-1>/`.
-- Missing on web: the in-game settings menu, overlay text, sensors (PR #16 description, mstan/gbarecomp#16).
+- Missing on web: the in-game settings menu and overlay text (PR #16 description, mstan/gbarecomp#16). The page also reports no gyro or solar sensor (`host_web.js:239`, `gyro:false,solarSensor:false`).
 - The page is a developer-style shell. Its title is "gbarecomp web" and it uses a monospace log layout. *(inferred)* We will want our own shell for players.
 
 ### 5.5 Maturity
 
-- PR #16 ("WebAssembly browser host and guaranteed tail transfers", merge `4855ba2`, committed 2026-10-09) is the whole web host. The PR body says: "Not tested on real phones/tablets"; MMZ's web run hit a dispatch miss in IWRAM.
+- PR #16 ("WebAssembly browser host and guaranteed tail transfers", by contributor FabioCeleste, merge `4855ba2`, 2026-10-09) is the whole web host. The PR body lists vibration, orientation lock and safe-area insets as "Not tested on real phones/tablets" (unit tests only), and reports that MMZ's web run hit a dispatch miss in IWRAM.
+- Two merges followed on the same day, and our pin is the second: PR #29 (`6283943`, opt-in shared-RAM DMA batching and the opt-in HLE scanline renderer) and PR #31 (`5e89943`), which makes that HLE renderer the default (§9, "Engine pin").
 - Bring-your-own-ROM followed in `b49bb86` (2026-09-25 on its branch).
 - The Node unit tests for the web host (`web_*_tests`) pass on this machine (§7). No browser build was done for this study, because Emscripten was not installed yet.
 
-### 5.6 What the "ROM-free" bundle still contains
+### 5.6 What the "ROM-free" bundle still contains, and publishing options
 
 `game.wasm` links `libgbarecomp_game.a`, which is compiled from the recompiled ROM. It also links `libgbarecomp_runtime.a`, which includes `bios_recompiled.cpp` (`build_web.sh:212-222`; `CMakeLists.txt:418-449`). gbarecomp's own documents disagree about whether that can be published:
 
-- `GR@5e89943:packaging/web/README.md:12`: a bundle "contains only code and settings and can be published". `docs/WEB_ROM_BUILD.md:6` repeats it: "A normal bundle is therefore safe to publish."
+- `GR@5e89943:packaging/web/README.md:12`: a bundle "contains only code and settings and can be published". `docs/WEB_ROM_BUILD.md:6` repeats it: "A normal bundle is therefore safe to publish." So does the main `README.md:318-319`.
+- `GR@5e89943:README.md:253-255`: generated C++ "is derived from it and should not be redistributed without permission".
 - `GR@5e89943:packaging/README.md:78-80`: "A recompiled binary already embeds translated ROM code, so these scripts are for building **your own** copy from **your own** dump — not for redistribution."
 - `GR@5e89943:src/runtime/generated_bios/.gitignore`: the BIOS lowering "embeds Nintendo's BIOS bytes".
 
-Our `CLAUDE.md` bans committing generated code. It does not cover publishing a compiled bundle. That needs a decision from the owner; see the open questions.
+**Precedent.** `MKSC`, by gbarecomp's author, publishes native binaries on GitHub Releases: eight releases from v0.0.1 (2026-07-30) to v0.1.4 (2026-10-04), the latest with a Windows zip and a Linux AppImage (`gh release list -R mstan/MarioKartSuperCircuitRecomp`, checked 2026-10-10). Its release script requires the recompiled BIOS (§1.4), so those binaries contain both kinds of code. *(inferred)* This shows what the engine's author does. It says nothing about what the games' rights holders accept, and we found no statement from any rights holder.
+
+Our `CLAUDE.md` bans committing generated code. It does not cover publishing a compiled bundle.
+
+**Options.** *(inferred, not legal advice)* The legal column compares the options with each other. It does not assess risk under any particular law.
+
+| Option | What is distributed | Legal exposure | Technical cost |
+|---|---|---|---|
+| **(a) Local builds only** | Our source, docs and scripts. Each player builds from their own ROM and BIOS. | Lowest. Nothing derived from the ROM or the BIOS leaves the player's machine. Matches `packaging/README.md:78-80` and `README.md:253-255`. | Each player needs CMake, a C++ toolchain, Emscripten and their own BIOS dump, so in practice the audience is developers. |
+| **(b) Published bundle, gbarecomp default** | `game.wasm` with recompiled ROM code and recompiled Nintendo BIOS code | Highest. Distributes compiled translations of both copyrighted works. Goes against `README.md:253-255` for the ROM part. Same shape as `MKSC`'s releases. | None beyond Phase 3. `build_web.sh` builds it as is. |
+| **(c) Published bundle without the recompiled BIOS** | `game.wasm` with recompiled ROM code. The runtime boots through BIOS HLE when no recompiled BIOS is linked (`runtime.cpp:1566-1583`). It still loads the player's BIOS dump, and *(inferred)* whatever real BIOS code runs goes through the interpreter (§2.3). | ROM-derived code as in (b). No Nintendo BIOS-derived code. Players still need a BIOS dump. | `build_web.sh` refuses to build without the recompiled BIOS (lines 174-176, 188-189), so this needs our own link step (§5.2). BIOS code that HLE does not cover is interpreted: slower, and never `FULLY_STATIC`. On wasm the interpreter bridge stays on (`overlay_loader.cpp:428-431`). HLE boot without the recompiled BIOS cannot keep the BIOS intro (`runtime.cpp:1575-1582`), which *(inferred)* shifts IRQ timing the way `skip_intro` does (§2.3). Not tried on the web: **unverified**. |
+| **(d) Published bundle with an open-source BIOS** | `game.wasm` with recompiled ROM code and a recompiled open BIOS, such as the MIT-licensed Cult-of-GBA BIOS | ROM-derived code as in (b). No Nintendo code. Players need only their ROM. | Studied separately in PR #3 (`docs/research/open-bios.md` on branch `docs/open-bios`, not merged when this was written): our own BIOS config and hash, and fidelity differences from the retail BIOS, **unverified** for this game. A variant combines (c) with an open BIOS file loaded at runtime. |
+
+All options except (a) distribute compiled code derived from the game ROM. *(inferred, not studied)* A bundle with none would be the engine interpreting every instruction. That is an emulator, which removes the reason for recompiling.
+
+**Recommendation for the owner:** (a) through Phases 1–3. Nothing has to be published to make progress, and Phase 2 needs native local builds anyway. Decide before any hosting. If the owner then wants a public page, prefer (d) to (b): no Nintendo code in the bundle, and players need only their ROM. The ROM-derived code remains, and only the owner can accept that risk. Use (c) only if (d) fails, because it keeps the BIOS requirement for players and costs speed and static coverage.
 
 ---
 
@@ -363,7 +385,7 @@ Our `CLAUDE.md` bans committing generated code. It does not cover publishing a c
   - `[[thumb_alu_immediate_override]]` makes codegen emit a runtime check at that one PC only. Every other site stays a compile-time literal at zero cost (`TOML_SCHEMA.md`).
   - The hook type is `RuntimeThumbAluImmediateOverride` (`src/armv4t/runtime_arm.h:50-53, 87-88`).
   - The mod runtime provides `GBA_MOD_CONSTRUCTOR` and `gba_mod_register_activation_plugin` (`src/runtime/mod_runtime.h:45, 105-111`).
-- **Origin.** The patch research is antimattur's (`MKSC` README and manifest), which drew on the decomp. *(inferred from the `game.toml` comment)* The road parameters were already computed every frame; only the buffer DMA0 reads was refreshed at 30 Hz.
+- **Origin.** The patch research is antimattur's (`MKSC` README and manifest). The README credits antimattur for both the decompilation work and the patch. *(inferred)* The research probably drew on that decomp. *(inferred from the `game.toml` comment)* The road parameters were already computed every frame; only the buffer DMA0 reads was refreshed at 30 Hz.
 
 ### 6.2 Adaptive Widescreen
 
@@ -389,22 +411,30 @@ Our `CLAUDE.md` bans committing generated code. It does not cover publishing a c
 
 ### 6.4 Transferability to Moto Racer Advance
 
-How the game draws its races is **unverified**. It is the first Phase 1 question. Two cases:
+How the game draws its races is **unverified**. It is the first Phase 1 measurement (playbook step 2).
 
-**Case A: affine or tiled backgrounds, like MKSC** (`DISPCNT` mode 1 or 2 during races). Most of MKSC's approach transfers *(inferred)*:
+**How to tell the cases apart** *(inferred)*. The `DISPCNT` mode number alone can mislead. A game can rasterize 3D in software into tile graphics in mode 0–2, and a bitmap mode can show a mostly static picture. During a race, look at what changes from frame to frame:
+
+- the `DISPCNT` mode and which layers are on
+- how much VRAM is rewritten per frame, and by what: CPU stores or DMA from RAM into tile or bitmap memory point to software rendering, while tilemap and scroll updates alone point to case A
+- whether the BG2/BG3 affine registers change per scanline, through HBlank DMA or an HBlank interrupt, which is the "Mode 7" road technique MKSC uses
+
+mGBA's I/O register viewer, tile and map viewers, memory viewer and write watchpoints show all three without a recompile. Two cases follow.
+
+**Case A: affine or tiled backgrounds, like MKSC** (`DISPCNT` mode 1 or 2 during races). The framework seams transfer. MKSC's own work does not *(inferred)*:
 
 - The affine road extends into the margins for free.
-- HUD layers can be moved with the same providers.
-- If the game double-buffers per-scanline affine tables the way MKSC does, a similar one-instruction override might raise the visible frame rate. Finding the instruction requires our own reverse engineering, since no decomp exists.
+- HUD layers can be moved with the same providers. But which scenes are races, where the HUD sits, and which sprites to move is game-specific. In MKSC that is 344 lines (`MKSC@b89fbb4:src/mksc_extended_view.cpp`, with scene detection keyed to MKSC's "LAP"/"TIME" tile IDs). We would have to find our equivalents by reverse engineering, without a decomp.
+- If the game double-buffers per-scanline affine tables the way MKSC does, a similar one-instruction override might raise the visible frame rate. Finding the instruction and the buffer logic requires our own reverse engineering, for the same reason.
 
-**Case B: software-drawn 3D in a bitmap mode** (`DISPCNT` mode 4 or 5). Little transfers, and the framework lacks several pieces:
+**Case B: software-drawn 3D** (in a bitmap mode, `DISPCNT` mode 4 or 5, or rasterized into tiles). Little transfers, and the framework lacks several pieces:
 
 - **Widescreen.** In bitmap modes the wide renderer draws the margins as backdrop: "A bitmap has a fixed width … the margins fall outside its bounds, staying backdrop" (`GR@5e89943:src/gba/gba_ppu.cpp:1794-1799`). The game's rasterizer only fills a 240-wide (mode 4) or 160×128 (mode 5) page in VRAM, so there is nothing to reveal. A wider view needs the camera to project wider and a renderer that draws into a host-side buffer wider than VRAM.
 - **Resolution.** No internal-resolution or upscaling path exists. Presentation filters only: sharp, linear, affine filter, colour profiles. `host_overlay` cannot draw textured triangles.
 - **Frame rate.**
-  - Generated code charges guest cycles per instruction (`COSIM_ORACLE.md`, "shared alignment clock"). *(inferred)* A CPU-bound software renderer therefore keeps the frame rate it has on hardware.
+  - Every guest instruction advances the master clock by its ARM7TDMI cost (`docs/CPU_TIMING.md:3-7`; `COSIM_ORACLE.md`, "shared alignment clock"). *(inferred)* A CPU-bound software renderer therefore keeps the frame rate it has on hardware.
   - There is no overclock or cycle-scaling option. A search for `overclock`, `cycle_scale` and similar terms finds only the host fast-forward ("Turbo") key, which speeds up everything, game logic included.
-  - Raising the frame rate needs either a new cycle-discount feature, which changes timing and is risky for game logic tied to frame counts, or a native renderer that costs no guest cycles.
+  - *(inferred)* Two paths could raise the frame rate. One is a native renderer that costs no guest cycles (below). The other is a new engine feature that discounts guest cycles, an overclock in effect. That changes timing for the whole game, and game logic tied to frame counts or timers may break.
 - **Likely path for case B** *(inferred)*:
   1. Find the rasterizer entry points with mGBA's debugger and Ghidra.
   2. Declare them as `[[mod_function_hook]]`.
@@ -413,7 +443,7 @@ How the game draws its races is **unverified**. It is the first Phase 1 question
 
   All of this is new work in our repo, and possibly upstream. MKSC's 49-line plugin is not a model for its size.
 - **Watchdog false positive.** Per mstan/gbarecomp PR #2 (bitmap modes), a software rasterizer "legitimately never HALTs", and the hang watchdog can mistake that for a busy-spin. The watchdog is opt-in (`GBARECOMP_HANG_WATCHDOG=1`, `runtime_bus_bridge.cpp:1100-1104`).
-- **Bitmap modes are young.** They were added in July 2026 (PR #2, merge `80725f9`). Only mode 4 was exercised then, by Boktai's intro; "Modes 3 and 5 are untested". The later scanline-HLE comparison covered modes 0–5 on synthetic frames (`docs/ENGINE_HLE_DMA.md:10-16`).
+- **Bitmap modes are young.** They were added in July 2026 (PR #2, merge `80725f9`). Only mode 4 was exercised then, by Boktai's intro; "Modes 3 and 5 are untested". The later scanline-HLE comparison covered modes 0–5 on synthetic frames (`docs/ENGINE_HLE_DMA.md:10-16`), and that HLE renderer is the default at our pin. That is one more reason to keep an LLE build for comparison while bitmap rendering is investigated (§9, "Engine pin").
 
 ---
 
@@ -427,7 +457,7 @@ How the game draws its races is **unverified**. It is the first Phase 1 question
 | `GR` commit `f4a065e` (2026-07-28) | mGBA oracle builds on macOS arm64 ("M4, macOS 26, AppleClang 21") |
 | `GR` commit `b75bb63` (2026-07-29) | Self-heal fixed for macOS and Linux: compiler path, linker flags, `dlopen` loader. Measured on Boktai. |
 | `GR` commits `7451315`, `1166f7e` (2026-07-30) | Link-group gating by linker type (`APPLE OR msvc` gets a plain list); the BIOS `_start` symbol renamed for ELF. "19/19 engine suites pass on macOS." |
-| `GR` commit `4cabc7d` + `packaging/package_macos.sh` | Portable macOS package. "verified booting a real ROM for 30 frames" (Boktai) |
+| `GR` commit `4cabc7d` + `packaging/package_macos.sh` | Portable macOS package. The commit message says the macOS path builds Boktai and "boots the real ROM for 30 frames from a freshly extracted tarball". |
 | `BOK@69ff053:.github/workflows/ci.yml` | ROM-free CI on `macos-14` and `ubuntu-24.04`: engine build, `ctest -E "oracle\|bios_intro_flawless"`, and a syntax check of game sources. `BOK@69ff053:CMakeLists.txt:170-184` links on Apple without `--start-group`. |
 | `GR@5e89943:.github/` | Contains only an image, so the engine has no CI of its own. `MKSC` and `MMZ` have no `.github/`. |
 | `MKSC@b89fbb4:tools/linux/` | Linux x86_64 release built in an Ubuntu 22.04 Docker image |
@@ -445,7 +475,7 @@ How the game draws its races is **unverified**. It is the first Phase 1 question
 | `oracle/*.py` with `.exe` strings; `tools/gbaref/build.sh` hardcodes MSYS2 | §4 | Patch locally or upstream when we need them |
 | NanoBoyAdvance oracle | Private | Use the mGBA oracle and co-sim instead |
 | Netplay (`GBARECOMP_NETPLAY`, off by default in the engine; MKSC turns it on) | `cmake/GbaNetplay.cmake:1`; `MKSC@b89fbb4:CMakeLists.txt:7-12` | Keep it off. Untested on macOS by us. |
-| Main-thread stack size | Windows builds reserve 16 MiB (`CMakeLists.txt:332-372`). Nothing does the same for macOS. **unverified** whether deep guest call chains overflow the default 8 MiB main-thread stack. | If it crashes, add `-Wl,-stack_size,0x1000000` |
+| Host stack size (likelihood: plausible) | The engine says "Recompiled guest code maps guest calls (and some tail-call loops) onto the host call stack, so game executables reserve a large stack" (`src/runtime/mobile_platform.h:36-41`). Natively, generated code transfers control with `f(); return`, which the compiler is not required to turn into a tail call; only wasm builds get guaranteed tail calls (`src/armv4t/runtime_arm.h:195-229`). Every other platform reserves a large stack: 16 MiB on Windows through the executable's stack reserve (`CMakeLists.txt:332-366`, applied to `gbarecomp_runtime` users at line 404), which is also the default for new threads *(inferred, general Windows behavior)*; 16 MiB on the web through `-sSTACK_SIZE` and `-sDEFAULT_PTHREAD_STACK_SIZE` (`cmake/web_host_link_options.cmake:12-13`); 256 MiB on Android for the game thread (`src/runtime/mobile_platform.h:42`, `mobile_platform.cpp:34-44`). `MKSC` and `MMZ` set 16 MiB again for Windows only (`MKSC@b89fbb4:CMakeLists.txt:137-141`, `MMZ@218adfd:CMakeLists.txt:126-130`). macOS gets nothing. Measured on this Mac with a test program: main thread 8,372,224 bytes, `std::thread` 536,576 bytes (512 KiB + one page). Linked with `-Wl,-stack_size,0x1000000`, the main thread gets 16,777,216 bytes and `std::thread` still 536,576. With `--tcp`, the game core runs on a plain `std::thread`, with no stack size set (`runtime.cpp:2449-2472`), so by the measurement above it gets 512 KiB on macOS. | Link our executable with `-Wl,-stack_size,0x1000000` on Apple (playbook step 9). That covers headless and windowed runs, including `--tcp-observe`, where the game stays on the main thread. It does not cover `--tcp`. For observation, use `--tcp-observe`. Oracle lockstep needs `--tcp` and its `step` command, and it may need an upstream change that creates the game thread with an explicit stack size. |
 | Self-heal compiler | Uses `c++` (Apple clang) through `PATH`. `gcc_toolchain_available()` probes `g++`/`gcc`/`cc`/`clang` (`overlay_loader.cpp:131-165`). | Works per `b75bb63`. Disable it for strict runs. |
 
 ---
@@ -455,13 +485,17 @@ How the game draws its races is **unverified**. It is the first Phase 1 question
 | Component | License | Source | Applies to us when |
 |---|---|---|---|
 | gbarecomp | "PolyForm Noncommercial License 1.0.0", Copyright (c) 2026 Matthew Stanley | `GR@5e89943:LICENSE` | Always: native build, web build, any derived code |
-| gbarecomp `src/runtime/bios_hle.{h,cpp}` | **MPL-2.0** (derived from mGBA `src/gba/bios.c`) | `GR@5e89943:THIRD_PARTY_ATTRIBUTION.md`, `third_party/MPL-2.0.txt` | Compiled into every runtime. File-scoped copyleft: changes to those two files stay MPL-2.0 and must remain available as source. |
+| gbarecomp `src/runtime/bios_hle.{h,cpp}` | **MPL-2.0** (derived from mGBA `src/gba/bios.c`) | `GR@5e89943:THIRD_PARTY_ATTRIBUTION.md`, `third_party/MPL-2.0.txt` | Compiled into every runtime. File-scoped copyleft. Changes to those two files stay MPL-2.0. Any distribution in executable form, native binary or web bundle alike, must make the source of those files available and tell recipients how to get it (MPL-2.0 §3.2(a)). *(inferred)* A link to the pinned gbarecomp commit in the bundle's notices is the obvious way. |
 | Ported files (`gba_m4a`, `color_lut`, `gba_rtc`, `audio_shadow`, `mp2k_shadow`) | MIT OR Apache-2.0 (from JRickey/gba-recomp) | `THIRD_PARTY_ATTRIBUTION.md` | Always. Keep the attribution headers. |
 | arm-recomp-core | MIT, Copyright (c) 2026 Matthew Stanley | `ARC@1f13cdf:LICENSE`, `PROVENANCE.md` | Always |
 | recomp-net | MIT | `RNET@c58f125:LICENSE` | Only with `GBARECOMP_NETPLAY=ON` |
 | libjuice v1.7.2, fetched by recomp-net | MPL-2.0 per its upstream, **unverified** here | `RNET@c58f125:CMakeLists.txt:144-155` | Only with netplay |
 | rbengine | MIT | `RBE@2a03e73:LICENSE` | Only with netplay |
 | SDL (mstan fork, 2.32.10) | zlib | `SDL@8e28503:LICENSE.txt` | Native builds and Android. Not used on web. |
+| Emscripten runtime (JS glue and its system sources) | MIT or University of Illinois/NCSA, at our choice | `LICENSE` of the Emscripten 6.0.10 SDK installed here (`upstream/emscripten/`) | Web bundle only |
+| musl libc, as shipped in Emscripten | MIT | `system/lib/libc/musl/COPYRIGHT` in the same SDK | Web bundle only |
+| libc++, libc++abi, libunwind, compiler-rt, as shipped in Emscripten | Apache-2.0 with LLVM exception. The exception waives the notice conditions for portions embedded in compiled object code. | `system/lib/{libcxx,libcxxabi,libunwind,compiler-rt}/LICENSE.TXT` in the same SDK | Web bundle only |
+| dlmalloc, as shipped in Emscripten | Public domain (CC0) | `system/lib/dlmalloc.c:53-54` in the same SDK | Web bundle only |
 | toml++ v3.4.0 | MIT | `GR@5e89943:third_party/README.md` | Build tool only (`gba_recompile`) |
 | mGBA 0.10.5 (oracle only) | MPL-2.0 | `oracle/README.md`, `third_party/README.md` | Only in the separate oracle binary. Never ship it. |
 | NanoBoyAdvance | GPL-3.0 | `third_party/README.md` | Not available to us |
@@ -476,20 +510,35 @@ How the game draws its races is **unverified**. It is the first Phase 1 question
 - It drops four sections: **Distribution License, Notices, Changes and New Works License, Patent License**.
 - It rewrites "Copyright License" to cover distribution and changes in one paragraph.
 - It adds an "intent" footer and a commercial-contact line.
+- **No patent license is granted.** The kept "Patent Defense" section ends "your patent license for the software granted under these terms", but no section grants one. "No Other Rights" adds that the terms "do not imply any other licenses" (`GR@5e89943:LICENSE`). *(inferred, not legal advice)* Whether users of gbarecomp have any patent license is unclear. The owner should know this; we cannot settle it.
+
+Which Emscripten libraries actually end up in `game.wasm` is **unverified** until we link a bundle. The rows above list what the SDK ships with its license file.
 
 *(inferred, not legal advice)* The safe reading for our repo:
 
 - Stay strictly noncommercial.
 - Keep gbarecomp's `LICENSE` and `THIRD_PARTY_ATTRIBUTION.md` with any build we distribute.
-- Keep the MPL-2.0 files' notices intact.
+- Keep the MPL-2.0 files' notices intact, and point recipients of any binary or bundle to the MPL-2.0 source of `bios_hle`.
+- Ship the notices of the web toolchain libraries (MIT texts for Emscripten and musl) with any web bundle.
 - Do not vendor gbarecomp source into our tree. Pin it as a submodule.
-- License our own code separately. If it is a derivative of gbarecomp, it inherits the noncommercial restriction, as `docs/plan.md` already says.
+- License our own code separately. If it is a derivative of gbarecomp, it inherits the noncommercial restriction, as `docs/plan.md` already says. **Our repository has no `LICENSE` file yet** (`git ls-tree origin/main` lists only `.gitignore`, `CLAUDE.md`, `README.md` and two docs). See open question 7.
 
 ---
 
 ## 9. Recommended layout for our repository
 
 Modeled on `MKSC`, with the Apple link fix from `BOK` and the web caveats above.
+
+**Why not the `tools/cli.py` export.** gbarecomp's README documents `tools/cli.py build`, which exports a library project: `generated/`, copied framework headers, and its own `CMakeLists.txt` that builds `gbarecomp_game` (`tools/cli.py:75-199`). It is also the only input `build_web.sh` documents (`build_web.sh:2`). We still prefer the MKSC-style layout:
+
+- `cli.py build` passes one `--config`, one `--symbols`, and no `--data-symbols` to the recompiler (`tools/cli.py:202-248, 258-266`). We will want config overlays and data names as the reverse engineering grows.
+- The exported project has no place for game-owned code (`main.cpp` with `RunOptions`, hooks, enhancements), and every phase after Phase 1 needs some.
+- The trade-off: we write our own web link step instead of using `build_web.sh` unchanged, and we track upstream changes to the export by hand.
+
+**One generation path.** `tools/regen.sh` writes `generated/game` once, and both the native target and the web build compile that same directory. Running `cli.py` separately for the web would give a second corpus, generated with different flags, that can drift from the one the native strict gates proved. For the web:
+
+- Day one: a small tracked `web/game-lib/CMakeLists.txt` builds `gbarecomp_game` from `generated/game`, and we hand it to `build_web.sh` (playbook, "Local web smoke test").
+- Phase 3: our own target, configured with `emcmake`, linking our `main.cpp` with `gbarecomp_web_host_link_options()` (`cmake/web_host_link_options.cmake`) or through `gbarecomp_add_runtime_target()` (`cmake/runtime.cmake.in:56-148`).
 
 ```text
 moto-racer-advanced-browser/
@@ -502,26 +551,30 @@ moto-racer-advanced-browser/
   src/main.cpp                RunOptions: builtin name/SHA-1, max_view_width, hooks
   src/mra_*.cpp               game-owned hooks and enhancements (later)
   symbols/                    our own small TSVs: addr<TAB>mode<TAB>name (no decomp exists)
-  tests/*.input               gbarecomp-keyinput-v1 route traces (ROM-free, tracked)
+  tests/*.input               gbarecomp-keyinput-v1 route traces (ROM-free, tracked); a '#' header
+                              names the ROM SHA-1 and the initial save (playbook step 11)
   tests/*.cpp                 unit tests for game-owned code
   tools/regen.sh              hash gate + gba_recompile (--max-functions 65536)
   tools/verify-strict.sh      strict-static acceptance runs over tests/*.input
+  web/game-lib/CMakeLists.txt game library over generated/game, for build_web.sh (day one)
   web/                        our own player shell and link step, when Phase 3 starts
   docs/
   roms/  bios/  generated/{bios,game}/  build/    ignored
 ```
 
-- **Engine pin:** `5e89943` is the only commit with the web host. Bump deliberately, one commit at a time, and re-run the strict gates after each bump.
+- **Engine pin: keep `5e89943`.** It is gbarecomp's `main` HEAD as of 2026-10-10. The web host first appears at `4855ba2` (PR #16). Three first-parent commits carry it: `4855ba2`, `6283943` (PR #29) and `5e89943` (PR #31) (GitHub compare `4855ba2...5e89943`; `packaging/web/build_web.sh` is present at all three). PR #31 (commit `d606672`) changed one line of `CMakeLists.txt`, `set(GBARECOMP_SCANLINE_IMPLEMENTATION "LLE"` to `"HLE"`, so fresh builds now use the HLE scanline renderer. PR #29 had added that renderer as an opt-in. On 2026-10-09 the web host merged at 21:16 UTC, PR #29 at 21:24 and PR #31 at 21:40, so neither later change was part of PR #16's validation. The upstream evidence is byte-identical output on 128 synthetic frames covering modes 0–5 and 120-frame MKSC and MMZ checks, which "do not establish equivalence for every game or display state" (`docs/ENGINE_HLE_DMA.md:3-16`). `build_web.sh` does not set the option, so web builds get HLE too *(inferred from `build_web.sh:183-187`)*. *(inferred)* Configured with LLE, the pin should behave like the two earlier commits, because PR #29's other change, shared-RAM DMA batching, stays opt-in (`GBARECOMP_DMA_RAM_IMPLEMENTATION` defaults to LLE, `docs/ENGINE_HLE_DMA.md:24-26`). Recommendation: keep the pin, and keep a second native build configured with `-DGBARECOMP_SCANLINE_IMPLEMENTATION=LLE`. Compare frames between the two while the game's rendering modes are investigated, and switch to LLE when a bitmap-mode rendering bug needs ruling out. Bump deliberately, one commit at a time, and re-run the strict gates after each bump.
 - **Native launcher:** start without recomp-ui. Pass `--bios`/`--rom` or set `[bios].path`/`[rom].path`. Add the launcher only if we ship native builds.
 - **No box art.** MKSC's copyrighted `boxart.tga` should not be copied here.
 - **CI:** adopt `BOK`'s pattern. A ROM-free job on `macos-14` and Linux builds the engine and runs `ctest -E "oracle|bios_intro_flawless"`. Later it can compile our game-owned sources with `-fsyntax-only`.
-- **`.gitignore` gaps.** Ours lacks entries the runtime will write:
+- **`.gitignore` safety net.** The playbook runs everything from `build/native/` and keeps the ROM under `roms/`, so its outputs already land in ignored paths. The cache, the coverage and miss files go in the working directory (`runtime.cpp:2034, 2105-2116`), `bios.cfg` and `rom.cfg` next to the executable (`asset_picker.cpp:184-185`), saves at `--save-path` (under `build/saves/` in the playbook) or else next to the ROM, and states next to the ROM. These entries guard against a run started from the repository root:
   - `recomp_cache/`
   - `recomp_coverage*.json`, `recomp_master_misses*.toml.frag`, `dispatch_misses.log`
   - `bios.cfg`, `rom.cfg`, `config.ini`, `keybinds.ini`
   - `saves/`, `diagnostics/`, `web-PRIVATE/`, `build-web-host/`
+  - `*.state*` instead of `*.state`. The runtime writes `<rom>.state1` to `.state10`: slots 1–9 from the function keys, and slot 10 from the runtime menu or scripts (`runtime.cpp:3131-3143, 3370-3372`). `--state-dir` names them `state<N>`, with no extension, so keep any state directory under an ignored path.
+  - `*.sav.tmp`. The save is written to `<save>.tmp` and then renamed (`runtime.cpp:1978-1989`), so a crash can leave the temporary file, which `*.sav` does not match.
 
-  Its `*.state` pattern does not match the runtime's `<rom>.state1`–`.state9` files (`runtime.cpp:3137-3143`). That needs `*.state[0-9]`. Saves default to the ROM path with a `.sav` extension (`runtime.cpp:1836`), which lands under `roms/` and is already ignored.
+  Saves default to the ROM path with a `.sav` extension (`runtime.cpp:1834-1838`), which lands under `roms/` and is already ignored.
 
 ---
 
@@ -529,7 +582,7 @@ moto-racer-advanced-browser/
 
 Prerequisite: `roms/moto-racer-advance.gba` and `bios/gba_bios.bin` exist; the paths are already ignored.
 
-Every command and flag below exists at `GR@5e89943`. Only steps 2–3 were run for this study, using a scratch clone instead of a submodule. Step 1 and steps 4–10 need the ROM or the BIOS, so what they produce is **expected from reading the code, not yet observed**. The same applies to the optional items at the end.
+Every command and flag below exists at `GR@5e89943`. Only steps 3–4 were run for this study, using a scratch clone instead of a submodule. Steps 1–2 and 5–11 need the ROM or the BIOS, so what they produce is **expected from reading the code, not yet observed**. The same applies to the optional items at the end.
 
 **1. Check the inputs.**
 
@@ -542,7 +595,15 @@ stat -f '%z %N' bios/gba_bios.bin roms/moto-racer-advance.gba >> build/logs/hash
 
 Expected: BIOS `300c20df6731a33952ded8c436f7f186d25d3492`, 16384 bytes. Record the ROM SHA-1, MD5 and size in `baserom.md`; every later finding depends on them.
 
-**2. Get the engine at the pin.** Use a submodule, as in §9, or a scratch clone for pure investigation.
+**2. Classify the race renderer in mGBA.** This decides how much work Phase 4 holds (§6.4). It needs no recompile and is already part of `docs/plan.md` Phase 1, so do it first. Start a race, pause, then advance frame by frame:
+
+- **I/O register viewer:** the `DISPCNT` mode and enabled layers; the BG2/BG3 affine registers (`BG2PA`–`BG2PD`, `BG2X`, `BG2Y` and the BG3 set); the DMA control registers, looking for HBlank-timed transfers into those affine registers.
+- **Tile, map and memory viewers:** whether tile or bitmap VRAM changes every frame, or only tilemaps and scroll values.
+- **Debugger write watchpoints** on a VRAM range: which code stores to it, and whether that code runs from ROM (`0x08…`) or RAM (`0x02…`/`0x03…`). Whether mGBA's watchpoints also fire on DMA writes is **unverified**. If VRAM changes but no CPU store hits, read the source address from the DMA registers.
+
+Record the mode, the per-frame VRAM write pattern and any per-scanline affine updates in `docs/research/` with the ROM SHA-1. Classify by the pattern, not the mode number alone (§6.4). The writer PCs are also a first look at open question 4 in the findings doc, "how much code runs from RAM".
+
+**3. Get the engine at the pin.** Use a submodule, as in §9, or a scratch clone for pure investigation.
 
 ```sh
 git submodule add https://github.com/mstan/gbarecomp.git gbarecomp
@@ -553,7 +614,7 @@ git add .gitmodules gbarecomp   # records the pinned gitlink; commit on a branch
 
 Only `external/arm-recomp-core` is needed to build. The netplay submodules and the Android SDL fork can stay uninitialized. We checked this: a fresh clone at the pin with only that submodule configures, builds and passes 50/50 tests.
 
-**3. Build and test the tools.**
+**4. Build and test the tools.**
 
 ```sh
 cmake -S gbarecomp -B build/gbarecomp -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -563,7 +624,7 @@ ctest --test-dir build/gbarecomp
 
 Expected: `100% tests passed out of 50`, as measured in §7. The binaries `build/gbarecomp/gba_recompile`, `gba_scan` and `bios_smoke` exist.
 
-**4. Scan the header.**
+**5. Scan the header.**
 
 ```sh
 build/gbarecomp/gba_scan roms/moto-racer-advance.gba | tee build/logs/gba_scan.txt
@@ -571,16 +632,16 @@ build/gbarecomp/gba_scan roms/moto-racer-advance.gba | tee build/logs/gba_scan.t
 
 Produces `key=value` lines: `game_title`, `game_code`, `entry_target`, `complement_valid`, `logo_present`, `save_type`, `save_signature`, `save_signature_offset`, `ok=1`. This is the first answer to save type, open question 6 in the findings doc. Confirm it in mGBA.
 
-**5. Recompile the BIOS** into our ignored tree.
+**6. Recompile the BIOS** into our ignored tree.
 
 ```sh
 build/gbarecomp/gba_recompile --bios bios/gba_bios.bin \
   --config gbarecomp/bios/gba_bios.toml --out generated/bios
 ```
 
-Produces `generated/bios/bios_recompiled.{cpp,h}` and `bios_dispatch_table.cpp`. It aborts if the BIOS hash differs from `gba_bios.toml`'s `[identity]`.
+Produces `generated/bios/bios_recompiled.{cpp,h}`, `bios_dispatch_table.cpp` and `bios_symbol_map.cpp`. The engine's own ignore file lists `bios_recompiled.{cpp,h}` and `bios_symbol_map.cpp` as BIOS-derived (`src/runtime/generated_bios/.gitignore`). It aborts if the BIOS hash differs from `gba_bios.toml`'s `[identity]`.
 
-**6. Write `game.toml`** from steps 1 and 4. Leave `[save]` out until the type is confirmed; the runtime then uses signature detection.
+**7. Write `game.toml`** from steps 1 and 5. Leave `[save]` out until the type is confirmed; the runtime then uses signature detection.
 
 ```toml
 # Moto Racer Advance (<region>, <game code>, revision <n>). Values from build/logs/.
@@ -611,7 +672,7 @@ path = "roms/moto-racer-advance.gba"
 sha1 = "<ROM SHA-1>"
 ```
 
-**7. Recompile the ROM.**
+**8. Recompile the ROM.** This is the only generation step. The native build and the web smoke test both compile its output (§9, "One generation path").
 
 ```sh
 build/gbarecomp/gba_recompile --rom roms/moto-racer-advance.gba --config game.toml \
@@ -620,7 +681,7 @@ build/gbarecomp/gba_recompile --rom roms/moto-racer-advance.gba --config game.to
 
 Produces `generated/game/recompiled_000.cpp`…, `recompiled.h`, `dispatch_table.cpp` and `symbol_map.cpp`. The log carries the config summary and the `[gba_recompile discovery summary]` block (`TOTAL emitted`). Check that the total is well below 65536, because the cap is silent. Optional A/B: rerun with `speculative_literal_harvest = true` into another directory, to measure how much the heuristics find on their own.
 
-**8. Minimal host.** `CMakeLists.txt`:
+**9. Minimal host.** `CMakeLists.txt`:
 
 ```cmake
 cmake_minimum_required(VERSION 3.20)
@@ -638,10 +699,14 @@ target_include_directories(MotoRacerAdvanceRecomp PRIVATE
     "${GBARECOMP_ROOT}/src/armv4t" "${GBARECOMP_ROOT}/src/gba"
     "${GBARECOMP_ROOT}/src/runtime" "${GBARECOMP_ROOT}/src/debug")
 target_link_gbarecomp_runtime_stack(MotoRacerAdvanceRecomp)   # Apple-safe link
-target_compile_definitions(MotoRacerAdvanceRecomp PRIVATE
-    GBARECOMP_WINDOW_TITLE="MotoRacerAdvanceRecomp"
-    GBARECOMP_DEFAULT_GAME_CONFIG="game.toml")
+if(APPLE)
+    # 16 MiB main-thread stack, like Windows and the web (§7.2).
+    # Does not reach the game thread that --tcp creates.
+    target_link_options(MotoRacerAdvanceRecomp PRIVATE "-Wl,-stack_size,0x1000000")
+endif()
 ```
+
+This sets no `GBARECOMP_WINDOW_TITLE` or `GBARECOMP_DEFAULT_GAME_CONFIG`. Only `runtime.cpp` reads them (`runtime.cpp:96-101, 141, 828, 2875`), and it is compiled into the `gbarecomp_runtime` library (`CMakeLists.txt:375-379`), so definitions on our executable never reach it. *(inferred)* The same holds for `MKSC`, which sets both on its executable (`MKSC@b89fbb4:CMakeLists.txt:84-87`), and for the engine's own `gbarecomp_add_runtime_target()` (`cmake/runtime.cmake.in:124-131`). The window title comes from `RunOptions::builtin_game_name` (`runtime.cpp:2873-2875`), and the default config name is already `game.toml`.
 
 `src/main.cpp`, modeled on `MKSC@328b915:src/main.cpp`:
 
@@ -663,70 +728,117 @@ cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build build/native --target MotoRacerAdvanceRecomp
 ```
 
-**9. First headless runs, from `build/native/`.** Three runs over the same 1800 frames:
+**10. First headless runs, from `build/native/`.** Three runs over the same 1800 frames:
 
-- **9a. Coverage with the interpreter bridge, no healing.** The number to record.
-- **9b. Strict.** Aborts at the first miss and prints its PC.
-- **9c. Default.** Healing on; `c++` compiles overlays into `recomp_cache/`.
+- **10a. Coverage with the interpreter bridge, no healing.** The number to record.
+- **10b. Strict.** Aborts at the first miss and prints its PC.
+- **10c. Default.** Healing on; `c++` compiles overlays into `recomp_cache/`.
+
+Each run gets its own `--save-path` and starts with no save file there, so all three start from the same state and none touches `roms/moto-racer-advance.sav`. Each also names its own coverage and miss files. By default every run writes the same two files in the working directory, and the later runs would overwrite the first (`runtime.cpp:2105-2116`).
 
 ```sh
 cd build/native
-GBARECOMP_SELFHEAL_RECOMPILE=0 ./MotoRacerAdvanceRecomp --bios ../../bios/gba_bios.bin \
+mkdir -p ../saves
+rm -f ../saves/smoke-bridge.sav ../saves/smoke-strict.sav ../saves/smoke-heal.sav
+GBARECOMP_SELFHEAL_RECOMPILE=0 \
+GBARECOMP_COVERAGE_JSON=../logs/smoke-bridge.json GBARECOMP_MISS_FRAG=../logs/smoke-bridge.toml.frag \
+./MotoRacerAdvanceRecomp --bios ../../bios/gba_bios.bin \
   --rom ../../roms/moto-racer-advance.gba --frames 1800 --no-window \
-  --save-path ../saves/smoke.sav --dump-png ../logs/smoke-1800.png ../../game.toml \
+  --save-path ../saves/smoke-bridge.sav --dump-png ../logs/smoke-1800.png ../../game.toml \
   2>&1 | tee ../logs/smoke-bridge.log
-GBARECOMP_STRICT_STATIC=1 GBARECOMP_SELFHEAL_RECOMPILE=0 ./MotoRacerAdvanceRecomp \
-  --bios ../../bios/gba_bios.bin --rom ../../roms/moto-racer-advance.gba --frames 1800 \
-  --no-window ../../game.toml 2>&1 | tee ../logs/smoke-strict.log
-./MotoRacerAdvanceRecomp --bios ../../bios/gba_bios.bin --rom ../../roms/moto-racer-advance.gba \
-  --frames 1800 --no-window ../../game.toml 2>&1 | tee ../logs/smoke-heal.log
+GBARECOMP_STRICT_STATIC=1 GBARECOMP_SELFHEAL_RECOMPILE=0 \
+GBARECOMP_COVERAGE_JSON=../logs/smoke-strict.json GBARECOMP_MISS_FRAG=../logs/smoke-strict.toml.frag \
+./MotoRacerAdvanceRecomp --bios ../../bios/gba_bios.bin \
+  --rom ../../roms/moto-racer-advance.gba --frames 1800 --no-window \
+  --save-path ../saves/smoke-strict.sav ../../game.toml 2>&1 | tee ../logs/smoke-strict.log
+GBARECOMP_COVERAGE_JSON=../logs/smoke-heal.json GBARECOMP_MISS_FRAG=../logs/smoke-heal.toml.frag \
+./MotoRacerAdvanceRecomp --bios ../../bios/gba_bios.bin \
+  --rom ../../roms/moto-racer-advance.gba --frames 1800 --no-window \
+  --save-path ../saves/smoke-heal.sav ../../game.toml 2>&1 | tee ../logs/smoke-heal.log
 ```
 
 Each run should print:
 
 - `bios_loaded sha1=…`
 - `rom_loaded sha1=… code=… entry=… save=… signature=…`
-- `bios_backend=…`, `scanline_backend=HLE …`
+- `bios_backend=…`, and `scanline_backend=HLE (tile-span native-color composition)` (`LLE (per-pixel composition)` in an LLE build; `runtime.cpp:1589-1593`)
 - `final_pc=… unmapped=… io_unhandled=… ppu_frames=1800 …`, `pal_nonzero=… vram_nonzero=…`
 - a `self_heal_coverage=` line
 
-Each run also writes `recomp_master_misses_<CODE>.toml.frag` and `recomp_coverage_<CODE>.json` in `build/native/`. Record these in `docs/research/` with the ROM SHA-1:
+Each run writes its coverage JSON, and its miss fragment only if it had at least one dispatch miss (§3.3). Record these in `docs/research/` with the ROM SHA-1:
 
 - the coverage verdict
 - the number of misses
-- how many misses are in IWRAM/EWRAM; this is open question 4 in the findings doc, "how much code runs from RAM"
+- how many misses are in IWRAM (`0x03…`) or EWRAM (`0x02…`); this is open question 4 in the findings doc, "how much code runs from RAM"
+- for each RAM miss, whether the code bytes at that PC also occur in the ROM. A match is a verbatim copy that `[[code_copy]]` or `source_addr` can cover; no match means code built or patched at runtime, which has no static path (§3.3). `GBARECOMP_IWRAM_DUMP=<path>` writes IWRAM at exit (`runtime.cpp:2129-2140`). EWRAM can be read with the TCP `read_ewram` command. The byte search needs a small script we have not written yet. *(inferred)* An exit dump can mislead if a RAM region holds different code at different times, so re-check doubtful cases at the frame of the miss.
 - `unmapped` and `io_unhandled`
 
-**10. Play and record, then replay strictly.**
+**11. Play and record, then replay strictly.**
+
+The trace holds input only. The runtime's comment says strict acceptance replays it "from the same initial SRAM" (`runtime.cpp:3212-3216`). But the runtime loads the save file at boot when it exists and writes it back during play and at exit (`runtime.cpp:1834-1844, 1961-1989`). Without `--save-path`, every run shares `roms/moto-racer-advance.sav`, and a replay would start from whatever earlier runs left there. Both reference repositories pin the initial save:
+
+- `MMZ` snapshots it at the start of each discovery session and restores it before the strict replay (`MMZ@218adfd:tools/play-discovery.ps1:45-54`, `tools/verify-strict.ps1:47-51`, `-InitialSave`).
+- `MKSC` deletes the save and passes a fresh `--save-path` on every strict run (`MKSC@b89fbb4:tools/test-attract-gameplay.ps1:39-40, 65`).
+
+We start every route from no save file:
 
 ```sh
+rm -f ../saves/route-menu-race1.sav
 GBARECOMP_INPUT_RECORD=../logs/route-menu-race1.input ./MotoRacerAdvanceRecomp --window \
-  --bios ../../bios/gba_bios.bin --rom ../../roms/moto-racer-advance.gba ../../game.toml
-# review the .frag, merge real entries into game.toml with notes, regenerate (step 7), rebuild (step 8), then:
+  --save-path ../saves/route-menu-race1.sav \
+  --bios ../../bios/gba_bios.bin --rom ../../roms/moto-racer-advance.gba ../../game.toml \
+  2>&1 | tee ../logs/route-menu-race1.record.log
+# review the .frag, merge real entries into game.toml with notes, regenerate (step 8), rebuild (step 9), then:
+rm -f ../saves/replay.sav
 GBARECOMP_STRICT_STATIC=1 GBARECOMP_SELFHEAL_RECOMPILE=0 \
 GBARECOMP_INPUT_REPLAY=../logs/route-menu-race1.input ./MotoRacerAdvanceRecomp --no-window \
-  --frames <frames recorded> --bios ../../bios/gba_bios.bin \
-  --rom ../../roms/moto-racer-advance.gba ../../game.toml
+  --frames <ppu_frames from the recording log> --save-path ../saves/replay.sav \
+  --bios ../../bios/gba_bios.bin --rom ../../roms/moto-racer-advance.gba ../../game.toml
 ```
 
 Repeat until the strict replay ends in `self_heal_coverage=FULLY_STATIC dispatch_misses=0 interpreted_insns=0 healed_native=0`.
 
-Avoid save-state loads while recording; replays do not capture them (`MMZ@218adfd:README.md`). Copy finished traces to `tests/`.
+Avoid save-state loads while recording; replays do not capture them (`MMZ@218adfd:README.md`). Before copying a finished trace to `tests/`, name its initial save in a header. The replay reader skips lines that start with `#` (`runtime.cpp:3268`):
 
-**Not day one, but cheap once the steps above work:**
+```text
+# route: menu-race1
+# rom_sha1: <ROM SHA-1>
+# initial_save: none
+```
 
-- **Rendering mode in the recompiled build.** Run with `--tcp 19880`, send `{"cmd":"run_frames","n":3600}` then `{"cmd":"ppu_state"}`, and read `dispcnt`. Cross-check with mGBA's I/O viewer during a race.
+*(inferred)* A route that needs progress, such as unlocked tracks or modes, should start from the final save of another tracked route, named in its header with that save's SHA-1. `tools/verify-strict.sh` would replay that route first to rebuild the save. Do not commit save files: `CLAUDE.md` forbids it, and `*.sav` is ignored. Keeping every initial save reproducible from tracked traces removes the need.
+
+**Optional, once the steps above work:**
+
+- **Rendering mode in the recompiled build**, to cross-check step 2. Run windowed with `--tcp-observe 19881`, play or replay a route into a race (`GBARECOMP_INPUT_REPLAY` also drives windowed runs, `runtime.cpp:3830-3834`), and send `{"cmd":"ppu_state"}`. It returns `dispcnt` and the BG registers (`src/debug/tcp_debug_server.cpp:924-945`). Do not use `--tcp` here: its game thread has only 512 KiB of stack on macOS (§7.2), and it ignores `GBARECOMP_INPUT_REPLAY` (§4). Driving the game to a race there would take hand-written `set_keyinput` or `run_frames` commands with a `keyinput` field.
+- **LLE scanline build for comparison** (§9, "Engine pin"). Configure `build/native-lle` with the step 9 command plus `-DGBARECOMP_SCANLINE_IMPLEMENTATION=LLE`, replay the same route with `--dump-png` or `GBARECOMP_FRAMEDUMP_DIR` in both builds, and compare the frames.
 - **Co-simulation.** Configure a second build directory with `-DGBA_COSIM=ON`, then run `python3 gbarecomp/oracle/gba_cosim.py --a recomp --b recomp …` with `GBA_COSIM_EXE/ROM/BIOS/CONFIG/CWD` set (`oracle/gba_cosim.py:1-40`).
-- **Local web smoke test**, once Emscripten is installed. Pass `--max-functions` explicitly to `cli.py`, and keep the runtime build dir out of the submodule. Never publish the output until the owner has decided (§5.6).
+- **Local web smoke test**, once Emscripten is installed. It compiles the same `generated/game` as the native build, through a small game-library project, instead of regenerating with `tools/cli.py` (§9). *(inferred, untested)* It relies only on what `build_web.sh` checks of a project: a `CMakeLists.txt` that contains `-mtail-call`, and a `gbarecomp_game` library in the game build directory (`build_web.sh:202-221`). Generated code includes only `<cstdint>`, `runtime_arm.h` and its own generated header (`tools/gba_recompile/main.cpp:568-569, 829-830`), hence the two include directories below. Never publish the output until the owner has decided (§5.6).
+
+  `web/game-lib/CMakeLists.txt`:
+
+  ```cmake
+  cmake_minimum_required(VERSION 3.20)
+  project(mra_game_lib CXX)
+  set(MRA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+  file(GLOB MRA_GENERATED CONFIGURE_DEPENDS "${MRA_ROOT}/generated/game/*.cpp")
+  add_library(gbarecomp_game STATIC ${MRA_GENERATED})
+  set_target_properties(gbarecomp_game PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES)
+  target_include_directories(gbarecomp_game PRIVATE
+      "${MRA_ROOT}/generated/game" "${MRA_ROOT}/gbarecomp/src/armv4t")
+  target_compile_options(gbarecomp_game PRIVATE -mtail-call)
+  ```
 
   ```sh
-  GBARECOMP_CORE="$PWD/build/gbarecomp/gba_recompile" python3 gbarecomp/tools/cli.py build \
-    --rom roms/moto-racer-advance.gba --output build/mra-export --config game.toml \
-    --max-functions 65536 --force
-  GBARECOMP_WEB_BUILD_DIR="$PWD/build/web-runtime" bash gbarecomp/packaging/web/build_web.sh \
-    build/mra-export generated/bios roms/moto-racer-advance.gba "" game.toml
-  python3 gbarecomp/packaging/web/serve.py build/mra-export/web 8080
+  GBARECOMP_WEB_BUILD_DIR="$PWD/build/web-runtime" \
+  GBARECOMP_WEB_GAME_BUILD_DIR="$PWD/build/web-game" \
+  GBARECOMP_WEB_OUT_DIR="$PWD/build/web-out" \
+  bash gbarecomp/packaging/web/build_web.sh web/game-lib generated/bios \
+    roms/moto-racer-advance.gba "" game.toml
+  python3 gbarecomp/packaging/web/serve.py build/web-out 8080
   ```
+
+  The three directory variables keep every build product under `build/`, out of the submodule and out of `web/` (`build_web.sh:97-103`).
 
 ---
 
@@ -745,7 +857,7 @@ For the orchestrator to reconcile. This PR does not edit those files.
   - The `COSIM_ORACLE.md` status header.
   - `CLAUDE.md` names `recomp_seed_proposals.toml`.
   - `docs/WINDOWS_GAME_SETUP.md` says a game "may run without" a BIOS, but the runtime always resolves and loads one (`runtime.cpp:1385-1465`).
-  - The two packaging READMEs contradict each other on redistribution (§5.6).
+  - Its docs contradict each other on redistribution. `packaging/web/README.md:12`, `docs/WEB_ROM_BUILD.md:6` and `README.md:318-319` say a bundle can be published. `README.md:253-255` and `packaging/README.md:78-80` say generated code and binaries are not for redistribution (§5.6).
 - `docs/plan.md` Phase 3 lists several items that gbarecomp's web host already provides (§5.4):
   - the ROM picker with SHA-1 check and IndexedDB storage, never uploaded
   - persistent saves in IDBFS
@@ -758,9 +870,14 @@ For the orchestrator to reconcile. This PR does not edit those files.
 
 ## Open questions
 
-1. **Publishing a web bundle** means distributing compiled code derived from the ROM and from Nintendo's BIOS (§5.6). Do we publish, or only document how players build it locally? This decides the Phase 3 hosting plan.
-2. **The gbarecomp LICENSE text** differs from canonical PolyForm Noncommercial 1.0.0 (§8). Does that matter for how we attribute or distribute? A question for the owner, not something to settle in code.
-3. **Engine pin.** `5e89943` is the first commit with the web host, and no game repo has shipped on it yet. Accept being first, or wait for a game repo to qualify a later commit?
-4. **`.gitignore` additions** listed in §9. Who adds them, and when? They should land before the first runtime run (playbook step 9).
+1. **Publishing a web bundle.** Every option except local builds distributes compiled code derived from the ROM, and gbarecomp's default bundle also contains code derived from Nintendo's BIOS. §5.6 compares four options with their legal exposure and technical cost. Recommendation: (a) local builds only through Phase 3. If the owner later wants a public page, (d), a bundle with an open-source BIOS, rather than (b), gbarecomp's default. The owner decides before Phase 3 hosting.
+2. **The gbarecomp LICENSE text** differs from canonical PolyForm Noncommercial 1.0.0 and grants no patent license (§8). Does that matter for how we attribute or distribute? A question for the owner, not something to settle in code.
+3. **Engine pin.** Recommendation: keep `5e89943`, gbarecomp's `main` HEAD on 2026-10-10. The web host first appears at `4855ba2`; three first-parent commits carry it, and no game repo has shipped on any of them. Waiting for a game repo to qualify one gains little, because our own strict-static gates are the qualification that matters for our ROM. The pin's one behavioral change since the web host, the HLE scanline renderer as the default (PR #31), is covered by a second build with `-DGBARECOMP_SCANLINE_IMPLEMENTATION=LLE` for frame comparison (§9).
+4. **`.gitignore` additions** listed in §9. Who adds them, and when? They are a safety net, not a prerequisite: the playbook keeps runtime outputs under the already-ignored `build/` and `roms/`.
 5. **Submodule or scratch clone for Phase 1?** The playbook works either way. The submodule commit fixes the pin in the repo history.
-6. **Rendering mode** (case A or B in §6.4) decides how much enhancement work Phase 4 holds. It should be the first measurement made once the ROM is available.
+6. **Rendering mode** (case A or B in §6.4) decides how much enhancement work Phase 4 holds. It is now playbook step 2, measured in mGBA right after the ROM hash and before any recompile.
+7. **License for our own code.** The repository has no `LICENSE` file (§8). *(inferred, general copyright default, not legal advice)* Until it has one, nobody else may reuse its contents. Options:
+   - **PolyForm Noncommercial 1.0.0 for the whole repo**, using the canonical text. It matches gbarecomp and the code we may adapt from `MKSC` or `MMZ`, which must stay noncommercial anyway, and one license is simple to explain. Others cannot reuse even our standalone tools commercially.
+   - **MIT (or similar) for original code and docs**, with a notice that builds link PolyForm NC code and that any code adapted from gbarecomp, `MKSC` or `MMZ` keeps their license. Our own tools and docs become freely reusable, at the cost of per-file license tracking.
+
+   Recommendation: PolyForm Noncommercial 1.0.0 for everything, while most of our code is glue around gbarecomp. Revisit if we write tools that stand on their own. The owner decides.
