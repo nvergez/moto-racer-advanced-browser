@@ -8,7 +8,7 @@
 #
 # Everything the scripts write is derived from the ROM and must stay out of
 # git, so outputs go under $MRA_OUT. mra_out_path refuses paths inside the
-# work tree that git would track.
+# work tree that git would track. It needs python3 (see py/outpath.py).
 
 _mra_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${MRA_REPO:=$(cd "$_mra_lib_dir/../.." && pwd)}"
@@ -33,21 +33,11 @@ mra_check_sha1() {
   [ "$got" = "$2" ] || mra_die "$3 SHA-1 mismatch: $1 is $got, expected $2 (pass --no-hash-check to override)"
 }
 
-# mra_out_path PATH: print an absolute output path. Relative paths resolve
-# under $MRA_OUT. Absolute paths inside the work tree must be gitignored.
+# mra_out_path PATH: print the absolute output path, with "..", "." and
+# symlinks resolved. Relative paths resolve under $MRA_OUT. A path inside the
+# work tree must be gitignored; paths outside the repository are accepted.
+# The rule lives in py/outpath.py, shared with the Python helpers.
 mra_out_path() {
-  local p="$1"
-  case "$p" in
-    /*) ;;
-    *) p="$MRA_OUT/$p" ;;
-  esac
-  case "$p/" in
-    "$MRA_REPO"/*)
-      if git -C "$MRA_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
-         ! git -C "$MRA_REPO" check-ignore -q --no-index "$p/x" 2>/dev/null; then
-        mra_die "refusing to write ROM-derived output to a tracked path: $p (use $MRA_OUT)"
-      fi
-      ;;
-  esac
-  printf '%s\n' "$p"
+  command -v python3 >/dev/null 2>&1 || mra_die "python3 is required to check output paths"
+  python3 -I "$_mra_lib_dir/py/outpath.py" "$1" || exit 1
 }

@@ -13,6 +13,10 @@ oam.bin, io.bin). BG N is rendered as text or affine depending on the video
 mode in DISPCNT (mode 1: BG2 affine; mode 2: BG2/BG3 affine). Palette index 0
 is drawn with the backdrop color. Rendering follows GBATEK; it is a viewer,
 not an accurate compositor (no windows, blending, mosaic or scroll).
+
+OUT.png is checked by outpath.py: a relative path resolves under analysis-out/
+($MRA_OUT), and a path git would track is refused. DUMPDIR is relative to the
+current directory.
 """
 import argparse
 import os
@@ -20,6 +24,7 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from outpath import out_file  # noqa: E402
 from pngutil import write_png  # noqa: E402
 
 
@@ -193,6 +198,8 @@ def main():
     p.add_argument("out")
     sub.add_parser("oam")
     a = ap.parse_args()
+    if getattr(a, "out", None) is not None:
+        a.out = out_file(a.out)
     dm = Dump(a.dump)
     {"bitmap": cmd_bitmap, "bg": cmd_bg, "tiles": cmd_tiles, "palette": cmd_palette, "oam": cmd_oam}[a.cmd](dm, a)
 

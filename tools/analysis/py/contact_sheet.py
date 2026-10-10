@@ -7,6 +7,9 @@ expanded and sorted here. --frames/--every filter on the frame number in the
 file name (fNNNNNN...).
 Each tile gets a label: the digits found in its file name (e.g. f000600 -> 600),
 drawn with a built-in 3x5 digit font. Stdlib only.
+OUT.png is checked by outpath.py: a relative path resolves under analysis-out/
+($MRA_OUT), and a path git would track is refused. Input paths are relative to
+the current directory.
 """
 import argparse
 import glob
@@ -15,6 +18,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from outpath import out_file  # noqa: E402
 from pngutil import read_png, write_png  # noqa: E402
 
 FONT = {
@@ -45,6 +49,7 @@ def main():
     ap.add_argument("--frames", help="keep frames A-B (inclusive)")
     ap.add_argument("--every", type=int, default=0, help="keep frames divisible by N")
     a = ap.parse_args()
+    out = out_file(a.out)
     paths = []
     for pat in a.images:
         hits = sorted(glob.glob(pat)) if any(c in pat for c in "*?[") else [pat]
@@ -99,8 +104,8 @@ def main():
                 s = (sy * w + sx) * 3
                 d = ((oy + y) * W + cx + x) * 3
                 img[d:d + 3] = rgb[s:s + 3]
-    write_png(a.out, W, H, img)
-    print("wrote %s (%d tiles, %dx%d)" % (a.out, len(tiles), W, H))
+    write_png(out, W, H, img)
+    print("wrote %s (%d tiles, %dx%d)" % (out, len(tiles), W, H))
 
 
 if __name__ == "__main__":

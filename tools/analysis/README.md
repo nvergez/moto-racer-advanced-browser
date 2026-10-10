@@ -7,7 +7,7 @@ The scripts used for the Phase 1 investigation ([docs/research/phase1-findings.m
 - a Ghidra 12.1.4 headless pipeline that imports the ROM with the GBA memory map, maps the RAM code images onto their ROM sources and seeds functions from harness coverage;
 - small stdlib-only Python helpers.
 
-**Legal hygiene.** Nothing here contains ROM or BIOS bytes. You supply both. Everything the scripts produce (dumps, traces, screenshots, WAVs, savestates, `.sav` files, Ghidra projects, decompiler output) is derived from the ROM. It goes to `analysis-out/` at the repository root, which is gitignored, and must never be committed. The shell wrappers refuse to write to a path inside the work tree that git would track. Short excerpts (an address, a few instructions, a register value) are fine as evidence in `docs/research/`.
+**Legal hygiene.** Nothing here contains ROM or BIOS bytes. You supply both. Everything the scripts produce (dumps, traces, screenshots, WAVs, savestates, `.sav` files, Ghidra projects, decompiler output) is derived from the ROM. It goes to `analysis-out/` at the repository root, which is gitignored, and must never be committed. The scripts check every ROM-derived output path they are given with one function, `py/outpath.py`: a relative path resolves under `analysis-out/`, and a path inside the work tree that git would track is refused (after resolving `..` and symlinks). That covers `--out`, `--wav` and `--save` in `run_harness.sh`, the Ghidra project and seed directories, `out=FILE` and `GHIDRA_LOG` in `ghidra_run.sh`, and the Python helpers' output files. It does not cover standard output, absolute `savestate` paths inside input scripts, or `gbaharness` and `analyzeHeadless` called directly. Short excerpts (an address, a few instructions, a register value) are fine as evidence in `docs/research/`.
 
 Every address, frame number and file offset in these scripts refers to one ROM: Moto Racer Advance (Europe), game code A9MP, SHA-1 `b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0`. The wrappers check that hash, and the BIOS hash (`300c20df6731a33952ded8c436f7f186d25d3492`, the official BIOS), before running.
 
@@ -18,7 +18,7 @@ Every address, frame number and file offset in these scripts refers to one ROM: 
 | `input/*.txt` | Input scripts (button presses and dump commands only) |
 | `ghidra/ghidra_import.sh`, `ghidra/make_seed_data.sh` | Build the Ghidra project |
 | `ghidra/ghidra_run.sh`, `ghidra/*.java` | Run queries against it |
-| `py/*.py` | Screenshot sheets, VRAM rendering, RAM-to-ROM matching |
+| `py/*.py` | Screenshot sheets, VRAM rendering, RAM-to-ROM matching, the output-path check |
 
 ## Setup
 
@@ -36,7 +36,7 @@ Override `MGBA_SRC`, `MGBA_BUILD`, `HARNESS_BIN` or `CC` to reuse an existing ch
 
 **Ghidra.** Install Ghidra 12.1.4 (`ghidra_12.1.4_PUBLIC_20260921.zip` from the official GitHub release; SHA-256 `ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db`) and a JDK 21 or newer. The release ships no macOS arm64 natives (decompiler, sleigh, demangler); build them once with `support/gradle/gradlew buildNatives` in the Ghidra directory. The scripts look for Ghidra in `~/tools/ghidra/ghidra_12.1.4_PUBLIC`; set `GHIDRA_HOME` otherwise. The community GBA loader (SiD3W4y/GhidraGBA) targets Ghidra 10.1 and only creates memory blocks, so it is not used; `GbaSetup.java` does more.
 
-**Python.** Standard library only. Run the helpers with `python3 -I`.
+**Python.** Standard library only. Run the helpers with `python3 -I`. The shell scripts need `python3` too: they check output paths with `py/outpath.py`.
 
 ## Quick start
 
@@ -152,7 +152,7 @@ run_harness.sh [--rom FILE] [--bios FILE] [--no-hash-check] --out DIR [options]
   --log-level MASK                         # mGBA log mask to stderr (default 0x7)
 ```
 
-RANGES are inclusive, `A-B` or `A+LEN`, at most 32 per option. Mirrors are canonicalized: EWRAM to 0x02xxxxxx, VRAM 0x06018000+ to 0x06010000+, SRAM 0x0E/0x0F to 0x0E000000 + (address & 0xFFFF). Relative `--out`, `--wav` and `--save` paths resolve under `analysis-out/`.
+RANGES are inclusive, `A-B` or `A+LEN`, at most 32 per option. Mirrors are canonicalized: EWRAM to 0x02xxxxxx, VRAM 0x06018000+ to 0x06010000+, SRAM 0x0E/0x0F to 0x0E000000 + (address & 0xFFFF). Relative `--out`, `--wav` and `--save` paths resolve under `analysis-out/`, and a path git would track is refused.
 
 ### Outputs (under `--out DIR`)
 
@@ -222,7 +222,7 @@ ghidra_run.sh [--project DIR | --copy DIR] [--write] SCRIPT.java [script args...
 | `AnalysisSummary.java` | | functions by mode, instruction bytes per block |
 | `GbaSetup.java`, `MapRomCopy.java`, `SeedFromHarness.java` | see their headers | used by `ghidra_import.sh` |
 
-`MraOut.java` is a helper class, not a script. Every script takes `out=FILE`. Ghidra bundles its own `ListFunctions.java`, so `ghidra_run.sh` passes scripts by absolute path; do the same if you call `analyzeHeadless` yourself.
+`MraOut.java` is a helper class, not a script. Every script takes `out=FILE`; `ghidra_run.sh` checks it like `--out`, so a relative path resolves under `analysis-out/`, not the current directory, and a tracked path is refused. Ghidra bundles its own `ListFunctions.java`, so `ghidra_run.sh` passes scripts by absolute path; do the same if you call `analyzeHeadless` yourself.
 
 ### Known issues in the project
 
@@ -245,5 +245,6 @@ Found during Phase 1 and not fixed yet, so the project still matches the one the
 | `render_vram.py DUMPDIR bitmap\|bg N\|tiles\|palette\|oam ...` | render bitmap pages, a whole text or affine BG map (from the dump's BGxCNT), tile sheets, the palette, or list decoded OAM entries |
 | `ram_sources.py ROM DUMP --base 0x03000000 [--coverage coverage.tsv]` | RAM ranges that are verbatim ROM copies, and how many executed addresses each covers |
 | `pngutil.py` | PNG reading and writing for the above |
+| `outpath.py PATH` | The output-path check used by every script: prints the resolved path, or refuses a path git would track |
 
-Write their output under `analysis-out/` too: the PNGs show game graphics.
+The PNGs show game graphics, so their output paths get the same check as the shell scripts: a relative `OUT.png` resolves under `analysis-out/`, not the current directory, and a path git would track is refused. Input paths stay relative to the current directory.

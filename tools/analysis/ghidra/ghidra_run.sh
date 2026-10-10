@@ -12,8 +12,11 @@
 #                the shared project).
 #   --copy D     copy the shared project to D first if D does not exist yet, then
 #                use it (implies --project D). Relative paths resolve under $MRA_OUT.
-# Script output goes to stdout unless the script gets out=FILE.
-# Env: GHIDRA_LOG (default: a temp file), GHIDRA_KEEP_LOG=1 prints its path.
+# Script output goes to stdout unless the script gets out=FILE. FILE is checked
+# like --out in run_harness.sh: a relative path resolves under $MRA_OUT, and a
+# path git would track is refused.
+# Env: GHIDRA_LOG (default: a temp file; checked like out=FILE),
+# GHIDRA_KEEP_LOG=1 prints its path.
 # The throwaway clone and failure logs go to ${TMPDIR:-/tmp}.
 set -euo pipefail
 source "$(dirname "$0")/ghidra_env.sh"
@@ -34,8 +37,26 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
-[ $# -ge 1 ] || { sed -n '2,19p' "$0"; exit 2; }
+[ $# -ge 1 ] || { sed -n '2,20p' "$0"; exit 2; }
 script="$1"; shift
+# The Java side opens out=FILE as given, so resolve and check it here, before
+# anything runs. Other script arguments pass through unchanged.
+args=()
+user_out=0
+for a in "$@"; do
+  case "$a" in
+    out=*)
+      p="$(mra_out_path "${a#out=}")"
+      mkdir -p "$(dirname "$p")"
+      args+=("out=$p"); user_out=1 ;;
+    *) args+=("$a") ;;
+  esac
+done
+log=""
+if [ -n "${GHIDRA_LOG:-}" ]; then
+  log="$(mra_out_path "$GHIDRA_LOG")"
+  mkdir -p "$(dirname "$log")"
+fi
 # Ghidra bundles its own ListFunctions.java (Features/FunctionID/ghidra_scripts)
 # and searches script dirs in an unspecified order, so a bare name can resolve
 # to Ghidra's copy. Pass ours by absolute path when it exists (accepted by
@@ -59,13 +80,11 @@ if [ "$shared" = "$mine" ]; then
   rm -f "$tmp/proj/$MRA_GHIDRA_PROJECT.lock" "$tmp/proj/$MRA_GHIDRA_PROJECT.lock~"
   proj_dir="$tmp/proj"
 fi
-log="${GHIDRA_LOG:-$tmp/headless.log}"
-user_out=0
-for a in "$@"; do case "$a" in out=*) user_out=1 ;; esac; done
-extra=(); [ "$user_out" = 0 ] && extra=("out=$tmp/out.txt")
+[ -n "$log" ] || log="$tmp/headless.log"
+[ "$user_out" = 1 ] || args+=("out=$tmp/out.txt")
 set +e
 "$ANALYZE_HEADLESS" "$proj_dir" "$MRA_GHIDRA_PROJECT" -process "$MRA_GHIDRA_PROGRAM" -noanalysis ${ro[@]+"${ro[@]}"} \
-  -scriptPath "$MRA_GHIDRA_SCRIPTS" -postScript "$script" "$@" ${extra[@]+"${extra[@]}"} > "$log" 2>&1
+  -scriptPath "$MRA_GHIDRA_SCRIPTS" -postScript "$script" "${args[@]}" > "$log" 2>&1
 rc=$?
 set -e
 if [ $rc -ne 0 ] || grep -q "SCRIPT ERROR\|Unable to lock\|ERROR REPORT" "$log"; then
