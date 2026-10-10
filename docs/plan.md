@@ -22,6 +22,8 @@ Answer the open questions in the findings doc before committing further.
 
 **Exit:** `docs/adr/0001-*.md` confirming static recompilation, or switching approach, with evidence.
 
+Result: [ADR 0001](adr/0001-port-via-static-recompilation.md) confirms static recompilation with gbarecomp (accepted pending owner review). Findings: [research/phase1-findings.md](research/phase1-findings.md) and [research/phase2-diagnosis.md](research/phase2-diagnosis.md).
+
 ## Phase 2: Native recompiled build (weeks, high variance)
 
 Debugging is far easier native than in WebAssembly, so get it working on desktop first.
@@ -32,6 +34,8 @@ Debugging is far easier native than in WebAssembly, so get it working on desktop
 - Push function coverage until no interpreter fallbacks remain on normal play paths.
 
 **Exit:** a full cup plays identically to mGBA under the input replays.
+
+Task breakdown, exit criteria in detail and test commands: [phase2-plan.md](phase2-plan.md).
 
 ## Phase 3: Browser build (~1–2 weeks)
 
