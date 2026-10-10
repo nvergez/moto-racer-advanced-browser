@@ -1,7 +1,13 @@
 # Game facts
 
 **Date:** 2026-10-10
-**Scope:** Public facts about *Moto Racer Advance* that matter for the port, collected before we have a ROM. Nothing here has been checked against a ROM.
+**Scope:** Public facts about *Moto Racer Advance* that matter for the port, collected before we had a ROM. Apart from the update below, nothing here has been checked against a ROM.
+
+**Update after the dump (2026-10-10).** The owner's cartridge has since been dumped. We checked three things on that dump; nothing else in this doc has been re-checked against it:
+
+- It is the Europe release. Its SHA-1 is `B91BAD8EE04652D71E0610F8D1A5DEAEBD4C1FD0` and its size 4194304 bytes, matching the No-Intro Europe entry in §2 (`shasum -a 1`). Its header gives internal title `MOTORACERADV`, game code `A9MP`, maker code `41`, and version byte 0 (read with a Python script at offsets `0xA0`, `0xAC`, `0xB0`, `0xBC`). This answers question 1 in §7.
+- A byte search of the whole file finds `SRAM_F_V102` once, at file offset `0x1C6D0` (address `0x0801C6D0`, 4-byte aligned), and none of the ID strings gbarecomp scans for (`EEPROM_V`, `SRAM_V`, `FLASH_V`, `FLASH512_V`, `FLASH1M_V`). So the save porting note in §3 applies to this dump.
+- Its CodeBreaker checksum is `0x2981` (`tools/cheats/decrypt_gba_cheats.py cbcrc`), not the USA master code's `0x6A2F`. The cheat codes and RAM addresses in §6 are for the USA ROM and have not been checked on this dump.
 
 ## Confidence labels
 
@@ -19,7 +25,7 @@ Under the project rules ([CLAUDE.md](../../CLAUDE.md)), every claim about the ga
 |---|---|
 | Two dumps exist: USA (`A9ME`, SHA-1 `351414650E6969C270B1339ADA7B3565CE80374C`) and Europe (`A9MP`, SHA-1 `B91BAD8EE04652D71E0610F8D1A5DEAEBD4C1FD0`), both 4 MiB, both five-language. No revisions are listed. | verified |
 | Save hardware is 32 KiB SRAM (256 Kbit SRAM/FRAM). MAME documents a battery-backed SRAM chip on a Europe cart. No RTC, rumble, or other cartridge hardware. | verified (SRAM); likely (no other hardware) |
-| The save library ID string is reported as `SRAM_F_V102`. gbarecomp at the pinned commit does not recognize `SRAM_F_V`. Without `[save] type = "sram"` in the game config, the game would find no save chip: reads of the save region return `0x00` and writes are dropped. | likely (string; **unverified** on a ROM); verified (gbarecomp code) |
+| The save library ID string is reported as `SRAM_F_V102`. gbarecomp at the pinned commit does not recognize `SRAM_F_V`. Without `[save] type = "sram"` in the game config, the game would find no save chip: reads of the save region return `0x00` and writes are dropped. | verified on the Europe dump (string; see the update above); verified (gbarecomp code) |
 | The developer says the target from day one was 60 fps. IGN's E3 report, preview, and review also say 60 fps. | verified (statements) |
 | The renderer uses no polygons. Reviews describe sprites, backgrounds, scaling, and a "line-scrolling technique". Per-scanline backgrounds (affine, as in "Mode 7", or text-mode) plus scaled sprites fit this; which one is used is open. | likely (**unverified** on a ROM) |
 | 18 tracks (6 Cross, 6 GP, 6 Traffic), plus the unlockable "Ultimate" course. 8 riders per race. | verified |
@@ -73,7 +79,7 @@ Cross-checks:
 |---|---|---|---|
 | ROM size | 4 MiB (32 Mbit) | verified | [NI][FG] |
 | Save type | 32 KiB SRAM. FlashGBX: save type 3 = "256K SRAM/FRAM", size 32768. Hades: `BACKUP_SRAM`. MAME: slot `gba_sram` for both regions. | verified | [FG][HD][MAME] |
-| Save ID string in ROM | `SRAM_F_V102` | likely (**unverified** on a ROM) | [GD] only |
+| Save ID string in ROM | `SRAM_F_V102` | verified on the Europe dump (offset `0x1C6D0`, see the update at the top); USA ROM not checked | [GD]; our dump |
 | Save slots | One ("Cartridge save (one slot)") | likely | [IGN-R] |
 | RTC, rumble, solar, tilt, other GPIO | None. Hades marks the game `GPIO_NONE`. No entry in mGBA's or VBA-M's override tables, which is where such hardware is flagged. | likely | [HD][MO][VO] |
 | Physical save chip, PCB type (Europe) | MAME documents one Europe cart: PCB `AGB-E06-10`, U2 "256K SRAM [HY62WT081ED70C]", battery CR1616. So battery-backed SRAM, not FRAM, on that cart. Other production runs may differ. | verified (one cart) | [MAME] |
@@ -209,7 +215,7 @@ How far that run got is not stated. The 9000 frames in the issue belong to a dif
 
 ## 6. Cheat codes
 
-**Source:** GameHacking.org game 5425, "Motoracer Advance (USA) (En,Fr,De,Es,It)", CRC32 `2FDBE7A8`, serial `AGB-A9ME-USA`. Read from the [Wayback Machine snapshot of 2026-06-17](https://web.archive.org/web/20260617202426/https://gamehacking.org/game/5425/), because the live site blocks automated requests. **All codes are for the USA ROM**, which we pin as No-Intro SHA-1 `351414650E6969C270B1339ADA7B3565CE80374C` (§2). GameHacking matches by CRC32 only, so the SHA-1 link is through the No-Intro DAT. Europe addresses may differ.
+**Source:** GameHacking.org game 5425, "Motoracer Advance (USA) (En,Fr,De,Es,It)", CRC32 `2FDBE7A8`, serial `AGB-A9ME-USA`. Read from the [Wayback Machine snapshot of 2026-06-17](https://web.archive.org/web/20260617202426/https://gamehacking.org/game/5425/), because the live site blocks automated requests. **All codes are for the USA ROM**, No-Intro SHA-1 `351414650E6969C270B1339ADA7B3565CE80374C` (§2), not the owner's Europe dump (see the update at the top). GameHacking matches by CRC32 only, so the SHA-1 link is through the No-Intro DAT. Europe addresses may differ.
 
 Other places checked:
 
@@ -277,14 +283,14 @@ All the RAM addresses are in EWRAM (`0x02000000`–`0x0203FFFF`). Phase 1 should
 
 Most need the ROM. A few can be answered from the manual or by playing.
 
-1. Which region is the owner's cart, and does its dump match the No-Intro SHA-1 exactly? Header fields: internal title, maker code, version byte (expected 0).
-2. Does the ROM contain `SRAM_F_V102` and no other save ID string? At what offset? Does gbarecomp report the save type as unknown? gbarecomp's `gba_scan` tool prints `save_type`, `save_signature`, and `save_signature_offset` ([tools/gba_scan/main.cpp L69–71](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/tools/gba_scan/main.cpp#L69-L71)), but only for a signature it recognizes; for `SRAM_F_V` we expect `save_type=unknown` and an empty signature, so the string's offset needs a plain byte search. Without `[save] type = "sram"`, does the game check SRAM at boot and complain? Do mGBA (which autodetects SRAM on first access) and gbarecomp behave the same once the config is set? See the porting note in §3.
+1. Which region is the owner's cart, and does its dump match the No-Intro SHA-1 exactly? Header fields: internal title, maker code, version byte (expected 0). Answered in the update at the top: Europe, exact match, version 0.
+2. Does the ROM contain `SRAM_F_V102` and no other save ID string? At what offset? (Europe dump: yes, once, at `0x1C6D0`; see the update at the top.) Does gbarecomp report the save type as unknown? gbarecomp's `gba_scan` tool prints `save_type`, `save_signature`, and `save_signature_offset` ([tools/gba_scan/main.cpp L69–71](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/tools/gba_scan/main.cpp#L69-L71)), but only for a signature it recognizes; for `SRAM_F_V` we expect `save_type=unknown` and an empty signature, so the string's offset needs a plain byte search. Without `[save] type = "sram"`, does the game check SRAM at boot and complain? Do mGBA (which autodetects SRAM on first access) and gbarecomp behave the same once the config is set? See the porting note in §3.
 3. How are races drawn? Video mode in `DISPCNT`, which layers draw the road, sky, and decor, whether decor is affine OBJ sprites, and whether HBlank DMA or HBlank IRQs rewrite BG registers per scanline.
 4. Does the game render a new frame every VBlank in all modes, including 4-player link races?
 5. How much code is copied to IWRAM or EWRAM and run from there? Is any of it generated or self-modifying?
 6. Sound engine: M4A or custom? Reviews mention menu music, digitized voices, and engine noise (§5, Sound). gbarecomp's shadow-mixer audio enhancement only covers M4A at the pinned commit.
 7. Which compiler built it? Adeline would not say.
-8. Do the cheat-derived addresses behave as described? Is the CodeBreaker checksum over the first 64 KiB really `0x6A2F`? `python3 tools/cheats/decrypt_gba_cheats.py cbcrc ROM` computes it from a dump. A Europe dump should not match except by chance: its header, which lies inside those 64 KiB, differs from the USA one (the FlashGBX keys in §2 differ). And what is at `0x0815BC76`?
+8. Do the cheat-derived addresses behave as described? Is the CodeBreaker checksum over the first 64 KiB really `0x6A2F`? `python3 tools/cheats/decrypt_gba_cheats.py cbcrc ROM` computes it from a dump. A Europe dump should not match except by chance: its header, which lies inside those 64 KiB, differs from the USA one (the FlashGBX keys in §2 differ). The owner's Europe dump gives `0x2981`. And what is at `0x0815BC76`?
 9. What differs between the USA and Europe ROMs (units, text, code)? This decides which one we target.
 10. What does the link protocol look like (SIO multiplayer mode, data per frame)? Can gbarecomp's multiplayer runner drive it? We know of that runner only from its file names (`src/runtime/multiplayer_runner.cpp`, `tools/link_session/`).
 11. What is in Ultimate: are the yellow vehicles hover taxis, and what is the locked "?" slot? Is there unused content?
