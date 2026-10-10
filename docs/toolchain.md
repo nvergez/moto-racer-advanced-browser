@@ -31,7 +31,7 @@ Generating the game's C++ needs only the ROM, but every build of the game also r
 | Node.js | 24.14.0 | Optional; gbarecomp's browser unit tests | `brew install node` or nvm |
 | Emscripten | 6.0.10, through emsdk | Web builds and the web half of the smoke test | See below |
 
-Nothing else was installed for this work. gbarecomp's configure step downloads toml++ v3.4.0 (pinned commit `30172438`) with CMake's FetchContent, so the first configure needs network access.
+Nothing else was installed for this work. gbarecomp needs toml++ v3.4.0 (MIT, pinned commit `30172438`); `scripts/setup.sh` downloads its single header once (see step 5 below), so setup needs network access and the build steps after it do not.
 
 ### Emscripten
 
@@ -61,7 +61,8 @@ Do not clone with `--recurse-submodules`. That would also fetch gbarecomp's netp
 2. Checks out the `gbarecomp` submodule at the pinned commit, then only one of its own submodules, `external/arm-recomp-core`, which the build needs. `--with-netplay` adds `external/recomp-net` and `external/rbengine`, needed only for `GBARECOMP_NETPLAY=ON`.
 3. Sets `submodule.platform/android/third_party/SDL.update = none` in gbarecomp's local git config, so a later `git submodule update --init --recursive` skips the Android SDL fork ("Skipping submodule"). It is local config, nothing is committed.
 4. Applies `patches/gbarecomp/` to the submodule's working tree (see [Known issues](#known-issues)). `git status` then shows `gbarecomp (modified content)`. That is expected.
-5. Reports whether `roms/moto-racer-advance.gba` and `bios/gba_bios.bin` are in place.
+5. Downloads `toml.hpp` from toml++ at the commit gbarecomp pins, checks its SHA-256, and puts it in `gbarecomp/third_party/tomlpp/`, a path gbarecomp ignores and looks in first. Without it, every new build tree clones toml++ from GitHub (known issue 12). If gbarecomp's pin ever moves to another toml++ commit, the script warns and leaves the fetching to gbarecomp.
+6. Reports whether the ROM and the BIOS are in place (`roms/moto-racer-advance.gba` and `bios/gba_bios.bin`, or the files given with `--rom` and `--bios`).
 
 ## Engine build and tests
 
@@ -267,7 +268,8 @@ Next steps, for Phase 1: declare the IWRAM images (`[[code_copy]]`), review the 
 9. **The runtime writes into its working directory**: `recomp_cache/`, `recomp_coverage_*.json`, `recomp_master_misses_*.toml.frag`, `bios.cfg`, `rom.cfg`. Run it from `build/native`. `.gitignore` covers these names in case a run starts at the repository root.
 10. **Warnings that are not errors**: about 140 compiler warnings in gbarecomp's sources; about 2,000 more (`-Wunused-variable`, `-Wunused-but-set-variable`) when compiling the recompiled BIOS and game; `ld: warning: ignoring duplicate libraries` on macOS; em++ `-pthread + ALLOW_MEMORY_GROWTH may run non-wasm code slowly`, from gbarecomp's own browser link options.
 11. **gbarecomp's `web_bootstrap_tests` is timing-sensitive.** The test waits a fixed 40 event-loop turns after each simulated file pick, but the page hashes the file with `crypto.subtle.digest`, which Node finishes on its thread pool. On the `ubuntu-24.04` CI runner it failed in both runs, at a different check each time; on the M4 Pro it passes. Delaying every digest by 1 ms reproduces the failure on macOS every time. `patches/gbarecomp/0002-web-test-wait-for-pick.patch` makes the test wait for the line each pick logs (10 s deadline); the page itself is unchanged. Upstreamable.
-12. **Runtime problems seen with the game ROM**: the IRQ watchdog, a self-heal bridge that never returns, and results that depend on `--frames`. See [First real-ROM smoke test](#first-real-rom-smoke-test).
+12. **gbarecomp clones toml++ into every new build tree** unless `gbarecomp/third_party/tomlpp/toml.hpp` exists. Its configure step then runs FetchContent, a full `git clone` from GitHub, in each build directory (`build/gbarecomp`, `build/native`, the smoke test's trees, the web build's). Usually that takes a few seconds, but in the first clean-clone check one configure took 595 s, and later the clone for `build/smoke/native-host` hung for more than 11 minutes, while a manual clone right after took 2 s. So `scripts/setup.sh` now puts the pinned header in place once (step 5 of setup), and a fresh configure takes about 1 s with no network.
+13. **Runtime problems seen with the game ROM**: the IRQ watchdog, a self-heal bridge that never returns, and results that depend on `--frames`. See [First real-ROM smoke test](#first-real-rom-smoke-test).
 
 ## CI
 

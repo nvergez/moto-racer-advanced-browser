@@ -39,6 +39,15 @@ GBA_BIOS_SIZE=16384
 MRA_MAX_FUNCTIONS=${MRA_MAX_FUNCTIONS:-65536}
 # The Emscripten release gbarecomp's web host was validated with.
 MRA_EMSCRIPTEN_VERSION=6.0.10
+# toml++ (MIT), the single header gba_recompile includes. Without
+# gbarecomp/third_party/tomlpp/toml.hpp (ignored by gbarecomp), every new
+# build tree clones toml++ with FetchContent; setup.sh puts the header there
+# once. Same commit as gbarecomp's FetchContent_Declare at the pin; the
+# SHA-256 was checked against that checkout.
+# shellcheck disable=SC2034  # used by setup.sh
+TOMLPP_COMMIT=30172438cee64926dc41fdd9c11fb3ba5b2ba9de
+# shellcheck disable=SC2034  # used by setup.sh
+TOMLPP_SHA256=6b5172ad4dd6519aec67b919181fa7a38a2234131e5b2afa232dfe444819783e
 
 die() {
   printf 'error: %s\n' "$*" >&2

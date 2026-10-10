@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Prepare a fresh clone: check prerequisites, fetch the pinned gbarecomp
 # submodule and the one nested submodule the build needs, apply our local
-# patches, and report which private inputs are still missing.
+# patches, put the pinned toml++ header where gbarecomp looks for it (so build
+# trees do not each clone toml++), and report which private inputs are still
+# missing.
 #
 #   scripts/setup.sh [--with-netplay] [--rom PATH] [--bios PATH]
 #
@@ -25,7 +27,7 @@ while [ $# -gt 0 ]; do
     --with-netplay) NETPLAY=1 ;;
     --rom | --bios) [ $# -ge 2 ] || die "$1 needs a path"; set_input "$1" "$2"; shift ;;
     --rom=* | --bios=*) set_input "${1%%=*}" "${1#*=}" ;;
-    -h | --help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
@@ -50,6 +52,7 @@ check required git "needed for the submodules"
 check required cmake "3.20 or newer"
 check required c++ "Apple clang from the Xcode Command Line Tools, or g++/clang++"
 check required python3 "3.9 or newer, used by gbarecomp's tools and tests"
+check required curl "downloads toml++ and the test ROMs"
 check optional ninja "CMake falls back to Makefiles"
 check optional node "enables gbarecomp's web unit tests"
 if ! command -v emcc > /dev/null 2>&1 && [ -f "$(emsdk_env_script)" ]; then
@@ -84,6 +87,31 @@ git -C "$GBARECOMP_DIR" submodule status | sed 's/^/  /'
 
 "$MRA_ROOT/scripts/apply-patches.sh"
 
+# One copy of toml++ for every build tree, instead of a git clone per tree.
+info "toml++ for gba_recompile"
+tomlpp="$GBARECOMP_DIR/third_party/tomlpp/toml.hpp"
+pinned=$(grep -A1 'tomlplusplus\.git' "$GBARECOMP_DIR/CMakeLists.txt" |
+  sed -nE 's/.*GIT_TAG[[:space:]]+([0-9a-f]{40}).*/\1/p')
+if [ "$pinned" != "$TOMLPP_COMMIT" ]; then
+  warn "gbarecomp pins toml++ at ${pinned:-an unknown commit}, not $TOMLPP_COMMIT; leaving it to gbarecomp's FetchContent. Update TOMLPP_* in scripts/lib/common.sh."
+elif [ -f "$tomlpp" ] && [ "$(sha256_of "$tomlpp")" = "$TOMLPP_SHA256" ]; then
+  printf '  ok       %s (%s)\n' "$(rel "$tomlpp")" "${TOMLPP_COMMIT:0:7}"
+else
+  mkdir -p "$(dirname "$tomlpp")"
+  url="https://raw.githubusercontent.com/marzer/tomlplusplus/$TOMLPP_COMMIT/toml.hpp"
+  if curl -fsSL --retry 3 -o "$tomlpp.part" "$url"; then
+    if [ "$(sha256_of "$tomlpp.part")" != "$TOMLPP_SHA256" ]; then
+      rm -f "$tomlpp.part"
+      die "toml.hpp from $url does not have the expected SHA-256"
+    fi
+    mv "$tomlpp.part" "$tomlpp"
+    printf '  fetched  %s (%s)\n' "$(rel "$tomlpp")" "${TOMLPP_COMMIT:0:7}"
+  else
+    rm -f "$tomlpp.part"
+    warn "could not download $url; each build tree will clone toml++ itself"
+  fi
+fi
+
 info "Private inputs (never committed, never downloaded)"
 for input in "$MRA_ROM" "$MRA_BIOS"; do
   if [ -f "$input" ]; then
@@ -98,6 +126,6 @@ cat << 'EOF'
 Next steps (docs/toolchain.md has the details):
   scripts/test-engine.sh        build gbarecomp and run its unit tests
   scripts/smoke-test.sh         recompile and run free test ROMs (no BIOS needed)
-  scripts/build-native.sh       needs the ROM, the BIOS and a filled-in game.toml
+  scripts/build-native.sh       needs the ROM and the BIOS (or --rom PATH --bios PATH)
   scripts/build-web.sh          same, plus Emscripten
 EOF
