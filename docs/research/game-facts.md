@@ -1,0 +1,301 @@
+# Game facts
+
+**Date:** 2026-10-10
+**Scope:** Public facts about *Moto Racer Advance* that matter for the port, collected before we have a ROM. Nothing here has been checked against a ROM.
+
+## Confidence labels
+
+- **verified**: stated by a primary source (the developer, a dump database, a database built from cartridge dumps), or by two or more independent sources, and checked by us against that source.
+- **likely**: one secondary source, or our own derivation (decoded cheat codes, readings from video thumbnails) that passed a consistency check.
+- **unverified**: not checked, sources disagree, or inferred.
+
+"Verified" means the source says it. It does not mean we confirmed it on a ROM.
+
+## Key facts for the port
+
+| Fact | Confidence |
+|---|---|
+| Two dumps exist: USA (`A9ME`, SHA-1 `351414650E6969C270B1339ADA7B3565CE80374C`) and Europe (`A9MP`, SHA-1 `B91BAD8EE04652D71E0610F8D1A5DEAEBD4C1FD0`), both 4 MiB, both five-language. No revisions are listed. | verified |
+| Save hardware is 32 KiB SRAM (256 Kbit SRAM/FRAM). No RTC, rumble, or other cartridge hardware. | verified (SRAM); likely (no other hardware) |
+| The save library ID string is reported as `SRAM_F_V102`. gbarecomp at the pinned commit does not recognize `SRAM_F_V`, so it would need `[save] type = "sram"` in the game config. | likely (string); verified (gbarecomp code) |
+| The developer says the target from day one was 60 fps. IGN's E3 report, preview, and review also say 60 fps. | verified (statements) |
+| The renderer uses no polygons. Reviews describe sprites, backgrounds, scaling, and a "line-scrolling technique". | likely |
+| 18 tracks (6 Cross, 6 GP, 6 Traffic), plus the unlockable "Ultimate" course. 8 riders per race. | verified |
+| Link play for up to 4 players, one cartridge per player (no single-pak mode). | verified |
+| "Ultimate" exists and is a futuristic, space-themed course. The "hover taxis" detail is still open. | likely |
+| Cheat codes point at EWRAM addresses for race position, speed, nitro, and an 18-byte unlock block at `0x0203F024`. USA ROM only. | likely |
+
+## 1. Releases
+
+| Region | Publisher | Release date | Product ID | Barcode | Confidence |
+|---|---|---|---|---|---|
+| Europe (PAL) | Ubisoft | 2002-10-04 | AGB-A9MP-EUR | 3307210116123 | Date: verified [W][GF][AD]. Product ID: likely [GF] (libretro lists `AGB-A9MP` [LS]). Barcode: likely [GF] |
+| USA | Ubi Soft (MobyGames: "Ubi Soft Entertainment, Inc.") | 2002-12-04 or 2002-12-05 | AGB-A9ME-USA | 008888140313 | Product ID: verified [GF][LS][GH]. Date: **unverified**, sources disagree: Dec 4 [W][IGN-R], Dec 5 [GF][YT]. Barcode: likely [GF] |
+
+- Developer: Adeline Software International; producer: Delphine Software International [W]. Adeline's own site gives the release as "October 2002" [AD].
+- Languages on both carts: English, French, German, Spanish, Italian (No-Intro names) [NI]. verified.
+- ESRB: E [IGN-R][GF][LE]. verified. US launch price $24.99 [IGN-R]. likely.
+- No Japanese release appears in the No-Intro mirror [NI]. likely (an absence, not proof).
+- No revisions: No-Intro lists one dump per region [NI], and gbhwdb lists the ROM IDs as `AGB-A9ME-0` and `AGB-A9MP-0` (revision 0) [HW]. likely.
+- Naming: the title screen and several databases spell it "Motoracer Advance" [YT][LM][GH]. Current No-Intro uses "Moto Racer Advance" [NI].
+
+## 2. Dump database entries
+
+Source: the No-Intro GBA DAT as mirrored in libretro-database, commit [`bf825e3`](https://github.com/libretro/libretro-database/blob/bf825e3ec48d43557ad024da6a7b93e512043525/metadat/no-intro/Nintendo%20-%20Game%20Boy%20Advance.dat#L12136-L12147) (2026-10-08), DAT header version `2026.10.07`, lines 12136–12147. Values below are copied from that file.
+
+| | USA | Europe |
+|---|---|---|
+| No-Intro name | Moto Racer Advance (USA) (En,Fr,De,Es,It) | Moto Racer Advance (Europe) (En,Fr,De,Es,It) |
+| Serial (game code) | A9ME | A9MP |
+| Size (bytes) | 4194304 | 4194304 |
+| CRC32 | `2FDBE7A8` | `8CB19DA0` |
+| MD5 | `77FDFC944C31CCB0270C73E801CC20B0` | `D3B2AB65C92E18DF21788C4B30128041` |
+| SHA-1 | `351414650E6969C270B1339ADA7B3565CE80374C` | `B91BAD8EE04652D71E0610F8D1A5DEAEBD4C1FD0` |
+| Save type | not listed in the DAT | not listed in the DAT |
+| FlashGBX header key (SHA-1 of ROM bytes `0x000`–`0x17F`) | `062b103bad19ab6aeccbbe95db9de3dbc94f9aca` | `f34f0868970fa0ac43ea2a672ff48a564959a25f` |
+
+Cross-checks:
+
+- The CRC32s also appear in the FlashGBX database [FG] (as decimal `802940840` = `0x2FDBE7A8` and `2360450464` = `0x8CB19DA0`), in a GBA dumper's game list [GD], and on GameHacking.org [GH]. Size 4194304 matches FlashGBX. **Verified** for CRC32 and size. MD5 and SHA-1 come from the No-Intro mirror only.
+- We did not query DAT-o-MATIC (datomatic.no-intro.org) directly: its search is a POST form, and we did not submit forms. The libretro file is a mirror of No-Intro.
+- The FlashGBX key is how FlashGBX looks up its database: SHA-1 of the first `0x180` bytes ([RomFileAGB.py L227–230](https://github.com/lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/FlashGBX/RomFileAGB.py#L227-L230)). It gives a quick header check on a fresh dump.
+- TOSEC: no entry in libretro's TOSEC GBA DAT at the same commit.
+
+## 3. Cartridge hardware
+
+| Item | Value | Confidence | Sources |
+|---|---|---|---|
+| ROM size | 4 MiB (32 Mbit) | verified | [NI][FG] |
+| Save type | 32 KiB SRAM. FlashGBX: save type 3 = "256K SRAM/FRAM", size 32768. Hades: `BACKUP_SRAM`. | verified | [FG][HD] |
+| Save ID string in ROM | `SRAM_F_V102` | likely | [GD] only |
+| Save slots | One ("Cartridge save (one slot)") | likely | [IGN-R] |
+| RTC, rumble, solar, tilt, other GPIO | None. Hades marks the game `GPIO_NONE`. No entry in mGBA's or VBA-M's override tables, which is where such hardware is flagged. | likely | [HD][MO][VO] |
+| Physical save chip (battery SRAM or FRAM), PCB type | Unknown. gbhwdb has no hardware submissions for either region. | **unverified** | [HW] |
+
+About `SRAM_F_V`: emulators treat it as 32 KiB SRAM, the same as `SRAM_V` (ares [AR], bsnes-mercury labels it `FRAM` [BM]). GBATEK's backup ID list only names `SRAM_Vnnn` [GT-B].
+
+**Porting note (verified in gbarecomp source, effect on this ROM unverified):** gbarecomp at the pinned commit `5e89943` detects saves by scanning for `EEPROM_V`, `SRAM_V`, `FLASH1M_V`, `FLASH512_V`, and `FLASH_V` ([gba_rom_header.cpp L66–75](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/gba/gba_rom_header.cpp#L66-L75)). `SRAM_F_V102` matches none of them. An unknown type resolves to a save size of 0 ([save_config.cpp](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/runtime/save_config.cpp)), and with no SRAM buffer, reads return `0xFF` and writes are dropped ([gba_save.cpp L26–32](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/gba/gba_save.cpp#L26-L32)). The game would run without saves. If the ROM's only ID string is `SRAM_F_V102`, we need `[save] type = "sram"` in the game config ([runtime.cpp L734–751](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/runtime/runtime.cpp#L734-L751)) or `GBARECOMP_SAVE_TYPE=sram` in the environment ([runtime.cpp L1509–1510](https://github.com/mstan/gbarecomp/blob/5e89943528aee7bc1c399bdbd035364a4b41dd10/src/runtime/runtime.cpp#L1509-L1510)).
+
+## 4. Content
+
+### Menus and modes
+
+- Main menu: Solo, Multiplayer, Options, Top 5. Solo: Single Race, Championship, League, Progression. Single Race, Championship, and League start locked. likely [YT] (read from video thumbnails); consistent with [W][MG].
+- Three disciplines: Cross (off-road), GP (paved circuits), Traffic (roads with traffic, either bike class). verified [IGN-R][GS][MG][W].
+- Progression is the main mode: a tree of races per discipline that unlocks bikes, tracks, and "combos". verified [IGN-R][MG][W].
+- Single Race is earned through Progression. verified [W][IGN-R].
+
+### Progression structure
+
+The longplay's chapter list [YT], in order: Cross, GP, and Traffic start sections; Super League; Mega League; Reverse GP; Reverse Cross; Reverse Traffic; GP, Cross, and Traffic Reverse Leagues; Extra League; Ultimate; Ultimate Reverse; credits. likely.
+
+From the video's thumbnails, each discipline has "Rookie" and "Pro" groups. The Extra League has 12 races ("race complete 6/12"), and a Mirror unlock ("mirror", an "M" icon) appears after Ultimate Reverse. likely [YT].
+
+### Tracks
+
+Adeline's 2002 site lists the tracks by discipline (in French; translated below) [AD]. The in-game English names match, as read from the longplay's thumbnails [YT]. A GameFAQs reader review also counts eighteen tracks [GF-RR]. verified (list and count).
+
+| Discipline | Tracks |
+|---|---|
+| Cross | Kenya, Texas, France, Mauritania, New Zealand, Italy |
+| GP | California, England, Belgium, Brazil, Sweden, Germany |
+| Traffic | Moscow, San Francisco, Montreal, Cairo, Tokyo, Paris |
+| Ultimate | One course, plus "Ultimate Reverse" |
+
+- We did not see the in-game "Texas" name card; the name comes from Adeline's list. The track is the desert-canyon Cross course seen in the longplay, and GameZone's review mentions racing in Texas [GZ]. likely.
+- Each discipline has reversed versions of its tracks [YT]. likely.
+- Races have 8 riders (the player plus 7 CPU riders) [IGN-P][JV], shown as "POS 8" on the grid in [YT]. Races are 3 laps in the races we sampled [YT]. verified (8 riders), likely (3 laps).
+
+### Bikes
+
+- Each bike has four stats: max speed, acceleration, brake, grip. verified [MG][YT].
+- Adeline's site groups the bikes as Cross, GP, and Pocket [AD]. verified.
+- Bikes seen in the longplay [YT] (likely, not a complete list): Cross: Blood 250, Fullmax 250, Fullmax 500. GP: GP 250, Powermax 250, Powermax 500. Pocket: Pocket Machine (a pocket bike usable in all three disciplines).
+- Unlocking GP bikes takes Cross wins, and vice versa [IGN-R]. likely.
+- Automatic or manual gearbox is chosen on the bike screen [YT][JV]. likely.
+
+### Unlockables
+
+- Bikes, tracks, leagues, and "combos" (button sequences for special moves) [IGN-R][GS][JV][MG]. verified.
+- Combo names seen in the longplay [YT]: Quick Fall, Quick Start, Anti-collision, Mega Grip. likely. Quick Fall is the first one earned, so it is probably the "get up faster after a fall" combo that jeuxvideo.com describes [JV] (**unverified**). The game displays each combo's input, but we did not transcribe them from low-resolution thumbnails.
+- Locked items are shown greyed out [IGN-R]. likely.
+- Mirror mode after Ultimate Reverse [YT]. likely.
+
+### Controls
+
+Reviewers disagree on the shoulder buttons. jeuxvideo.com says R wheelies and L shifts gears [JV]. Gaming Nexus says R wheelies, then boosts [GN]. IGN says a boost comes from holding a shoulder button and is limited by a gauge that refills [IGN-R]. MobyGames says the nitro triggers a wheelie and regenerates over time [MG]. **unverified**: check in-game.
+
+### Multiplayer
+
+- Up to 4 players over the link cable, one cartridge per player. IGN's feature list says "multiple cartridge" [IGN-R]. Gaming Nexus regrets that there is no single-cartridge mode [GN]. MobyGames: 1–4 players, free-for-all, multi-link cable [MG-T]. libretro: `users 4` [LX]. verified.
+
+### The "Ultimate" claim
+
+The earlier recap's claim, as recorded in [initial-findings.md](initial-findings.md): an "Ultimate" mode contains a sci-fi race with hover taxis and spaceships (in the background).
+
+| Part | Verdict | Evidence |
+|---|---|---|
+| Ultimate exists and is unlocked late | verified | MobyGames: "A fourth style called Ultimate is unlocked later on in the game" [MG]. Longplay chapters 4:26:30 "Ultimate" and 4:29:48 "Ultimate Reverse", after the Extra League [YT] |
+| It is a race | likely | The chapters are about 3 minutes each, the length of one race [YT]. The thumbnails show a lap race with "POS" and lap counters |
+| Futuristic setting | likely | Thumbnails show a star field, planets (one ringed), neon and wireframe city blocks, and striped glowing roads [YT] |
+| "Spaceships in the background" | likely | Flying-saucer craft with green aliens appear beside and above the track, and the Ultimate menu art shows an alien in a saucer [YT] |
+| "Hover taxis" | **unverified** | Yellow car-shaped vehicles appear on and above the track [YT]. At 270×180 we cannot tell whether they are taxis or whether they hover |
+| How it unlocks | **unverified** | In the longplay it follows the Extra League. No source states the rule |
+
+The Ultimate menu also shows a locked "?" slot, which suggests more content (**unverified**). Ultimate Reverse appears to be raced as a green alien rider (**unverified**). The credits are a checkerboard course on an asteroid-strewn planet, ridden by an alien on a yellow saucer, with credit names painted on the track [YT].
+
+How the thumbnails were read: YouTube publishes preview thumbnails ("storyboards") for each video. For the longplay these are 270×180 frames every 10 seconds. We viewed them transiently to read track names, menus, and the Ultimate course. No video was downloaded and no image is committed.
+
+## 5. Technical
+
+### What the developer said
+
+- "From the start of the project the watchword was: 60 fps" (our translation from French) [AD]. verified as a statement.
+- Adeline's "Making of" page declines to name its programming tools and compiler-debugger [AD-T]. verified. So the compiler question stays open.
+- Tools described on the same page [AD-T], all verified as statements:
+  - **Bankedit** groups isolated decor elements (trees, houses) and sprite animations into per-level banks, with sound, collision, and effect parameters. Vehicles are handled the same way.
+  - **MRedit** builds the terrain base: "material strips 1024 pixels long made from 8×8-pixel squares" of grass, dirt, road, and so on.
+  - **Trackedit** lays those strips end to end "like sections of an electric racing set" and places decor (trees, rocks, houses, animals) on top.
+  - One graphics-tool image on the page is named `outil_ProMotion_128.jpg`, which suggests the Pro Motion pixel-art editor. likely.
+- Team, per Adeline's site [AD-M] and MobyGames credits [MG-C]: one software engineer (Pascal Dubois), Didier Chanfray (game design; "General Manager" in the credits), Hugues Tardif (development director), Arnaud Lhomme (art director), artists Gaël Marlier and Romain Chavanne, Philippe Vachey (music and SFX). verified.
+- Wikipedia's Adeline article says no original Adeline staff worked on this game [WA]. MobyGames links several of these credited people to Adeline's earlier games (Time Commando, Little Big Adventure 2) [MG-C]. **Unverified**; sources conflict, and it is low relevance.
+
+### What reviewers said about rendering
+
+- IGN at E3 2002: "a line-scrolling technique that features an incredibly smooth framerate (60 frames per second), and a super far draw distance" [IGN-E3].
+- IGN preview: "The game runs at a silky smooth 60 frames per second" [IGN-P].
+- IGN review: "doesn't feature any trendy texture-mapped 3D models; the developers worked with the GBA's strength of manipulating sprites and backgrounds"; graphics rating text: "smooth and fast scaling with detailed artwork flowing at 60 frames per second". Turning around is impossible, which IGN attributes to the lack of polygons [IGN-R].
+- GameFAQs reader review: "entirely presented without polygons" [GF-RR].
+- jeuxvideo.com (in French) says Cross races are "in 3D" and GP races use "Mode 7" [JV]. This contradicts the others and reads as a reviewer's impression. **unverified**.
+- Reviewers note a long draw distance, steep hills, and no slowdown with many riders on screen [GS][IGN-R][JV][GF-RR].
+
+### Implications (all unverified until Phase 1)
+
+- **Frame rate.** The developer and three IGN pieces say 60 fps, so the plan's Phase 4 frame-rate item may be moot. Confirm in mGBA.
+- **Renderer.** Everything points to a raster "road" engine: per-scanline background changes plus scaled sprites for riders and decor. That would mean HBlank DMA or HBlank IRQ writes to background registers. If so, gbarecomp's PPU must apply mid-frame register writes per scanline, and the resolution enhancement means re-rendering the per-line road and scaled sprites at higher resolution, not intercepting triangles. The 1024-pixel terrain strips match the largest affine background (1024×1024 pixels), so an affine BG driven per scanline is one candidate. Bitmap-mode software rendering is another. Phase 1 must read `DISPCNT`, the BG registers, and the DMA setup during a race.
+- **Widescreen.** Decor placement and culling are probably tied to the 240-pixel screen width. Not investigated.
+
+## 6. Cheat codes
+
+**Source:** GameHacking.org game 5425, "Motoracer Advance (USA) (En,Fr,De,Es,It)", CRC32 `2FDBE7A8`, serial `AGB-A9ME-USA`. Read from the [Wayback Machine snapshot of 2026-06-17](https://web.archive.org/web/20260617202426/https://gamehacking.org/game/5425/), because the live site blocks automated requests. **All codes are for the USA ROM.** Europe addresses may differ.
+
+Other places checked: GameFAQs' cheats page was empty in its last archived copy (2019-12-12) [GF-C]. libretro-database has no `.cht` file for this game. No GameShark codes turned up elsewhere.
+
+### Codes as listed
+
+Codes are copied verbatim, in GameHacking's "Original" format.
+
+| Name (as listed) | Author | Device (as labeled) | Code |
+|---|---|---|---|
+| [M] Must Be On | MadCatz | Codebreaker/GameShark SP/Xploder | `911216685608` `CF8CF1754BB4` `6EEBE336DF10` |
+| Always 1st | MadCatz | Codebreaker/GameShark SP/Xploder | `B3142C244498` `0584FAF949B2` |
+| Always in First Place | Dualscreenman | Codebreaker/GameShark SP/Xploder | `3201A58E 0001` |
+| Always in First Place | Dualscreenman | GameShark Advance/Action Replay | `1378A3AB 53645017` |
+| Bike Speed Boost | Dualscreenman | GameShark Advance/Action Replay | `2F98C0ED A2CFC904` `CC9DC202 9922F449` |
+| Bike Speed Modifer [sic] | Dualscreenman | Codebreaker/GameShark SP/Xploder | `74000130 03FE` `320340E5 00??` |
+| Drive Thru Objects | MadCatz | Codebreaker/GameShark SP/Xploder | `8C6F7C2E545F` |
+| End Race [Press Select+L] | MadCatz | Codebreaker/GameShark SP/Xploder | `20805E0826E7` `16F8EA3DCF12` |
+| Infinite Nitro | MadCatz | Codebreaker/GameShark SP/Xploder | `CD1C515A318E` |
+| Unlock Everything | MadCatz | Codebreaker/GameShark SP/Xploder | `32A38E88B2FE` `A1E4B8FD4BD7` |
+
+### Formats and decoding
+
+- **Dualscreenman's CodeBreaker codes are plaintext.** They can be read directly using GBATEK's CodeBreaker table [GT-CB]: `3aaaaaaa 00yy` writes a byte, `7aaaaaaa yyyy` means "if the halfword equals yyyy, run the next code", and `4aaaaaaa yyyy` + `iiiicccc ssss` is a fill ("slide") code.
+- **MadCatz's CodeBreaker codes are encrypted.** The first line of the master code (`91121668 5608`, type 9) seeds the encryption. Every MadCatz line after it is encrypted and cannot be read as an address.
+- **We decrypted them** with a scratch Python port of mGBA's CodeBreaker routine (`src/gba/cheats/codebreaker.c`, mGBA commit [`143adf5`](https://github.com/mgba-emu/mgba/blob/143adf5aa2a60c6036810b0cd72445e13d74b0e6/src/gba/cheats/codebreaker.c)). The script is not committed. Three checks make the result likely:
+  1. The master code decrypts to `00006A2F 000A` and `1015BC76 0007`, a valid game-ID line and a valid hook line. GBATEK says the flag byte is "usually 0Ah" and the handler slot "usually 7" [GT-CB].
+  2. "End Race [Press Select+L]" decrypts to a test of `KEYINPUT` (`0x04000130`) against `0x01FB`. That value means exactly Select and L are held.
+  3. The decoded addresses sit next to Dualscreenman's plaintext ones (`0x02032C..`, `0x020340..`, `0x0201A5..`).
+- **Dualscreenman's "GameShark Advance/Action Replay" codes are mislabeled or stored oddly.** With the GSA v1/v2 seeds they decrypt to nonsense (`73D5936C 7EA50D88`). With the Pro Action Replay v3 seeds (GBATEK [GT-PAR3]; mGBA [`parv3.c` L12](https://github.com/mgba-emu/mgba/blob/143adf5aa2a60c6036810b0cd72445e13d74b0e6/src/gba/cheats/parv3.c#L12)) they decrypt to `0201A58E 00000001`, then `04000130 000003FE` and `020340E5 000000C8`. Those are the same addresses and values as the plaintext CodeBreaker codes, so they add no new information.
+
+### Decoded meaning
+
+| Code | Decoded | Reading |
+|---|---|---|
+| [M] Must Be On | `91121668 5608` / `00006A2F 000A` / `1015BC76 0007` | Encryption seed; game ID, where `6A2F` is CodeBreaker's checksum of the first 64 KiB of the ROM; hook at ROM offset `0x15BC76` (address `0x0815BC76`) |
+| Always 1st | `42032CBA 0000` / `00000007 0048` | Write halfword `0x0000` to `0x02032CBA + n×0x48`, n = 0..6 |
+| Always in First Place | `3201A58E 0001` | Write byte `0x01` to `0x0201A58E` |
+| Bike Speed Modifer | `74000130 03FE` / `320340E5 00??` | If `KEYINPUT == 0x03FE` (only A held), write byte `??` to `0x020340E5` |
+| Drive Thru Objects | `32032C8D 0000` | Write byte `0x00` to `0x02032C8D` |
+| End Race [Press Select+L] | `74000130 01FB` / `3201A55B 0007` | If `KEYINPUT == 0x01FB` (Select+L held), write byte `0x07` to `0x0201A55B` |
+| Infinite Nitro | `320340F4 00F0` | Write byte `0xF0` to `0x020340F4` |
+| Unlock Everything | `4203F024 FFFF` / `00000009 0002` | Write halfword `0xFFFF` to `0x0203F024 + n×2`, n = 0..8 (18 bytes, `0x0203F024`–`0x0203F035`) |
+
+### RAM map leads (USA ROM; meanings unverified)
+
+| Address | Width | From | Hypothesis |
+|---|---|---|---|
+| `0x0201A58E` | byte | Always in First Place (CodeBreaker and Action Replay versions) | Player's race position, 1-based |
+| `0x0201A55B` | byte | End Race | Race state; 7 = finished? |
+| `0x02032CBA` + n×`0x48`, n = 0..6 | halfword | Always 1st | One field in 7 per-rider records of 72 bytes, probably the CPU riders |
+| `0x02032C8D` | byte | Drive Thru Objects | Collision flag, possibly in the player's record |
+| `0x020340E5` | byte | Bike Speed Modifier/Boost | Player speed or speed cap |
+| `0x020340F4` | byte | Infinite Nitro | Nitro gauge |
+| `0x0203F024`–`0x0203F035` | 18 bytes | Unlock Everything | Unlock bitfield, probably the RAM copy of save data |
+| ROM `0x0815BC76` | — | CodeBreaker hook | Code that runs often (frame loop or interrupt path); a candidate entry point for reverse engineering |
+
+All the RAM addresses are in EWRAM (`0x02000000`–`0x0203FFFF`). Phase 1 should confirm them in mGBA's memory viewer on the USA ROM.
+
+## 7. Open questions only the ROM can answer
+
+1. Which region is the owner's cart, and does its dump match the No-Intro SHA-1 exactly? Header fields: internal title, maker code, version byte (expected 0).
+2. Does the ROM contain `SRAM_F_V102` and no other save ID string? At what offset? Does gbarecomp report the save type as unknown?
+3. How are races drawn? Video mode in `DISPCNT`, which layers draw the road, sky, and decor, whether decor is affine OBJ sprites, and whether HBlank DMA or HBlank IRQs rewrite BG registers per scanline.
+4. Does the game render a new frame every VBlank in all modes, including 4-player link races?
+5. How much code is copied to IWRAM or EWRAM and run from there? Is any of it generated or self-modifying?
+6. Sound engine: M4A or custom? (It plays digitized voices.)
+7. Which compiler built it? Adeline would not say.
+8. Do the cheat-derived addresses behave as described? Is the CodeBreaker checksum over the first 64 KiB really `0x6A2F`, and what is at `0x0815BC76`?
+9. What differs between the USA and Europe ROMs (units, text, code)? This decides which one we target.
+10. What does the link protocol look like (SIO multiplayer mode, data per frame)? Can gbarecomp's multiplayer runner drive it? We know of that runner only from its file names (`src/runtime/multiplayer_runner.cpp`, `tools/link_session/`).
+11. What is in Ultimate: are the yellow vehicles hover taxis, and what is the locked "?" slot? Is there unused content?
+12. Save layout: does the 18-byte unlock block map to SRAM, and does the save carry a checksum?
+
+## Sources
+
+| Key | Source |
+|---|---|
+| NI | No-Intro GBA DAT via libretro-database [`metadat/no-intro/Nintendo - Game Boy Advance.dat` L12136–12147 @ bf825e3](https://github.com/libretro/libretro-database/blob/bf825e3ec48d43557ad024da6a7b93e512043525/metadat/no-intro/Nintendo%20-%20Game%20Boy%20Advance.dat#L12136-L12147) |
+| LS | libretro-database [`metadat/serial/Nintendo - Game Boy Advance.dat` L11918–11932 @ bf825e3](https://github.com/libretro/libretro-database/blob/bf825e3ec48d43557ad024da6a7b93e512043525/metadat/serial/Nintendo%20-%20Game%20Boy%20Advance.dat#L11918-L11932) |
+| LX | libretro-database [`metadat/maxusers/…` L11208–11218 @ bf825e3](https://github.com/libretro/libretro-database/blob/bf825e3ec48d43557ad024da6a7b93e512043525/metadat/maxusers/Nintendo%20-%20Game%20Boy%20Advance.dat#L11208-L11218) |
+| LE | libretro-database [`metadat/esrb/…` L6348–6358 @ bf825e3](https://github.com/libretro/libretro-database/blob/bf825e3ec48d43557ad024da6a7b93e512043525/metadat/esrb/Nintendo%20-%20Game%20Boy%20Advance.dat#L6348-L6358) |
+| LM | libretro-database [`metadat/developer/…` L11088–11098 @ bf825e3](https://github.com/libretro/libretro-database/blob/bf825e3ec48d43557ad024da6a7b93e512043525/metadat/developer/Nintendo%20-%20Game%20Boy%20Advance.dat#L11088-L11098) (uses the "Motoracer" spelling) |
+| FG | FlashGBX [`config/db_AGB.json` L2619–2640 @ 2d9682c](https://github.com/lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/FlashGBX/config/db_AGB.json#L2619-L2640); save type table [`CartridgeTypes.py` L96–108](https://github.com/lesserkuma/FlashGBX/blob/2d9682c0d1abbb556c27d7ba1715453c9776b563/FlashGBX/CartridgeTypes.py#L96-L108) |
+| GD | blimjoe/gbdumper-apm32 [`host/gba.txt` L5905–5909 @ 76683a2](https://github.com/blimjoe/gbdumper-apm32/blob/76683a2b0a62efff30a39e856abbd421ff2a22dd/host/gba.txt#L5905-L5909) |
+| HD | Hades emulator [`source/gba/db.c` L1037 @ e12e42d](https://github.com/hades-emu/Hades/blob/e12e42d7c563db9c12092406b06ca015ba938f9f/source/gba/db.c#L1037) |
+| AR | ares [`mia/medium/game-boy-advance.cpp` L126–177 @ 9408cb4](https://github.com/ares-emulator/ares/blob/9408cb43d4948fc3ea6e152a307a34348df3fe04/mia/medium/game-boy-advance.cpp#L126-L177) |
+| BM | libretro/bsnes-mercury [`ananke/heuristics/game-boy-advance.hpp` L53 @ 79d7f9d](https://github.com/libretro/bsnes-mercury/blob/79d7f9de218b6ffa65a80bbdc5828532bc239232/ananke/heuristics/game-boy-advance.hpp#L53) |
+| MO | mGBA [`src/gba/overrides.c` @ 143adf5](https://github.com/mgba-emu/mgba/blob/143adf5aa2a60c6036810b0cd72445e13d74b0e6/src/gba/overrides.c) (no `A9M` entry) |
+| VO | VBA-M [`src/vba-over.ini`](https://github.com/visualboyadvance-m/visualboyadvance-m/blob/b29c3dc058fb80f90d043f669119fcfb9cf8f702/src/vba-over.ini) and [`src/libretro/gba-over.inc`](https://github.com/visualboyadvance-m/visualboyadvance-m/blob/b29c3dc058fb80f90d043f669119fcfb9cf8f702/src/libretro/gba-over.inc) @ b29c3dc (no `A9M` entry) |
+| HW | [gbhwdb GBA cartridge list](https://gbhwdb.gekkio.fi/cartridges/gba.html) (checked 2026-10-10) |
+| GT-B | GBATEK, [GBA Cart Backup IDs](https://problemkaputt.de/gbatek-gba-cart-backup-ids.htm) |
+| GT-CB | GBATEK, [GBA Cheat Codes - Codebreaker/Xploder](https://problemkaputt.de/gbatek-gba-cheat-codes-codebreaker-xploder.htm) |
+| GT-PAR3 | GBATEK, [GBA Cheat Codes - Pro Action Replay V3](https://problemkaputt.de/gbatek-gba-cheat-codes-pro-action-replay-v3.htm) |
+| GH | GameHacking.org game 5425, [archived 2026-06-17](https://web.archive.org/web/20260617202426/https://gamehacking.org/game/5425/) |
+| W | Wikipedia, [Moto Racer Advance, revision 1347273925](https://en.wikipedia.org/w/index.php?title=Moto_Racer_Advance&oldid=1347273925) |
+| WA | Wikipedia, [Adeline Software International, revision 1359459413](https://en.wikipedia.org/w/index.php?title=Adeline_Software_International&oldid=1359459413) |
+| AD | Adeline Software International, [MotoRacer Advance page, archived 2002-12-09](https://web.archive.org/web/20021209071424/http://www.adelinesoft.com:80/mra.html) |
+| AD-T | Adeline Software International, ["Making of" (tools) page, archived 2002-12-09](https://web.archive.org/web/20021209151245/http://www.adelinesoft.com:80/tools.html) |
+| AD-M | Adeline Software International, [team page, archived 2002-12-09](https://web.archive.org/web/20021209071912/http://www.adelinesoft.com:80/team.html) |
+| IGN-E3 | IGN, "E3 2002: Moto Racer Advance", 2002-05-24, [archived](https://web.archive.org/web/20140506170015/http://www.ign.com/articles/2002/05/24/e3-2002-moto-racer-advance) |
+| IGN-P | IGN, Craig Harris, preview, 2002-07-01, [archived](https://web.archive.org/web/20140506173840/http://www.ign.com/articles/2002/07/01/moto-racer-advance) |
+| IGN-R | IGN, Craig Harris, review, 2003-01-13, [archived](https://web.archive.org/web/20140506040857/http://www.ign.com/articles/2003/01/13/moto-racer-advance-2) |
+| GS | GameSpy, Steve Steinberg, review, [archived](https://web.archive.org/web/20051120195920/http://gba.gamespy.com/gameboy-advance/moto-racer-advance/5504p1.html) |
+| GZ | GameZone, review, 2003-01-12, [archived](https://web.archive.org/web/20090120190209/http://gameboy.gamezone.com/gzreviews/r20549.htm) |
+| GN | Gaming Nexus, [review](https://www.gamingnexus.com/Article/155/Moto-Racer-Advance) |
+| JV | jeuxvideo.com, review (French), 2002-10-15, [archived](https://web.archive.org/web/20201126102306/https://www.jeuxvideo.com/articles/0000/00002502_test.htm) |
+| GF | GameFAQs, release data, [archived 2018-12-31](https://web.archive.org/web/20181231061445/https://gamefaqs.gamespot.com/gba/582307-moto-racer-advance/data) |
+| GF-C | GameFAQs, cheats page, [archived 2019-12-12](https://web.archive.org/web/20191212061407/https://gamefaqs.gamespot.com/gba/582307-moto-racer-advance/cheats) (no cheats listed) |
+| GF-RR | GameFAQs, reader review 52443, [archived](https://web.archive.org/web/20181231062822/https://gamefaqs.gamespot.com/gba/582307-moto-racer-advance/reviews/52443) |
+| MG | MobyGames, game page, [archived 2022-10-04](https://web.archive.org/web/20221004131332/https://www.mobygames.com/game/gameboy-advance/moto-racer-advance) |
+| MG-T | MobyGames, tech info, [archived 2017-09-15](https://web.archive.org/web/20170915040224/http://www.mobygames.com:80/game/gameboy-advance/moto-racer-advance/techinfo) |
+| MG-C | MobyGames, credits, [archived 2018-03-28](https://web.archive.org/web/20180328085923/http://www.mobygames.com/game/gameboy-advance/moto-racer-advance/credits) |
+| YT | "Longplay of Moto Racer Advance", LongplayArchive, 2024-10-29, USA version, [YouTube](https://www.youtube.com/watch?v=uNqLLiutars): chapter list from the description, plus YouTube's preview thumbnails |
+
+## What we could not check
+
+- **The Cutting Room Floor:** no Moto Racer Advance page found by web search. tcrf.net blocks automated requests, and the Wayback Machine has no snapshot of `tcrf.net/Moto_Racer_Advance`. Absence **unverified**.
+- **GameFAQs guides:** none in the Wayback Machine's index of the game's GameFAQs URLs (no `/faqs` path). The live site blocks automated requests.
+- **GameSpot and Nintendo World Report reviews:** not found or not reachable.
+- **RetroAchievements** has a game page (ID 8210), but it blocks automated requests. If it has code notes, they may name more RAM addresses. A lead to check by hand.
+- **Live MobyGames:** blocks automated requests. Archived copies of the older URL scheme were used instead.
