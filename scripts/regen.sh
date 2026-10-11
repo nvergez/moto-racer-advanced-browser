@@ -2,13 +2,16 @@
 # Regenerate the recompiled C++ from the BIOS dump and the ROM. This is the
 # only generation step: the native and the web builds compile the same output.
 #
-#   scripts/regen.sh [--rom PATH] [--bios PATH]
+#   scripts/regen.sh [--rom PATH] [--bios PATH] [--without NAME]...
 #
 # Needs the ROM (default roms/moto-racer-advance.gba), the BIOS dump (default
 # bios/gba_bios.bin) and game.toml (see scripts/lib/common.sh for the
 # environment overrides).
 # Writes generated/bios and generated/game (both gitignored: they are
-# translations of copyrighted code) and logs to build/logs/.
+# translations of copyrighted code) and logs to build/logs/. With
+# --without NAME (an A/B build, patches/gbarecomp/README.md), gba_recompile is
+# built without gbarecomp patch NAME and everything goes under
+# build/without-NAME/ instead.
 set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 . "$(dirname "$0")/lib/common.sh"
@@ -17,11 +20,14 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --rom | --bios) [ $# -ge 2 ] || die "$1 needs a path"; set_input "$1" "$2"; shift ;;
     --rom=* | --bios=*) set_input "${1%%=*}" "${1#*=}" ;;
-    -h | --help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --without) [ $# -ge 2 ] || die "--without needs a patch name or number"; add_without "$2"; shift ;;
+    --without=*) add_without "${1#*=}" ;;
+    -h | --help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
 done
+select_patch_variant
 
 verify_inputs
 build_tools

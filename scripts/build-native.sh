@@ -2,13 +2,17 @@
 # Build the native (macOS/Linux) executable from the ROM and the BIOS dump.
 #
 #   scripts/build-native.sh [--rom PATH] [--bios PATH] [--no-regen] [--lle] [--debug]
+#                           [--without NAME]...
 #
-#   --rom PATH  the ROM (default roms/moto-racer-advance.gba)
-#   --bios PATH the 16 KiB GBA BIOS dump (default bios/gba_bios.bin)
-#   --no-regen  reuse generated/ instead of running scripts/regen.sh first
-#   --lle       per-pixel (LLE) scanline renderer instead of gbarecomp's HLE
-#               default, into build/native-lle, for frame comparisons
-#   --debug     CMake Debug build instead of Release
+#   --rom PATH      the ROM (default roms/moto-racer-advance.gba)
+#   --bios PATH     the 16 KiB GBA BIOS dump (default bios/gba_bios.bin)
+#   --no-regen      reuse generated/ instead of running scripts/regen.sh first
+#   --lle           per-pixel (LLE) scanline renderer instead of gbarecomp's HLE
+#                   default, into build/native-lle, for frame comparisons
+#   --debug         CMake Debug build instead of Release
+#   --without NAME  A/B build: leave gbarecomp patch NAME (0003) out, and put
+#                   everything, generated code included, under
+#                   build/without-NAME/ (patches/gbarecomp/README.md)
 #
 # Output: build/native/MotoRacerAdvanceRecomp (or build/native-lle/...).
 set -euo pipefail
@@ -25,11 +29,14 @@ while [ $# -gt 0 ]; do
     --no-regen) REGEN=0 ;;
     --lle) SCANLINE=LLE ;;
     --debug) BUILD_TYPE=Debug ;;
-    -h | --help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --without) [ $# -ge 2 ] || die "--without needs a patch name or number"; add_without "$2"; shift ;;
+    --without=*) add_without "${1#*=}" ;;
+    -h | --help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
 done
+select_patch_variant
 
 if [ "$REGEN" = 1 ]; then
   "$MRA_ROOT/scripts/regen.sh"
