@@ -149,6 +149,10 @@ python3 -I -m unittest discover tools/difftest/tests          # no game data nee
 
 `mgba-routes.sh` runs each route twice from boot, each time from a fresh copy of its starting save, with `--trace 1-<frames>` and a `--trace-mem` column for every RAM field. It checks that the two `trace.tsv` and the two final saves are byte-identical, that the run stops at the route's frame count, that the checkpoints hold on their recorded frames, and that the final save is as the manifest says. It stops before the first run if the harness is not built or the ROM or BIOS is not the pinned one. A route whose starting-save route failed is reported as failed without running, and a failing route keeps run b's output for comparison. Outputs go to `analysis-out/routes/`. The tools need Python 3.11 or newer (`tomllib`).
 
+### Replays for gbarecomp
+
+`tools/replay/script2replay.py` turns an input script into a replay for gbarecomp with the same frame numbers ([tools/replay/README.md](../replay/README.md)). A replay line `N,0xKEYS` holds the keys of frame N in the sense above: the keys the harness sets before it emulates frame N, which `trace.tsv` shows in row N. gbarecomp applies them at the same point, the VBlank start that ends frame N-1, through our `input_frame` hook (`MRA_REPLAY`): at a VBlank start where gbarecomp's PPU `frame_count` is k, frame k+1 ends and the keys of frame k+2 are set. `script2replay.py --check REPLAY TRACE` compares a replay with a `trace.tsv`'s `keys` column; every route's replay matches its harness run on every frame ([phase2-replay.md](../../docs/research/phase2-replay.md)). gbarecomp's own `GBARECOMP_INPUT_REPLAY` numbers frames differently and refuses these files.
+
 ### Options
 
 ```
