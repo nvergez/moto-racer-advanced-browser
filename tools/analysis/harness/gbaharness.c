@@ -150,7 +150,8 @@ static FILE* fSwiCycles;
 typedef struct {
 	uint32_t ret;   /* caller's next instruction */
 	bool thumb;     /* caller's mode */
-	int32_t start;  /* mTimingCurrentTime at the SWI instruction */
+	uint32_t start; /* mTimingCurrentTime at the SWI instruction, as uint32_t: it wraps
+	                 * past INT32_MAX 2^31 cycles (about frame 7,645) into a run */
 	uint32_t frame, pc;
 	int vcount, num;
 	uint32_t r[4];
@@ -869,7 +870,7 @@ static void logSwi(int num, uint32_t pc) {
 		PendingSwi* p = &swiStack[swiDepth++];
 		p->ret = pc + (thumb ? 2 : 4);
 		p->thumb = thumb;
-		p->start = mTimingCurrentTime(&gba->timing);
+		p->start = (uint32_t) mTimingCurrentTime(&gba->timing);
 		p->frame = curFrame() + 1;
 		p->vcount = gba->video.vcount;
 		p->pc = pc;
@@ -1042,7 +1043,7 @@ static void runFrameStepping(void) {
 			PendingSwi* p = &swiStack[--swiDepth];
 			fprintf(fSwiCycles, "%u\t%d\t%08X\t%c\t%02X\t%s\t%08X\t%08X\t%08X\t%08X\t%u\n", p->frame, p->vcount, p->pc,
 			        p->thumb ? 'T' : 'A', p->num, p->num < 0x2B ? SWI_NAMES[p->num] : "?", p->r[0], p->r[1], p->r[2], p->r[3],
-			        (uint32_t) (mTimingCurrentTime(&gba->timing) - p->start));
+			        (uint32_t) mTimingCurrentTime(&gba->timing) - p->start); /* unsigned: defined across the wrap */
 		}
 		if (opt.dumpPcOn && !dumpPcDone && pc == opt.dumpPc) {
 			char label[32];

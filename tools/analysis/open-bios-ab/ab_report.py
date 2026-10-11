@@ -2,6 +2,7 @@
 """Compare open-BIOS A/B runs written by run_ab.sh (stdlib only).
 
 usage: ab_report.py OUTDIR [--pair A B ...] [--routes R ...]
+       ab_report.py --result-shot-frame RUNDIR
 
 OUTDIR is run_ab.sh's output directory (OUTDIR/VARIANT/ROUTE/...). Prints, per
 route and per variant, the metrics of docs/research/open-bios-ab.md, then for
@@ -9,6 +10,13 @@ each pair (default: retail-skip/cult-skip and retail-boot/cult-boot) where the
 two runs first differ. It prints numbers only: no frames, no RAM contents
 beyond the race-time words and no screenshots, so its output can be quoted in
 the docs.
+
+--result-shot-frame RUNDIR prints the harness frame at which run_ab.sh
+screenshots the results overlay of the run in RUNDIR: the last frame of its
+last finished race display, minus RESULT_SHOT_LEAD (60). In retail-equivalent
+frames that is race-display end - 60 + shift. It prints nothing if the run has
+no race display that ends before the trace does (boot_to_race, the front-end
+routes).
 
 Frames are reported as "retail-equivalent" frames: the harness frame minus the
 variant's shift (handoff.tsv), so frame numbers line up with the retail-boot
@@ -29,7 +37,9 @@ Metrics:
   biosreads  game loads from 0x0-0x3FFF and the values they returned
   results    race display (DISPCNT 0x1741) stretches and, at the last frame of
              each, the lap words at 0x0201A370-0x0201A37F (lap 1-3, best lap, in
-             frames)
+             frames); "finished" when the stretch ends before the trace does.
+             The position is not in these words: read it from the results
+             overlay screenshot that run_ab.sh takes (ROUTE/result/shots/)
   swi cycles cycles from each SWI to its return (swicycles.tsv; IRQs taken during
              the call are included, and VBlankIntrWait is a wait, not a cost), per
              function; in a pair, calls with the same caller and r0-r2 are matched
@@ -52,6 +62,7 @@ import zlib
 
 LINES = 228
 RACE_DISPCNT = "1741"
+RESULT_SHOT_LEAD = 60  # frames before the end of the race display: the results overlay is up
 LOOP_START = "03001CFC"
 LOOP_END = "03001D6C"
 LAP_COLS = ["mem_0201A370", "mem_0201A374", "mem_0201A378", "mem_0201A37C"]
@@ -201,22 +212,38 @@ def race_stats(run):
             "iterations_over_228_lines": sum(1 for w in work if w > LINES)}
 
 
-def race_results(run):
+def race_displays(rows):
+    """[(first_row, last_row, finished)] for each stretch of trace rows with the race
+    DISPCNT; finished is False when the stretch runs to the end of the trace."""
     out = []
-    rows = run.trace
     stretch = None
     for i, r in enumerate(rows):
         on = r.get("DISPCNT") == RACE_DISPCNT
         if on and stretch is None:
             stretch = i
         if stretch is not None and (not on or i == len(rows) - 1):
-            last = rows[i - 1] if not on else r
-            laps = [int(last[c], 16) for c in LAP_COLS if c in last]
-            out.append({"race_display": (run.eq(rows[stretch]["frame"]), run.eq(last["frame"])),
-                        "laps_frames": laps[:3], "best_lap_frames": laps[3] if len(laps) > 3 else None,
-                        "race_frames": sum(laps[:3]) if len(laps) >= 3 else None})
+            out.append((rows[stretch], rows[i - 1] if not on else r, not on))
             stretch = None
     return out
+
+
+def race_results(run):
+    out = []
+    for first, last, finished in race_displays(run.trace):
+        laps = [int(last[c], 16) for c in LAP_COLS if c in last]
+        res = {"race_display": (run.eq(first["frame"]), run.eq(last["frame"])), "finished": finished,
+               "laps_frames": laps[:3], "best_lap_frames": laps[3] if len(laps) > 3 else None,
+               "race_frames": sum(laps[:3]) if len(laps) >= 3 else None}
+        if finished:
+            res["result_shot_frame"] = run.eq(last["frame"]) - RESULT_SHOT_LEAD
+        out.append(res)
+    return out
+
+
+def result_shot_frame(rundir):
+    """Harness frame of the results-overlay screenshot for one run, or None."""
+    done = [last for _, last, finished in race_displays(read_tsv(os.path.join(rundir, "trace.tsv"))) if finished]
+    return int(done[-1]["frame"]) - RESULT_SHOT_LEAD if done else None
 
 
 def bios_reads(run):
@@ -381,11 +408,22 @@ def pair_race(a, b):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("outdir")
+    ap.add_argument("outdir", nargs="?")
     ap.add_argument("--pair", nargs=2, action="append")
     ap.add_argument("--routes", nargs="*")
     ap.add_argument("--range-limit", type=int, default=12, help="differing-frame ranges printed per group")
+    ap.add_argument("--result-shot-frame", metavar="RUNDIR",
+                    help="print the harness frame of RUNDIR's results-overlay screenshot (nothing if no race finished)")
     a = ap.parse_args()
+    if a.result_shot_frame:
+        if not os.path.exists(os.path.join(a.result_shot_frame, "trace.tsv")):
+            ap.error(f"no trace.tsv in {a.result_shot_frame}")
+        f = result_shot_frame(a.result_shot_frame)
+        if f is not None:
+            print(f)
+        return 0
+    if not a.outdir:
+        ap.error("OUTDIR is required")
     global RANGE_LIMIT
     RANGE_LIMIT = a.range_limit
     pairs = a.pair or [["retail-skip", "cult-skip"], ["retail-boot", "cult-boot"]]

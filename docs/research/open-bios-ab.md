@@ -12,7 +12,7 @@
 | Retail BIOS | the owner's dump, SHA-1 `300c20df6731a33952ded8c436f7f186d25d3492` |
 | Cult-of-GBA BIOS | `bios.bin` of [Cult-of-GBA/BIOS](https://github.com/Cult-of-GBA/BIOS) at `a30e9a96df083628b650724b7d4d7112b4070b98` (MIT), downloaded as GitHub's archive of that commit; SHA-1 `2e41f9d30ecdf1c4540edf89ac16f49bf327edb7`, MD5 `e2a18f17249a24415ca70d57f40501c8`, 16,384 bytes, the image [open-bios.md](open-bios.md) studied. Not committed |
 | mGBA | 0.10.5 (`26b7884`), the harness in `tools/analysis/harness` |
-| gbarecomp | `5e89943` plus the scratch changes listed in [section 9](#9-under-gbarecomp-is-the-halt-exit-condition-the-only-blocker) |
+| gbarecomp | `5e89943` plus the scratch changes listed in [section 9](#9-under-gbarecomp-is-the-halt-exit-condition-the-only-blocker) and the [appendix](#appendix-the-gbarecomp-halt-experiment) |
 
 Frame numbers below are **retail-equivalent harness frames**: the frame a retail-BIOS boot would be at, so they line up with `tools/analysis/input/*.txt` (race display from 3303 on `boot_to_race`, and so on). A run that starts elsewhere is shifted by its handoff frame ([section 1](#1-method)).
 
@@ -30,9 +30,9 @@ From the cartridge entry, with the same inputs, the Cult-of-GBA BIOS plays the g
   - Cult-of-GBA never writes POSTFLG, so it is 0 at handoff where retail leaves 1. mGBA 0.10.5 ignores HALTCNT writes while POSTFLG is 0, so in mGBA its 60-frame boot screen runs in 6 frames and **no HALT takes effect for the rest of the run**: every VBlankIntrWait becomes a busy loop. Whether hardware has the same rule is **unverified**.
   - Its RegisterRamReset never clears the highest region it is asked for, so OAM keeps the boot screen's sprites (57 nonzero bytes at handoff); OAM matches retail again from frame 607. Nothing showed on screen.
   - SOUNDCNT_H is `0x000E` instead of `0x0000`, and timer 0's reload is 0 instead of the retail intro's `0xFF89`. IE is 0 under both, which settles the question in [open-bios.md](open-bios.md) §2.5.
-- **gbarecomp: HALT is the only blocker found.** With a scratch fix that ends HALT when IE AND IF is nonzero, the Cult-of-GBA BIOS boots through its own boot screen (60 frames), reaches the race and finishes Cross under `GBARECOMP_STRICT_STATIC=1` with `FULLY_STATIC dispatch_misses=0`, as the retail BIOS does in the same build. The fix wakes the CPU 60 times, all during that boot screen, and never with the retail BIOS, whose 18,892-call SWI log is identical with and without it. On GP, Traffic, the options save and the lobby, both BIOSes stop at the same ROM dispatch miss (gaps in the prototype's coverage of the game, not BIOS ones); run without strict mode, the two miss lists are identical, no BIOS address misses, and the options save matches mGBA's byte for byte.
+- **gbarecomp: HALT is the only blocker found.** With a scratch fix that ends HALT when IE AND IF is nonzero, the Cult-of-GBA BIOS boots through its own boot screen (60 frames), reaches the race and finishes Cross under `GBARECOMP_STRICT_STATIC=1` with `FULLY_STATIC dispatch_misses=0`, as the retail BIOS does in the prototype build without the fix. The fix wakes the CPU 60 times, all during that boot screen. A retail Cross run in a build with the fix never reaches it, and its 18,892-call SWI log is byte-identical to the one from the build without the fix. On GP, Traffic, the options save and the lobby, both BIOSes stop at the same ROM dispatch miss (gaps in the prototype's coverage of the game, not BIOS ones); run without strict mode, the two miss lists are identical, no BIOS address misses, and the options save matches mGBA's byte for byte. The [appendix](#appendix-the-gbarecomp-halt-experiment) has the change, the commands and the frame counts.
 
-Not covered: the full cup (P2-04 adds that route), hardware, the emibios test suite (§5.3 step 3, section 7), mGBA's HLE BIOS as a third variant (not needed with a retail dump), and the CpuSet path under gbarecomp (one call).
+**Scope.** P2-17 is done except two items of [open-bios.md](open-bios.md) §5.3, which stay open in [phase2-plan.md](../phase2-plan.md) (P2-17): the full cup (step 1; it needs P2-04's cup route, then `run_ab.sh --routes cup`) and emibios's test suite (step 3, section 7). Also not covered: hardware, mGBA's HLE BIOS as a third variant (not needed with a retail dump), and the CpuSet path under gbarecomp (one call).
 
 ## 1. Method
 
@@ -57,7 +57,7 @@ Not covered: the full cup (P2-04 adds that route), hardware, the emibios test su
 - in races, the PCs `0x03001CFC` (the race main loop, right after its VCOUNT ≥ 170 busy-wait, once per iteration) and `0x03001D6C` (the end of the iteration's work, where it branches back to the busy-wait at `0x03001CEC`). Found with `--trace-pc 0x03001CB0-0x03001FFF` on frames 4000-4001 of `boot_to_race`;
 - the state at the handoff (`--dump-at-pc 0x08000000`), and the `.sav` of `options_save`.
 
-**Race results.** At the end of a race the game shows the lap times, the race time and the position. The lap times are stored in frames at `0x0201A370`, `0x0201A374` and `0x0201A378` (laps 1-3) and `0x0201A37C` (best lap) while the race program runs: on `full_race_cross` with the retail BIOS they read 5444, 6108 and 6110 at frame 21700, and the overlay shows 1'30"73, 1'41"79 and 1'41"83 (5444 / 60 = 90.73 s); the same words matched the overlay on all 12 race-result screenshots below. The words were found by searching a frame-21700 RAM dump for 5444; no code was read to confirm their meaning, so treat the addresses as **likely**. The position was read from the screenshots.
+**Race results.** At the end of a race the game shows the lap times, the race time and the position. The lap times are stored in frames at `0x0201A370`, `0x0201A374` and `0x0201A378` (laps 1-3) and `0x0201A37C` (best lap) while the race program runs: on `full_race_cross` with the retail BIOS they read 5444, 6108 and 6110 at frame 21700, and the overlay shows 1'30"73, 1'41"79 and 1'41"83 (5444 / 60 = 90.73 s); the same words matched the overlay on all 12 race-result screenshots below. The words were found by searching a frame-21700 RAM dump for 5444; no code was read to confirm their meaning, so treat the addresses as **likely**. The position is only on screen, so it is read by hand from a screenshot of the results overlay: for every run whose race display (DISPCNT `0x1741`) ends before the run does, `run_ab.sh` reruns the route up to 60 frames before the last race-display frame and screenshots that frame (below). The end frame depends on the run (section 4), so no fixed frame in the input scripts would do.
 
 **Commands.**
 
@@ -70,7 +70,19 @@ tools/analysis/open-bios-ab/run_ab.sh --cult-bios ... --variants retail-skip \
 python3 -I tools/analysis/open-bios-ab/ab_report.py analysis-out/open-bios-ab
 ```
 
-The 24 runs of the matrix take about 10 minutes and 275 MB under `analysis-out/` (every frame stepped for `--swi-cycles`). Two complete runs of the matrix gave the same metrics.
+**Results-overlay screenshots** (part of `run_ab.sh` unless `--no-result-shots` is given). For each finished race, F = the last harness frame of the race display − 60, which is race-display end − 60 + shift in retail-equivalent frames. `ab_report.py --result-shot-frame analysis-out/open-bios-ab/VARIANT/ROUTE` prints F, and each `race_result:` line of the report gives the same frame in retail-equivalent numbering as `result_shot_frame`. `run_ab.sh` then runs, with the variant's BIOS and start and any `--harness-args`:
+
+```sh
+OUT=$PWD/analysis-out/open-bios-ab   # run_ab.sh's default --out
+tools/analysis/harness/run_harness.sh --no-hash-check --bios BIOS [--skip-bios] \
+  --out "$OUT/VARIANT/ROUTE/result" --script "$OUT/VARIANT/ROUTE/script.txt" \
+  --frames F --shot-at F --trace F-F --trace-ram \
+  --trace-mem 0x0201A370:4,0x0201A374:4,0x0201A378:4,0x0201A37C:4
+```
+
+The screenshot is `VARIANT/ROUTE/result/shots/fNNNNNN.png` (NNNNNN = F). `run_ab.sh` compares frame F's `trace.tsv` row with the main run's (keys, video registers, CRCs of VRAM, palette, OAM, IWRAM and EWRAM, the lap words) and fails at the end if they differ, so the screenshot shows the traced run.
+
+The 24 runs of the matrix and their 12 results-overlay reruns take 7-10 minutes and about 215 MB under `analysis-out/` (every frame stepped for `--swi-cycles`); the two open-bus variants add about 65 MB. Two complete runs of the matrix gave the same metrics. A third, after the review changes to these tools, gave byte-identical `trace.tsv`, `swi.tsv`, `swicycles.tsv`, `biosreads.tsv`, `pctrace.tsv` and `.sav` files for all 24 runs, and the 12 screenshots show the positions and times of section 4.
 
 ## 2. SWI census and DivArm
 
@@ -115,7 +127,7 @@ What this means: decompression is much faster under Cult-of-GBA (up to 168,787 c
 
 ## 4. Race results
 
-Position and times from the results overlay, 60 frames before the end of each race display:
+Position and times from the results overlay, read by hand from the screenshots `run_ab.sh` takes 60 frames before the end of each race display (`VARIANT/ROUTE/result/shots/`, [section 1](#1-method)):
 
 | Track | `retail-boot` | `retail-skip` | `cult-skip` | `cult-boot` |
 |---|---|---|---|---|
@@ -123,7 +135,7 @@ Position and times from the results overlay, 60 frames before the end of each ra
 | GP, California | 8th, 1'24"68, 1'15"96, 1'15"59, race 3'56"24 ("NEW RECORD") | same | same | same |
 | Traffic, Moscow | 4th, 1'10"33, 1'15"98, 1'15"53, race 3'41"84 | same | 4th, 1'10"33, 1'15"98, 1'17"08, race 3'43"39 | same as retail |
 
-In frames (lap words): Cross 5444 + 6108 + 6110 = 17662; `cult-boot` Cross 5200 + 6110 + 6106 = 17416; GP 5081 + 4558 + 4536 = 14175 everywhere; Traffic 4220 + 4559 + 4532 = 13311, `cult-skip` 4220 + 4559 + 4625 = 13404. The race display ends at frame 21788 (Cross), 18307 (GP) and 17468 (Traffic; 17467 under `cult-boot`) for every run with retail times.
+In frames (lap words): Cross 5444 + 6108 + 6110 = 17662; `cult-boot` Cross 5200 + 6110 + 6106 = 17416; GP 5081 + 4558 + 4536 = 14175 everywhere; Traffic 4220 + 4559 + 4532 = 13311, `cult-skip` 4220 + 4559 + 4625 = 13404. The race display ends at frame 21788 (Cross), 18307 (GP) and 17468 (Traffic; 17467 under `cult-boot`) for every run with retail times, at 21542 for `cult-boot` Cross and at 17560 for `cult-skip` Traffic, so the screenshots are at 21728, 18247, 17408 (17407), 21482 and 17500 (plus the variant's shift in harness frames). With the A-held-to-the-finish scripts, GP and Traffic end earlier than the 18415 and 17909 that Phase 1 reports for those tracks ([phase1-findings.md](phase1-findings.md) §2). Phase 1's `race_gp.txt` and `race_traffic.txt` end at frame 6000 and what those runs did after it is not recorded, so its end frames do not apply to these scripts. On Traffic, for example, the mode-4 "Try again" screen (DISPCNT `0x1444`) is up from frame 17493.
 
 So from the same start, one of three races changed, by one lap time; through the BIOS's own boot, another one did. Neither is a systematic effect of the BIOS: the Traffic race matches retail when started through Cult-of-GBA's boot, and the Cross race when started from the cartridge entry. Both are the same timing sensitivity, seen from two starting points (section 5). A tolerance for race results, which [open-bios.md](open-bios.md) §5.3 leaves to the ADR, has to allow for it: these open-loop replays drift by one or two seconds on a lap whatever the BIOS.
 
@@ -133,12 +145,14 @@ So from the same start, one of three races changed, by one lap time; through the
 
 | Route | Front end | From the race onward |
 |---|---|---|
-| `boot_to_race` | single frames only: video in 86 frames (the intro animation is decoded every 7 frames and finishes on the other side of VBlank start), EWRAM in 77 | identical from frame 3307 to the end (4400): video, EWRAM and IWRAM below `0x03007000` |
+| `boot_to_race` | video in 86 frames, in single frames and runs of up to 4 (the intro animation is decoded every 7 frames and finishes on the other side of VBlank start); EWRAM in 77, in single frames and short runs, the longest 596-606 and 3299-3306; IWRAM below `0x03007000` in 92: 607, 1391 and the continuous stretch 2182-2271, which starts in the intro frames where the VBlankIntrWait counts differ (section 3; what those IWRAM bytes hold was not examined) | identical from frame 3307 to the end (4400): video, EWRAM and IWRAM below `0x03007000` |
 | `full_race_cross` | same | identical from 3307 to 18292; from 18293 on EWRAM and IWRAM differ, the screen from 18720 |
-| `race_gp_finish` | same | identical from 3350 (after single-frame differences during the race load) to 6734; RAM differs from 6735 on, the screen from 8192 |
-| `race_traffic_finish` | IWRAM differs in 3018-3343, EWRAM in 3017-3021 | differ from 3353 (EWRAM) and 3362 (IWRAM) on |
-| `options_save` | single frames only | (no race); the 32 KiB `.sav` is identical |
-| `multiplayer_lobby` | single frames, then EWRAM differs in the lobby from 2773 on | (no race) |
+| `race_gp_finish` | same | identical from 3350 (after short differences during the race load, the longest EWRAM 3341-3349) to 6734; RAM differs from 6735 on, the screen from 8192 |
+| `race_traffic_finish` | same, then IWRAM differs in 3018-3343, EWRAM in 3017-3021 | differ from 3353 (EWRAM) and 3362 (IWRAM) on |
+| `options_save` | same kinds of differences (video in 82 frames, EWRAM in 64, IWRAM in the same 92), none after 2482 | (no race); the 32 KiB `.sav` is identical |
+| `multiplayer_lobby` | same, then EWRAM differs in the lobby from 2773 on | (no race) |
+
+(`ab_report.py analysis-out/open-bios-ab --range-limit 100`, `divergence:` lines; frames retail-equivalent.)
 
 IWRAM `0x03007000`-`0x03007FFF` differs from the first IRQ on: it holds the stacks, where the IRQ handler saves registers at timing-dependent points (the slot `0x03007F9C` in Phase 1 §6).
 
@@ -161,7 +175,7 @@ Values the game got from the BIOS region (`--log-bios-reads`; every such load is
 | `boot_to_race` | both | 771 | 771 | none |
 | `race_traffic_finish`, `options_save`, `multiplayer_lobby` | both | 0 | | |
 
-mGBA's "Bad BIOS Load" messages (GAME_ERROR) count exactly these loads. The only other GAME_ERROR messages are I/O writes by the BIOS boot itself (frames 1-270 under retail, 1-4 under Cult-of-GBA), none after the handoff.
+mGBA's "Bad BIOS Load" messages (GAME_ERROR) count exactly these loads. The only other GAME_ERROR messages come from the BIOS boot itself (I/O, video-register, DMA-source and out-of-bounds ROM-load warnings), all before the handoff: under `retail-boot` 22 `gba.io`, 29 `gba.video`, 8 `gba.dma` and 10 `gba.memory` (for example "Out of bounds ROM Load16: 0x0BFFFFE0"), the last at frame 270; under `cult-boot` 2, 12, 8 and 0, the last at frame 4. The `-skip` variants log none (`stderr.log` of each run, "Bad BIOS" lines excluded).
 
 To separate the value from the timing, the retail BIOS was run with every one of these loads forced (`--openbus`):
 
@@ -206,26 +220,34 @@ Both are cheap to fix in the A′ image ([open-bios.md](open-bios.md) §4): set 
 
 ## 9. Under gbarecomp: is the HALT exit condition the only blocker?
 
-**Setup (scratch, nothing committed).** The Phase 2 diagnosis's iwram-overlays prototype (gbarecomp `5e89943` with patches 0001-0002, the prototype RAM overlay selector, the diagnostic VBlank-start input replay, the race and front-end corpora, healing off), with:
+**Setup (scratch, nothing committed; the [appendix](#appendix-the-gbarecomp-halt-experiment) has the change, the builds, the commands and the frame counts).** The Phase 2 diagnosis's iwram-overlays prototype (gbarecomp `5e89943` with patches 0001-0002, the prototype RAM overlay selector, the diagnostic VBlank-start input replay, the race and front-end corpora, healing off), built three ways:
 
-- the Cult-of-GBA image recompiled with the config in [open-bios.md](open-bios.md)'s appendix: 132 functions, 823 resume aliases, 955 dispatch entries, and the appendix's coverage script reports 0 missing entries, as in open-bios.md §3;
-- in `runtime_tick` (`src/runtime/runtime_bus_bridge.cpp`, after the IRQ check at L774): when the CPU is halted and IE AND IF is nonzero but the IRQ is not taken (IME off or CPSR.I set), clear HALT after the usual wake latency, without taking an IRQ. This is the hardware rule ([GBATEK, BIOS Halt Functions](https://problemkaputt.de/gbatek-bios-halt-functions.htm)) and what gbarecomp's multiplayer loop already does (`src/runtime/multiplayer_session.cpp:157-160`). Environment-gated, so one binary gives both sides;
-- gbarecomp's own HALTCNT write halts unconditionally (`src/gba/gba_io.cpp:714-719`): unlike mGBA, it has no POSTFLG rule, so the game's halts work under Cult-of-GBA without the fix.
+| Build | HALT change | BIOS code linked | Used for |
+|---|---|---|---|
+| stock (the prototype as the diagnosis left it) | no | retail | every retail run in the results table |
+| Cult-of-GBA | yes | Cult-of-GBA | every Cult-of-GBA run, with the change off (`MRA_HALT_EXIT_FIX=0`) or on (`=1`) |
+| retail with the change | yes | retail | one strict `full_race_cross` run with the change on, to check that it does nothing for the retail BIOS |
 
-Inputs: the same scripts converted to the prototype's replay format; for Cult-of-GBA shifted by −207 frames, because under gbarecomp its boot hands over 207 frames before the retail one (the first SWI of the game, a DivArm with the same arguments, is at cycle 24,136,549 against 82,288,656, a difference of 207.02 frames).
+- The Cult-of-GBA image is recompiled with the config in [open-bios.md](open-bios.md)'s appendix: 132 functions, 823 resume aliases, 955 dispatch entries, and the appendix's coverage script reports 0 missing entries, as in open-bios.md §3.
+- The change, in `runtime_tick` (`src/runtime/runtime_bus_bridge.cpp`, right after the IRQ branch that starts at L774): when the CPU is halted and IE AND IF is nonzero but the IRQ is not taken (IME off or CPSR.I set), clear HALT after the usual wake latency, without taking an IRQ. This is the hardware rule ([GBATEK, BIOS Halt Functions](https://problemkaputt.de/gbatek-bios-halt-functions.htm)) and what gbarecomp's multiplayer loop already does (`src/runtime/multiplayer_session.cpp:157-160`). It is gated by the environment variable `MRA_HALT_EXIT_FIX`, so one binary gives both sides.
+- gbarecomp's own HALTCNT write halts unconditionally (`src/gba/gba_io.cpp:714-719`): unlike mGBA, it has no POSTFLG rule, so the game's halts work under Cult-of-GBA without the change.
+
+Inputs: the same scripts converted to the prototype's replay format; for Cult-of-GBA shifted by −207 frames, because under gbarecomp its boot hands over 207 frames before the retail one (the first SWI of the game, a DivArm with the same arguments, is at cycle 24,136,549 against 82,288,656, a difference of 207.02 frames). Each Cult-of-GBA run is therefore 207 frames shorter than the retail run of the same route (for example 24,793 against 25,000 frames on `full_race_cross`), so both end at the same point of the route.
 
 **Results** (`SDL_AUDIODRIVER=dummy`, `GBARECOMP_SELFHEAL_RECOMPILE=0`, fresh save):
 
-| Run | Retail BIOS | Cult-of-GBA BIOS |
+| Run | Retail BIOS, stock build | Cult-of-GBA BIOS, build with the change |
 |---|---|---|
-| 300 frames, no fix | boots (rows below) | `final_pc=0x00000c08`, 298 steps: stuck in the boot screen loop, known issue 5 reproduced with the game |
-| `boot_to_race`, strict, fix | `FULLY_STATIC dispatch_misses=0`, exit 0, in the race loop at the end | same; the selector ran 3.16 M race dispatches |
-| `full_race_cross`, strict, fix | `FULLY_STATIC dispatch_misses=0`, exit 0 | same; the race finishes and the "Try again" screen shows |
-| `race_gp_finish`, `race_traffic_finish`, `options_save`, `multiplayer_lobby`, strict | abort at a ROM dispatch miss (`0x0815A80A`, `0x0815B18C`, `0x08003EE8`, `0x08010598`) | the same miss on each route |
-| the same four, not strict | 8, 4, 1 and 1 misses, exit 0 | the same miss PCs, all in ROM; no BIOS address |
+| 300 frames | boots (rows below) | change off: `final_pc=0x00000c08` at frame 300, stuck in the boot screen loop: the CPU is halted with IE AND IF nonzero and no IRQ taken on 214,658 ticks (the `mra_halt_exit_fix` count). Known issue 5 reproduced with the game |
+| `boot_to_race`, strict | `FULLY_STATIC dispatch_misses=0`, exit 0, in the race loop at the end | change on: the same; the selector ran 3.16 M race dispatches |
+| `full_race_cross`, strict | `FULLY_STATIC dispatch_misses=0`, exit 0 | change on: the same; the race finishes and the "Try again" screen shows |
+| `race_gp_finish`, `race_traffic_finish`, `options_save`, `multiplayer_lobby`, strict | abort at a ROM dispatch miss (`0x0815A80A`, `0x0815B18C`, `0x08003EE8`, `0x08010598`) | change on: the same miss on each route |
+| the same four, not strict | 8, 4, 1 and 1 misses, exit 0 | change on: the same miss PCs, all in ROM; no BIOS address |
 | `options_save` `.sav` | SHA-1 `a5149c87…`, the same as mGBA's | the same |
 
-How often the fix acted: 60 wake-ups in the Cult-of-GBA full race, the last at frame 61 (gbarecomp's frame count), all in the boot screen. On that route the game itself never halted with IME off or CPSR.I set. With the retail BIOS the branch never ran, and the full race's 18,892-entry cycle-stamped SWI log (`GBARECOMP_SWI_LOG`) is byte-identical to the prototype build without the fix.
+How often the change acted: 60 wake-ups in the Cult-of-GBA `full_race_cross` run, the last at frame 61 (gbarecomp's frame count), all in the boot screen. On that route the game itself never halted with IME off or CPSR.I set. In the third build (retail BIOS, change on), `full_race_cross` under strict mode gives `FULLY_STATIC dispatch_misses=0`, exit 0, the branch never runs, and the race's 18,892-entry cycle-stamped SWI log (`GBARECOMP_SWI_LOG`) is byte-identical to the stock build's.
+
+The first runs of this table used an earlier build of the change, without the counter. Every row was run again with the builds and commands of the appendix (2026-10-11): the same final PCs, cycle counts, coverage lines, abort PCs, miss lists and `.sav` SHA-1 (`a5149c87b90e486f8fb5d0aba6272052f5b8eb70`); on `boot_to_race` and `full_race_cross` the step counts match too (Cult-of-GBA `full_race_cross`: 46,002 steps, 382,840,627 cycles). Only the 300-frame run's step count moved, from 298 to 301, for the same 83,426,112 cycles.
 
 So, on every route the prototype's corpus covers, the HALT exit condition is the only thing that stops the Cult-of-GBA BIOS, and the fix that removes it changes nothing for the retail BIOS. Not covered: routes the prototype does not cover statically (P2-10 and P2-11 add them), CpuSet (the lobby route reached only one CpuSet call under gbarecomp, against about 2,450 in mGBA, with either BIOS), and the browser build.
 
@@ -233,7 +255,7 @@ So, on every route the prototype's corpus covers, the HALT exit condition is the
 
 The decision lists four gates before an open BIOS can be the players' target. Where they stand:
 
-1. **mGBA A/B against retail with drift-tolerant metrics: done for the six routes we have; the full cup waits for P2-04's route.** No result difference, no lag, the same positions; race times move by up to 4.1 s (`cult-boot`, Cross) or 1.55 s (`cult-skip`, Traffic) through the game's VCOUNT-seeded randomness. The ADR's tolerance has to be set with that in mind, and against how much the same replay drifts under retail itself (P2-13).
+1. **mGBA A/B against retail with drift-tolerant metrics: done for the six routes we have, not yet closed.** [open-bios.md](open-bios.md) §5.3 step 1 asks for a full cup, and its acceptance tier is measured over one; that run waits for P2-04's cup route and is an open item of P2-17 in [phase2-plan.md](../phase2-plan.md), as is emibios's suite (step 3). On the six routes: no result difference, no lag, the same positions; race times move by up to 4.1 s (`cult-boot`, Cross) or 1.55 s (`cult-skip`, Traffic) through the game's VCOUNT-seeded randomness. The ADR's tolerance has to be set with that in mind, and against how much the same replay drifts under retail itself (P2-13).
 2. **A fix for gbarecomp's HALT exit condition: needed, and sufficient on the covered routes.** It is a small runtime change with no effect on retail runs here; it becomes a patch in its own task.
 3. **Strict static coverage of the open BIOS: holds on `boot_to_race` and `full_race_cross`** with the appendix config; the other routes wait for the game's own coverage.
 4. **The A′ cleanup: not started.** Add two fixes to its list: POSTFLG = 1 at the end of boot, and the RegisterRamReset carry test. Keep the DivArm remainder fix too, even though this game never needs it.
@@ -242,14 +264,108 @@ Nothing found argues against the direction. The main cost is the one [open-bios.
 
 ## Follow-ups
 
-- The HALT exit fix as a gbarecomp patch (upstream candidate, related to U4 in the diagnosis), with a synthetic repro ROM that halts with IME off. Not filed upstream without the owner.
-- The full-cup A/B once P2-04's cup route exists: `run_ab.sh --routes cup`.
+- The HALT exit fix as a gbarecomp patch (upstream candidate, related to U4 in the diagnosis), with a synthetic repro ROM that halts with IME off. Not filed upstream without the owner. The experiment's version is in the [appendix](#appendix-the-gbarecomp-halt-experiment).
+- The full-cup A/B once P2-04's cup route exists: `run_ab.sh --routes cup` (an open item of P2-17 in [phase2-plan.md](../phase2-plan.md)).
 - The open-BIOS build under gbarecomp beyond the prototype: CpuSet (lobby), the routes P2-11 covers, and the browser build.
-- Run emibios's suite against Cult-of-GBA (Zig 0.16 and an emulator core).
+- Run emibios's suite against Cult-of-GBA (Zig 0.16 and an emulator core; an open item of P2-17).
 - Whether hardware ignores HALT while POSTFLG is 0 (would need the owner's hardware; see the plan's optional test ROM).
 - The race random number generator at `0x03000000` and the counter at `0x0203FCCC`: record them in [game-facts.md](game-facts.md) question 17, and use them in P2-13, since the same VCOUNT dependence will move gbarecomp's races away from mGBA's.
 - Confirm the lap-word addresses `0x0201A370`-`0x0201A37C` from the code that writes them before P2-19 relies on them.
 
 ## Reproducing
 
-Commands in [section 1](#1-method). Everything they write (traces, dumps, screenshots, `.sav` files, savestates) is derived from the ROM and stays under `analysis-out/`. The gbarecomp experiment was a scratch build: its configuration is described in section 9, and the HALT change is about 20 lines in `runtime_tick`.
+mGBA: the commands in [section 1](#1-method), including the results-overlay screenshots. Everything they write (traces, dumps, screenshots, `.sav` files, savestates) is derived from the ROM and stays under `analysis-out/`. gbarecomp: a scratch build of the diagnosis's prototype; the [appendix](#appendix-the-gbarecomp-halt-experiment) gives the HALT change (33 added lines in `runtime_tick`), the builds, the input conversion, the environment and the frame count of every run.
+
+## Appendix: the gbarecomp HALT experiment
+
+The record of section 9's scratch experiment, so that it can be run again. The change below is **not a patch of this repository** and no script here applies it: the HALT exit fix becomes a patch in `patches/gbarecomp/` in its own task (follow-ups), with a synthetic repro ROM, and may change on the way. The host it was built into is the Phase 2 diagnosis's iwram-overlays prototype, which lives outside the repository ([phase2-plan.md](../phase2-plan.md), "Starting point"; diagnosis §3.2); P2-02, P2-03 and P2-07 port its pieces. Everything the steps below produce is derived from the ROM or the BIOS images and stays out of git.
+
+**Builds.** The prototype host (`MraProto`, with the diagnosis's overlay selector, option C, and the race and front-end corpora compiled in), configured with CMake and Ninja, `-DCMAKE_BUILD_TYPE=Release -DGBARECOMP_ROOT=<gbarecomp copy> -DPROTO_GEN=<race corpus> -DPROTO_FE_GEN=<front-end corpus> -DGBARECOMP_GENERATED_BIOS_DIR=<recompiled BIOS>`, target `MraProto`:
+
+| Build | `GBARECOMP_ROOT` | `GBARECOMP_GENERATED_BIOS_DIR` |
+|---|---|---|
+| stock | the prototype's gbarecomp copy: `5e89943`, patches 0001-0002, and the prototype's selector and diagnostic patches | the retail BIOS, recompiled by the prototype |
+| Cult-of-GBA | the same copy with the change below | the Cult-of-GBA `bios.bin`, recompiled by `gba_recompile` (`5e89943`) with `--bios bios.bin --config cult_bios.toml --out gen/bios-cult`, where `cult_bios.toml` is the config in [open-bios.md](open-bios.md)'s appendix |
+| retail with the change | the same copy with the change below | the retail BIOS, as in the stock build |
+
+**The change.** In `src/runtime/runtime_bus_bridge.cpp`, function `runtime_tick`, after the branch that takes a pending IRQ (`if (bus->io().irq_pending() && (g_cpu.cpsr & CPSR_I_BIT) == 0) {`, L774 at `5e89943`). Patches 0001-0002 and the prototype's patches do not touch this file, so the hunk applies to the pin with the same line numbers. 33 added lines: the wake is the last 10, the rest reads `MRA_HALT_EXIT_FIX` once and counts how often the branch runs. The count is printed at exit, only if the branch ran at least once, as `mra_halt_exit_fix enabled=E events=N last_event_frame=F` (F = gbarecomp's cycle counter / 280,896). With `MRA_HALT_EXIT_FIX=1` every event is one wake-up. With 0 the CPU stays halted and the branch runs again on each tick, so N then counts ticks.
+
+```diff
+--- a/src/runtime/runtime_bus_bridge.cpp
++++ b/src/runtime/runtime_bus_bridge.cpp
+@@ -804,6 +804,39 @@
+             recompute_event_budget(bus, ppu);
+         }
+         runtime_irq(g_cpu.R[15]);
++    } else if (bus->io().halted() &&
++               (bus->io().ie() & bus->io().if_reg()) != 0) {
++        // SCRATCH EXPERIMENT (P2-17, not a patch): HALT ends as soon as
++        // IE AND IF is non-zero, whatever IME and CPSR.I say (GBATEK, BIOS Halt
++        // Functions); no IRQ is taken. Env-gated so one build gives both sides.
++        static const bool halt_exit_fix = [] {
++            const char* e = std::getenv("MRA_HALT_EXIT_FIX");
++            return e && e[0] == '1';
++        }();
++        // Count the wakes this branch performs (it only runs when the stock
++        // condition above would have left the CPU halted).
++        static unsigned long long wakes = 0;
++        static unsigned long long last_wake_cycle = 0;
++        static const bool report_registered = [] {
++            std::atexit([] {
++                std::fprintf(stderr, "mra_halt_exit_fix enabled=%d events=%llu last_event_frame=%llu\n",
++                             halt_exit_fix ? 1 : 0, wakes, last_wake_cycle / 280896ull);
++            });
++            return true;
++        }();
++        (void)report_registered;
++        ++wakes;
++        last_wake_cycle = g_runtime_cycles;
++        if (halt_exit_fix) {
++            bus->io().clear_halt();
++            if (g_pending_cycles) {
++                tick_devices(bus, ppu, static_cast<uint32_t>(g_pending_cycles));
++                g_pending_cycles = 0;
++            }
++            g_runtime_cycles += gba::kIrqWakeDelayCycles;
++            tick_devices(bus, ppu, gba::kIrqWakeDelayCycles);
++            recompute_event_budget(bus, ppu);
++        }
+     }
+ 
+ #ifdef GBA_COSIM
+```
+
+**Inputs.** Each route's harness script (`tools/analysis/input/`, or `tools/analysis/open-bios-ab/input/` for `race_gp_finish` and `race_traffic_finish`), converted by the prototype's converter, `harness2replay.py` (harness script to `gbarecomp-keyinput-v1`, one event per key change, frame numbers as in the harness; diagnosis §7.3). P2-02's `tools/replay/script2replay.py` replaces that converter with another header and frame convention, so with it these commands change. The Cult-of-GBA side is shifted by −207 frames first:
+
+```sh
+python3 -I harness2replay.py tools/analysis/input/ROUTE.txt > traces/ROUTE_retail.csv
+python3 -I tools/analysis/open-bios-ab/shift_script.py tools/analysis/input/ROUTE.txt traces/ROUTE_cult.txt --by -207
+python3 -I harness2replay.py traces/ROUTE_cult.txt > traces/ROUTE_cult.csv
+```
+
+**Runs.** Each from a fresh output directory, with the replay applied at VBlank start by the prototype's diagnostic patch:
+
+```sh
+export SDL_AUDIODRIVER=dummy SDL_VIDEODRIVER=dummy GBARECOMP_SELFHEAL_RECOMPILE=0
+export MRA_OVERLAY_MODE=select MRA_OVERLAY_STATS=1        # prototype: overlay selector, stats at exit
+export GBARECOMP_DIAG_VBLANK_REPLAY=1                      # prototype diagnostic patch: replay at VBlank start
+export GBARECOMP_DIAG_SHOT_DIR=$PWD/shots GBARECOMP_DIAG_SHOT_EVERY=1000
+export GBARECOMP_INPUT_REPLAY=traces/ROUTE_retail.csv      # or ROUTE_cult.csv
+export MRA_HALT_EXIT_FIX=1                                  # 0 or 1; read only by the builds with the change
+export GBARECOMP_SWI_LOG=$PWD/swi.csv                       # gbarecomp's SWI log (src/armv4t/runtime_arm.cpp:576)
+export GBARECOMP_STRICT_STATIC=1                            # strict runs only
+BUILD/MraProto --bios BIOS --rom ROM --frames N --no-window \
+  --save-path $PWD/game.sav PROTOTYPE_GAME_CONFIG           # the prototype's v0_base.toml
+```
+
+| Route | Retail BIOS, stock build: N | Cult-of-GBA BIOS, build with the change: N | Modes |
+|---|---|---|---|
+| `boot_to_race` | 4,400 | 4,193 | strict |
+| `full_race_cross` | 25,000 | 24,793 | strict; also retail with the change, N = 25,000, `MRA_HALT_EXIT_FIX=1`, strict |
+| `race_gp_finish` | 19,500 | 19,293 | strict and not strict |
+| `race_traffic_finish` | 19,000 | 18,793 | strict and not strict |
+| `options_save` | 3,800 | 3,593 | strict and not strict |
+| `multiplayer_lobby` | 3,500 | 3,293 | strict and not strict |
+| boot only (`boot_to_race` replay) | | 300, `MRA_HALT_EXIT_FIX=0`, not strict | |
+
+Every Cult-of-GBA run in the table has `MRA_HALT_EXIT_FIX=1` except the last row. What section 9 reads from each run: the end-of-run banner lines (`final_pc`, `self_heal_coverage`, the strict-mode abort message), the `mra_halt_exit_fix` line, the miss list `recomp_master_misses_A9MP.toml.frag` that a non-strict run writes in its directory, `swi.csv`, and the SHA-1 of `game.sav`.

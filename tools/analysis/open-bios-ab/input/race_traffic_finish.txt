@@ -1,8 +1,17 @@
 # race_traffic.txt run to the finish: Traffic on Moscow, A held from frame
 # 3600, START pauses at 4200 and resumes, then A stays held until the race is
-# over. On a retail-BIOS boot the race display ends at frame 17909
-# (docs/research/phase1-findings.md, section 2). Fresh empty save; frame
-# numbers as in ../../input/boot_to_race.txt. Used by run_ab.sh.
+# over. Fresh empty save; frame numbers as in ../../input/boot_to_race.txt.
+# Used by run_ab.sh.
+#
+# With this script, on a retail-BIOS boot, the race display (DISPCNT 0x1741)
+# runs from frame 3358 to 17468 (ab_report.py race_result; open-bios-ab.md
+# section 4), and the mode-4 "Try again" screen (DISPCNT 0x1444) is up from
+# 17493. Phase 1's 17909 for a Traffic race (phase1-findings.md section 2)
+# does not apply here: race_traffic.txt ends at frame 6000, and what that run
+# did after it is not recorded. The end also moves with the BIOS and the start
+# (17560 for cult-skip), so the results overlay is not shot from this script
+# at a fixed frame: run_ab.sh shoots it 60 frames before each run's own
+# race-display end (ROUTE/result/shots/).
 
 until 2450
 tap START
@@ -29,10 +38,7 @@ tap START                  # pause
 wait 30
 tap START                  # resume
 wait 60
-until 17800
-mark race_end_approach
-shot race_end_approach
-until 19000
+until 19000                # race over, "Try again" screen
 mark after_race
 shot after_race
 end

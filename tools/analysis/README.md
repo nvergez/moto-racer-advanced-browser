@@ -19,7 +19,7 @@ Every address, frame number and file offset in these scripts refers to one ROM: 
 | `ghidra/ghidra_import.sh`, `ghidra/make_seed_data.sh` | Build the Ghidra project |
 | `ghidra/ghidra_run.sh`, `ghidra/*.java` | Run queries against it |
 | `py/*.py` | Screenshot sheets, VRAM rendering, RAM-to-ROM matching, the output-path check |
-| `open-bios-ab/` | The open-BIOS A/B: `run_ab.sh` (retail and Cult-of-GBA BIOS, from the cartridge entry and through each BIOS's own boot), `ab_report.py` (the metrics), `shift_script.py` (moves an input script in time), and two race-to-the-finish scripts. See [docs/research/open-bios-ab.md](../../docs/research/open-bios-ab.md) |
+| `open-bios-ab/` | The open-BIOS A/B: `run_ab.sh` (retail and Cult-of-GBA BIOS, from the cartridge entry and through each BIOS's own boot, plus a screenshot of each finished race's results overlay), `ab_report.py` (the metrics), `shift_script.py` (moves an input script in time), and two race-to-the-finish scripts. See [docs/research/open-bios-ab.md](../../docs/research/open-bios-ab.md) |
 
 ## Setup
 
