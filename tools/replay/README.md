@@ -42,7 +42,7 @@ The game executable takes two test variables, both off unless set ([`src/main.cp
 |---|---|
 | `MRA_REPLAY=FILE` | Replay FILE at VBlank start. Prints `mra_replay=FILE events=N frames=FIRST-LAST` before the game starts |
 | `MRA_REPLAY=embedded:ROUTE` | The same with the route's replay compiled into a test build (below) |
-| `MRA_INTERP_BIOS=1` | With `GBARECOMP_FORCE_INTERP=1`: the interpreter runs the BIOS too, the reference of comparison 1 (ADR 0001, decision 5). Its coverage banner reads `NOT_STATIC dispatch_misses=1`, because each BIOS entry is a bridge; no gate reads it |
+| `MRA_INTERP_BIOS=1` | With `GBARECOMP_FORCE_INTERP=1`: the interpreter runs the BIOS too, the reference of comparison 1 (ADR 0001, decision 5). Its coverage banner reads `NOT_STATIC dispatch_misses=1`, because each BIOS entry is a bridge; no gate reads it. `0` or an empty value leaves it off |
 
 From `build/native` (the native run of [phase2-plan.md](../../docs/phase2-plan.md), "Commands used below"):
 
@@ -56,7 +56,7 @@ From `build/native` (the native run of [phase2-plan.md](../../docs/phase2-plan.m
    --frames 4400 --no-window --save-path ../saves/t.sav ../../game.toml)
 ```
 
-A bad value stops the executable with exit code 2 and a line starting `mra: `: a replay that does not parse, an unknown embedded route, `MRA_REPLAY` together with `GBARECOMP_INPUT_REPLAY` (gbarecomp suspends `input_frame` during its own replay), or `MRA_INTERP_BIOS` without `GBARECOMP_FORCE_INTERP`. A non-null `input_frame` also switches gbarecomp to its touch-policy mode (`touch_policy=ENABLED` in the log, and the touch overlay in windowed and browser builds), which is why it is installed only when `MRA_REPLAY` is set.
+A bad value stops the executable with exit code 2 and a line starting `mra: `: a replay that does not parse, an unknown embedded route, `MRA_REPLAY` together with `GBARECOMP_INPUT_REPLAY` (gbarecomp suspends `input_frame` during its own replay), `MRA_INTERP_BIOS` set to anything but `0` or `1`, or `MRA_INTERP_BIOS=1` without `GBARECOMP_FORCE_INTERP` (which is on, as gbarecomp reads it, when it is not empty and does not start with `0`). A non-null `input_frame` also switches gbarecomp to its touch-policy mode (`touch_policy=ENABLED` in the log, and the touch overlay in windowed and browser builds), which is why it is installed only when `MRA_REPLAY` is set.
 
 ## Embedded replays (test builds)
 

@@ -452,6 +452,8 @@ def main(argv=None, out=sys.stdout, err=sys.stderr):
             else:
                 manifest = load_manifest(args.manifest)
                 for name in args.route or list(manifest.routes):
+                    if name in (n for n, _ in routes):
+                        raise Error("--route: %s given twice" % name)
                     path, frames = manifest_route(manifest, name)
                     text, warnings = convert_script(path, frames, label=os.path.basename(path))
                     for w in warnings:

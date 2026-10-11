@@ -248,6 +248,12 @@ class Embed(unittest.TestCase):
             s2r.main(["--embed", out, "--script", "first=" + one, "--script", "second=" + one],
                      io.StringIO(), io.StringIO())
             self.assertEqual(os.stat(out).st_mtime_ns, mtime)
+            # A name given twice is refused, and nothing is written.
+            err = io.StringIO()
+            self.assertEqual(s2r.main(["--embed", out, "--script", "first=" + one,
+                                       "--script", "first=" + one], io.StringIO(), err), 1)
+            self.assertIn("--script: first given twice", err.getvalue())
+            self.assertEqual(os.stat(out).st_mtime_ns, mtime)
 
     def test_embed_rejects(self):
         err = io.StringIO()
@@ -297,6 +303,16 @@ class Embed(unittest.TestCase):
             self.assertIn('{"short", kReplay0},', src)
             self.assertIn('{"held", kReplay1},', src)
             self.assertIn('"4,0x03FE\\n"', src)
+            # Routes by name; one given twice is refused, and nothing is written.
+            self.assertEqual(s2r.main(["--embed", out, "--manifest", path, "--route", "held"],
+                                      io.StringIO(), io.StringIO()), 0)
+            self.assertIn('{"held", kReplay0},', read(out))
+            self.assertNotIn('"short"', read(out))
+            err = io.StringIO()
+            self.assertEqual(s2r.main(["--embed", out, "--manifest", path, "--route", "short",
+                                       "--route", "short"], io.StringIO(), err), 1)
+            self.assertIn("--route: short given twice", err.getvalue())
+            self.assertNotIn('"short"', read(out))
             # One route by name, with the manifest's frames.
             buf = io.StringIO()
             self.assertEqual(s2r.main(["--route", "held", "--manifest", path], buf, io.StringIO()), 0)

@@ -29,6 +29,13 @@
 # irqleak3 must print at least one (only the second part covers its leak).
 # Runs are headless, with SDL_AUDIODRIVER=dummy and runtime healing off, each
 # in build/repro/run/CASE/, where its output is out.log.
+#
+# The executables are our src/main.cpp, so the runs also check its input
+# replay hook (docs/phase2-plan.md, P2-02): without MRA_REPLAY, which the runs
+# unset, a run prints no touch_policy line (input_frame stays null) and no line
+# of src/main.cpp. Then the first case runs 60 frames with MRA_REPLAY set to a
+# one-event replay, and must print mra_replay= and touch_policy=ENABLED. Not
+# with --expect-failure: the runs then abort, and stdout is lost.
 set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 . "$(dirname "$0")/lib/common.sh"
@@ -47,7 +54,7 @@ while [ $# -gt 0 ]; do
     --without) [ $# -ge 2 ] || die "--without needs a patch name or number"; add_without "$2"; shift ;;
     --without=*) add_without "${1#*=}" ;;
     --expect-failure) EXPECT=failure ;;
-    -h | --help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option: $1" ;;
     *) CASES_ARG="$CASES_ARG${CASES_ARG:+ }$1" ;;
   esac
@@ -173,28 +180,38 @@ run_logged "$LOGS/build.log" cmake --build "$REPRO_DIR/native" --parallel "$(job
 # count PATTERN FILE: the number of lines of FILE that match PATTERN (ERE).
 count() { grep -cE "$1" "$2" || true; }
 
-failed=""
-for c in $CASES; do
-  exe="$REPRO_DIR/native/repro_$c"
+# run_case CASE RUN_DIR FRAMES [VAR=VALUE...]: run CASE's executable in RUN_DIR
+# (emptied first) for FRAMES frames, with src/main.cpp's test variables unset
+# but for those given; its output goes to RUN_DIR/out.log, its exit code to
+# $rc. The runtime writes its coverage and miss reports into the working
+# directory. ulimit -f caps every file it writes, the log included.
+# --bios-sha1 tells the runtime which image to expect, so a stand-in BIOS
+# loads without a warning.
+run_case() {
+  local c=$1 run_dir=$2 frames=$3
+  shift 3
+  local exe="$REPRO_DIR/native/repro_$c"
   [ -x "$exe" ] || die "not built: $(rel "$exe")"
-  run_dir="$REPRO_DIR/run/$c"
   reset_dir "$run_dir"
-  log="$run_dir/out.log"
-  info "Running $c for $FRAMES frames"
   rc=0
-  # The runtime writes its coverage and miss reports into the working
-  # directory. ulimit -f caps every file it writes, the log included.
-  # --bios-sha1 tells the runtime which image to expect, so a stand-in BIOS
-  # loads without a warning.
   (
     cd "$run_dir" || exit 1
     ulimit -f "$RUN_FILE_LIMIT_KB"
     export SDL_AUDIODRIVER=dummy GBARECOMP_SELFHEAL_RECOMPILE=0
-    exec perl -e 'alarm shift; exec @ARGV; exit 127' "$RUN_TIMEOUT" \
+    exec env -u MRA_REPLAY -u MRA_INTERP_BIOS "$@" \
+      perl -e 'alarm shift; exec @ARGV; exit 127' "$RUN_TIMEOUT" \
       "$exe" --bios "$bios" --bios-sha1 "$bios_sha1" --rom "$REPRO_DIR/roms/$c.gba" \
-      --bios-skip-intro --frames "$FRAMES" --no-window --save-path "$run_dir/$c.sav" \
+      --bios-skip-intro --frames "$frames" --no-window --save-path "$run_dir/$c.sav" \
       "$REPRO_SRC/$c.toml"
-  ) > "$log" 2>&1 || rc=$?
+  ) > "$run_dir/out.log" 2>&1 || rc=$?
+}
+
+failed=""
+for c in $CASES; do
+  run_dir="$REPRO_DIR/run/$c"
+  log="$run_dir/out.log"
+  info "Running $c for $FRAMES frames"
+  run_case "$c" "$run_dir" "$FRAMES"
 
   leaked=$(leaked_return_pc "$c")
   frames=$(sed -nE 's/.*ppu_frames=([0-9]+).*/\1/p' "$log" | tail -n 1)
@@ -205,8 +222,10 @@ for c in $CASES; do
   runaway=$(count 'SELF-HEAL bridge for .* exceeded' "$log")
   watchdog=$(count 'did not iret' "$log")
   dropped=$(count 'runtime_irq: dropped' "$log")
-  printf '  exit=%s frames=%s interpreted_insns=%s bridged_F=%s overflow=%s runaway_bridge=%s irq_watchdog=%s irq_dropped_frames=%s\n' \
-    "$rc" "${frames:-?}" "${interpreted:-?}" "$bridged_f" "$overflow" "$runaway" "$watchdog" "$dropped"
+  touch_policy=$(count 'touch_policy=' "$log")
+  ours=$(count 'mra_replay=|mra_interp_bios=|^mra: ' "$log")
+  printf '  exit=%s frames=%s interpreted_insns=%s bridged_F=%s overflow=%s runaway_bridge=%s irq_watchdog=%s irq_dropped_frames=%s touch_policy=%s\n' \
+    "$rc" "${frames:-?}" "${interpreted:-?}" "$bridged_f" "$overflow" "$runaway" "$watchdog" "$dropped" "$touch_policy"
 
   problems=""
   if [ "$EXPECT" = failure ]; then
@@ -237,6 +256,10 @@ for c in $CASES; do
       [ "$dropped" = 0 ] ||
         problems="$problems call-return frames left at IRQ exit (the first part of 0003 should leave none);"
     fi
+    # src/main.cpp without its test variables (P2-02): input_frame stays null.
+    [ "$touch_policy" = 0 ] ||
+      problems="$problems a touch_policy line without MRA_REPLAY (src/main.cpp installed input_frame);"
+    [ "$ours" = 0 ] || problems="$problems a line of src/main.cpp without its test variables;"
   fi
   if [ -n "$problems" ]; then
     warn "$c:$problems see $(rel "$log")"
@@ -244,6 +267,30 @@ for c in $CASES; do
     failed="$failed $c"
   fi
 done
+
+# src/main.cpp with MRA_REPLAY (P2-02): the hook goes in, and gbarecomp
+# reports the touch policy that input_frame enables (runtime.cpp:2424-2431
+# at the pin). The one event presses A from harness frame 10 on.
+if [ "$EXPECT" = pass ]; then
+  c=${CASES%% *}
+  run_dir="$REPRO_DIR/run/$c-replay"
+  log="$run_dir/out.log"
+  replay="$REPRO_DIR/run/replay.csv"
+  printf 'mra-keyinput-v1\n10,0x03FE\n' > "$replay"
+  info "Running $c for 60 frames with MRA_REPLAY"
+  run_case "$c" "$run_dir" 60 MRA_REPLAY="$replay"
+  problems=""
+  [ "$rc" = 0 ] || problems="$problems $(describe_exit "$rc");"
+  grep -qF "mra_replay=$replay events=1 frames=10-10" "$log" || problems="$problems no mra_replay line;"
+  grep -qx 'touch_policy=ENABLED claims=0x0' "$log" || problems="$problems no touch_policy=ENABLED line;"
+  if [ -n "$problems" ]; then
+    warn "$c with MRA_REPLAY:$problems see $(rel "$log")"
+    tail -n 20 "$log" | sed 's/^/    /' >&2
+    failed="$failed $c-replay"
+  else
+    info "  mra_replay and touch_policy=ENABLED printed, exit 0"
+  fi
+fi
 
 [ -z "$failed" ] || die "repro test failed (expected: $EXPECT):$failed"
 if [ "$EXPECT" = failure ]; then

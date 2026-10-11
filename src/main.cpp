@@ -23,7 +23,8 @@
 //   MRA_INTERP_BIOS=1, with GBARECOMP_FORCE_INTERP=1
 //     The reference of comparison 1 (ADR 0001, decision 5): gbarecomp's
 //     interpreter runs the BIOS too, so the two sides of a comparison with the
-//     recompiled build do not share the recompiled BIOS.
+//     recompiled build do not share the recompiled BIOS. Only 1 turns it on,
+//     and 0 or an empty value leaves it off.
 //
 // A bad value stops the program with exit code 2 before the game starts.
 #include <algorithm>
@@ -217,8 +218,9 @@ bool env_set(const char* name) {
     return v && v[0];
 }
 
-// As gbarecomp reads GBARECOMP_FORCE_INTERP (runtime.cpp, run_game): set,
-// not empty and not starting with '0'.
+// As gbarecomp reads GBARECOMP_FORCE_INTERP (runtime.cpp:1606-1607, run_game):
+// set, not empty and not starting with '0'. Only for gbarecomp's variables,
+// so that we agree with gbarecomp on whether one is on; ours take 0 or 1.
 bool env_on(const char* name) {
     const char* v = std::getenv(name);
     return v && v[0] && v[0] != '0';
@@ -261,27 +263,43 @@ int install_replay(gbarecomp::RunOptions& opts) {
 
 constexpr std::uint32_t kBiosEnd = 0x00004000u;
 
+// The force-interp hook that was installed before ours, if any (a game-owned
+// one); interpret_bios defers to it above the BIOS.
+RuntimeForceInterpHook g_next_force_interp_hook = nullptr;
+
 // g_runtime_force_interp_hook. dispatch_resolve consults it before the BIOS
 // dispatch table (gbarecomp/src/armv4t/runtime_arm.cpp), and the run loop and
 // the IRQ drive loop before stepping, so every BIOS entry goes to the
 // interpreter. With GBARECOMP_FORCE_INTERP alone, an interpreted SWI enters
 // the recompiled BIOS (docs/research/phase2-diagnosis.md, section 7.1).
-int interpret_bios(std::uint32_t pc, int /*thumb*/) {
-    return pc < kBiosEnd ? 1 : 0;
+int interpret_bios(std::uint32_t pc, int thumb) {
+    if (pc < kBiosEnd) return 1;
+    return g_next_force_interp_hook ? g_next_force_interp_hook(pc, thumb) : 0;
 }
 
 int install_interp_bios() {
-    if (!env_on("MRA_INTERP_BIOS")) return 0;
+    const char* value = std::getenv("MRA_INTERP_BIOS");
+    if (!value || !value[0] || std::strcmp(value, "0") == 0) return 0;
+    if (std::strcmp(value, "1") != 0) {
+        std::fprintf(stderr, "mra: MRA_INTERP_BIOS must be 1 (on) or 0 (off), not '%s'\n",
+                     value);
+        return kConfigError;
+    }
     if (!env_on("GBARECOMP_FORCE_INTERP")) {
         std::fprintf(stderr,
                      "mra: MRA_INTERP_BIOS needs GBARECOMP_FORCE_INTERP=1: it makes gbarecomp's "
                      "interpreter reference run the BIOS in the interpreter too.\n");
         return kConfigError;
     }
-    // run_game clears the hook when it returns (RamDispatchHookReset).
+    // Keep a hook installed before ours working above the BIOS. main() calls
+    // this last, after every other hook: one installed later would replace
+    // ours. run_game clears the hook when it returns (RamDispatchHookReset).
+    g_next_force_interp_hook = g_runtime_force_interp_hook;
     g_runtime_force_interp_hook = &interpret_bios;
-    std::printf("mra_interp_bios=ENABLED (BIOS PCs below 0x4000 run in the interpreter; "
-                "each BIOS entry is a bridge, so the coverage banner reads NOT_STATIC)\n");
+    std::printf("mra_interp_bios=ENABLED (BIOS PCs below 0x4000 run in the interpreter%s; "
+                "each BIOS entry is a bridge, so the coverage banner reads NOT_STATIC)\n",
+                g_next_force_interp_hook ? ", other PCs as the game's force-interp hook says"
+                                         : "");
     return 0;
 }
 
@@ -292,6 +310,7 @@ int main(int argc, char** argv) {
     opts.builtin_game_name = MRA_GAME_NAME;
     opts.builtin_rom_sha1 = MRA_ROM_SHA1;
     if (const int rc = install_replay(opts)) return rc;
+    // Last: it chains to a force-interp hook installed before it.
     if (const int rc = install_interp_bios()) return rc;
     return gbarecomp::run_game(argc, argv, opts);
 }

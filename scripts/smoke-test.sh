@@ -68,9 +68,13 @@ REPLAYS="$SMOKE_DIR/replays"
 mkdir -p "$REPLAYS"
 printf 'until 10\ntap A\n' > "$REPLAYS/smoke.txt"
 python3 -I "$MRA_ROOT/tools/replay/script2replay.py" "$REPLAYS/smoke.txt" -o "$REPLAYS/smoke.csv"
-python3 -I "$MRA_ROOT/tools/replay/script2replay.py" --embed "$REPLAYS/replay_routes.cpp" \
-  --script "smoke=$REPLAYS/smoke.txt" 2> /dev/null
+run_logged "$LOGS/replay-embed.log" \
+  python3 -I "$MRA_ROOT/tools/replay/script2replay.py" --embed "$REPLAYS/replay_routes.cpp" \
+  --script "smoke=$REPLAYS/smoke.txt"
 printf 'mra-keyinput-v1\n20,0x3FE\n10,0x3FF\n' > "$REPLAYS/bad.csv"
+# What gbarecomp's GBARECOMP_INPUT_RECORD writes (runtime.cpp:3246-3247 and
+# 3469 at the pin), which src/main.cpp must refuse.
+printf '# gbarecomp-keyinput-v1\n# frame,keyinput_active_low\n10,0x03FE\n' > "$REPLAYS/gbarecomp.csv"
 
 if [ "$NATIVE" = 1 ]; then
   info "Native: test ROM runners"
@@ -119,8 +123,10 @@ if [ "$NATIVE" = 1 ]; then
     *"BIOS resolution failed"*) info "Host starts and stops at the missing BIOS, as expected" ;;
     *) die "unexpected host output: $out" ;;
   esac
+  # What src/main.cpp prints: a hook's status line, or a refusal.
   case "$out" in
-    *mra_* | *"mra: "*) die "the host printed a test hook's line without its variable: $out" ;;
+    *mra_replay=* | *mra_interp_bios=* | *"mra: "*)
+      die "the host printed a test hook's line without its variable: $out" ;;
   esac
 
   # src/main.cpp's test variables (docs/phase2-plan.md, P2-02). Each one that
@@ -149,14 +155,24 @@ if [ "$NATIVE" = 1 ]; then
     MRA_REPLAY=embedded:nope
   expect_host "bad replay" 2 "bad.csv:3: frame 10 does not come after frame 20" \
     MRA_REPLAY="$REPLAYS/bad.csv"
-  expect_host "gbarecomp's replay format" 2 "the first line must be 'mra-keyinput-v1'" \
-    MRA_REPLAY="$MRA_ROOT/tests/smoke/gba-tests-arm.toml"
+  expect_host "gbarecomp's replay format" 2 "gbarecomp.csv:1: the first line must be 'mra-keyinput-v1'" \
+    MRA_REPLAY="$REPLAYS/gbarecomp.csv"
   expect_host "two replays" 2 "MRA_REPLAY and GBARECOMP_INPUT_REPLAY are both set" \
     MRA_REPLAY="$REPLAYS/smoke.csv" GBARECOMP_INPUT_REPLAY="$REPLAYS/smoke.csv"
   expect_host "BIOS reference" fail "mra_interp_bios=ENABLED" \
     MRA_INTERP_BIOS=1 GBARECOMP_FORCE_INTERP=1
   expect_host "BIOS reference without the interpreter" 2 \
     "MRA_INTERP_BIOS needs GBARECOMP_FORCE_INTERP=1" MRA_INTERP_BIOS=1
+  expect_host "BIOS reference set to a word" 2 "MRA_INTERP_BIOS must be 1 (on) or 0 (off), not 'false'" \
+    MRA_INTERP_BIOS=false GBARECOMP_FORCE_INTERP=1
+  host_run MRA_INTERP_BIOS=0 GBARECOMP_FORCE_INTERP=1
+  case "$out" in
+    *"BIOS resolution failed"*) ;;
+    *) die "MRA_INTERP_BIOS=0: unexpected host output: $out" ;;
+  esac
+  case "$out" in
+    *mra_interp_bios=* | *"mra: "*) die "MRA_INTERP_BIOS=0 turned the BIOS reference on: $out" ;;
+  esac
   info "Host test variables: replay file and embedded route taken, bad values refused"
 fi
 
