@@ -1,0 +1,108 @@
+# Championship, Cross, Rookie cup: three races (Kenya, Texas, France) from a
+# fresh empty save. Championship is locked on a fresh save, so the script first
+# enters the game's own unlock code on the main menu (hold L, press A UP B DOWN;
+# see docs/research/phase2-routes.md). Open-loop: A is held through each race,
+# with no steering, and the player finishes every race in 8th place.
+#
+# Post-race inputs have slack (docs/phase2-plan.md, P2-04): A is released
+# 1,800 frames (30 s) after mGBA's race display ends, and the screens after a
+# race wait for a new A press, so a run whose race ends up to 30 s later or any
+# time earlier still lands each tap on the same screen. Holding A from the
+# camera fly-in (about 110 frames after the race display starts, 200 before
+# the start lights go out) makes the start insensitive to a few frames of
+# offset. Every tap after a race is 300 frames from the previous one.
+#
+# After each race: race complete -> standings (A here records the race) ->
+# best lap -> best race (the game saves to SRAM when leaving it) -> continue /
+# restart / exit -> bike -> gearbox -> next race. After the third race the
+# standings are followed by the cup result, best lap and best race, and the
+# game returns to the Rookie / Pro / Reverse menu.
+#
+# Frame numbers are mGBA frame-counter values after reset (see ../README.md);
+# expected frames are in ../README.md and tools/difftest/routes.toml.
+
+until 2450
+tap START                  # -> language select (English preselected)
+wait 60
+tap A                      # English -> main menu
+wait 180
+mark main_menu
+hold L                     # unlock code: hold L, then A UP B DOWN
+wait 10
+tap A
+tap UP
+tap B
+tap DOWN
+wait 10
+release L
+wait 60
+mark unlocked
+tap A                      # solo -> single race/championship/league/progression
+wait 120
+tap DOWN                   # -> championship
+wait 30
+tap A                      # championship -> cross/gp/traffic
+wait 120
+tap A                      # cross -> rookie/pro/reverse
+wait 120
+tap A                      # rookie -> bike select (Coolfix 250)
+wait 120
+tap A                      # bike -> gearbox
+wait 120
+tap A                      # Auto -> race 1 (Kenya) loads
+until 3700                 # race display from 3593; fly-in
+mark race1
+hold A                     # accelerate for the whole race
+until 24200                # race display ends at 22384
+release
+wait 30
+tap A                      # race complete 1/3 -> standings
+wait 288
+tap A                      # standings -> best lap (race 1 recorded)
+wait 288
+tap A                      # best lap -> best race
+wait 288
+tap A                      # best race -> continue/restart/exit (SRAM write)
+wait 288
+tap A                      # continue -> bike select
+wait 288
+tap A                      # bike -> gearbox
+wait 288
+tap A                      # Auto -> race 2 (Texas) loads
+until 26190                # race display from 26079; fly-in
+mark race2
+hold A
+until 44100                # race display ends at 42288
+release
+wait 30
+tap A                      # race complete 2/3 -> standings
+wait 288
+tap A                      # standings -> best lap (race 2 recorded)
+wait 288
+tap A                      # best lap -> best race
+wait 288
+tap A                      # best race -> continue/restart/exit (SRAM write)
+wait 288
+tap A                      # continue -> bike select
+wait 288
+tap A                      # bike -> gearbox
+wait 288
+tap A                      # Auto -> race 3 (France) loads
+until 46090                # race display from 45980; fly-in
+mark race3
+hold A
+until 61700                # race display ends at 59844
+release
+wait 30
+tap A                      # race complete 3/3 -> standings
+wait 288
+tap A                      # standings -> cup result (race 3 recorded)
+wait 288
+tap A                      # cup result -> best lap
+wait 288
+tap A                      # best lap -> best race
+wait 288
+tap A                      # best race -> rookie/pro/reverse (SRAM write)
+wait 600
+mark end
+end
