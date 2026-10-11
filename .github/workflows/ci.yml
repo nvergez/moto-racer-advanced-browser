@@ -53,6 +53,8 @@ jobs:
           python3 --version
           python3 -I tools/difftest/routes.py validate
           python3 -I -m unittest discover -v tools/difftest/tests
+      - name: Run the capture tools' unit tests
+        run: python3 -I -m unittest discover -v tools/capture/tests
 
   native:
     name: native (${{ matrix.os }})

@@ -1,0 +1,38 @@
+# Capture spec: the mask table both engines apply at capture time
+# (tools/capture/README.md). gbarecomp reads it with
+# GBARECOMP_CAPTURE_SPEC=@tools/capture/spec.txt, the harness with
+# --capture-spec tools/capture/spec.txt. Every entry carries its cause; add
+# masks only by editing this file (docs/phase2-plan.md, P2-03 and P2-09).
+#
+#   reg NAME MASK         AND MASK into line-record register NAME
+#   ram NAME FIRST-LAST   hash this EWRAM or IWRAM range per frame (ram_NAME)
+#   mask NAME FIRST-LAST  bytes of region NAME hashed as zero
+#   mem ADDR:SIZE         per-frame memory field (mem_ADDR), as the harness's
+#                         --trace-mem
+#
+# Addresses refer to Moto Racer Advance (Europe), A9MP, SHA-1
+# b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0.
+
+# Unused register bits. gbarecomp keeps the raw value written to BLDALPHA
+# (0xFF11 on frames 182-187) where mGBA keeps the used bits (0x1F11), and BLDY
+# has 5 used bits (docs/research/phase2-diagnosis.md section 7.2; GBATEK).
+reg BLDALPHA 0x1F1F
+reg BLDY 0x001F
+
+# Game-state RAM, one hash per region (ADR 0001, comparison 2). The last
+# 512 bytes of IWRAM, where the BIOS puts the IRQ, supervisor and user stacks
+# and its IRQ vector (GBATEK, "BIOS RAM Usage"), are a region of their own:
+# against mGBA, on a boot without input, nearly every IWRAM difference is there
+# (docs/research/phase2-capture.md), and P2-09 classifies them.
+ram ewram 0x02000000-0x0203FFFF
+ram iwram 0x03000000-0x03007DFF
+ram iwram_stacks 0x03007E00-0x03007FFF
+# The IRQ-stack slot changes with interrupt timing only: overriding the BIOS
+# open-bus value with 0, 0xE129F000 or 0xEAFFFFFE changes no other memory
+# (docs/research/phase1-findings.md section 6; ADR 0001, comparison 2).
+mask iwram_stacks 0x03007F9C-0x03007F9F
+
+# Resident IWRAM code image: 0xE92D4FF3 front end, 0xE3A00640 race program
+# (route field "image", tools/difftest/routes.toml). The other route fields
+# come from "tools/difftest/routes.py trace-mem".
+mem 0x03000000:4
