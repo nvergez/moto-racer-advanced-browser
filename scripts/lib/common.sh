@@ -469,6 +469,15 @@ build_tools() {
   cmake --build "$MRA_TOOLS_BUILD_DIR" --target gba_recompile gba_scan --parallel "$(job_count)"
 }
 
+# embed_replays <out.cpp>: write the routes table with every route's input
+# replay (tools/replay/script2replay.py --embed, from tools/difftest/routes.toml)
+# for a test build. Rewritten only when its content changes.
+embed_replays() {
+  command -v python3 > /dev/null 2>&1 || die "python3 is required for --replays"
+  python3 -I "$MRA_ROOT/tools/replay/script2replay.py" --embed "$1" ||
+    die "could not write the input replays to $(rel "$1")"
+}
+
 # run_logged <log> <command...>: run a noisy step into a log file; on failure
 # show its tail and stop.
 run_logged() {

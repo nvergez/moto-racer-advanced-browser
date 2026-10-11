@@ -2,7 +2,7 @@
 # Build the browser bundle with gbarecomp's packaging/web/build_web.sh.
 #
 #   scripts/build-web.sh [--rom PATH] [--bios PATH] [--no-regen]
-#                        [--embed-private-rom] [--dev] [--without NAME]...
+#                        [--embed-private-rom] [--dev [--replays]] [--without NAME]...
 #
 #   --rom PATH           the ROM (default roms/moto-racer-advance.gba)
 #   --bios PATH          the 16 KiB GBA BIOS dump (default bios/gba_bios.bin)
@@ -10,6 +10,10 @@
 #   --embed-private-rom  copy the ROM and the BIOS into the bundle (local
 #                        testing only; the page then needs no file picker)
 #   --dev                let a page served from localhost take ?args=/?env=
+#   --replays            test bundle (needs --dev): compile every route's input
+#                        replay into the game library, for
+#                        ?env=MRA_REPLAY=embedded:ROUTE (tools/replay/README.md).
+#                        Used once our own main is linked in the browser (P2-12)
 #   --without NAME       A/B build: leave gbarecomp patch NAME (0003) out, into
 #                        build/without-NAME/ (patches/gbarecomp/README.md)
 #
@@ -25,19 +29,26 @@ set -euo pipefail
 
 REGEN=1
 PASS=()
+DEV=0
+REPLAYS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --rom | --bios) [ $# -ge 2 ] || die "$1 needs a path"; set_input "$1" "$2"; shift ;;
     --rom=* | --bios=*) set_input "${1%%=*}" "${1#*=}" ;;
     --no-regen) REGEN=0 ;;
-    --embed-private-rom | --dev) PASS+=("$1") ;;
+    --embed-private-rom) PASS+=("$1") ;;
+    --dev) PASS+=("$1"); DEV=1 ;;
+    --replays) REPLAYS=1 ;;
     --without) [ $# -ge 2 ] || die "--without needs a patch name or number"; add_without "$2"; shift ;;
     --without=*) add_without "${1#*=}" ;;
-    -h | --help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
 done
+# A bundle with input replays is a test bundle (docs/phase2-plan.md, P2-02):
+# only a --dev bundle on localhost takes the ?env= that selects one.
+[ "$REPLAYS" = 0 ] || [ "$DEV" = 1 ] || die "--replays builds a test bundle: add --dev"
 select_patch_variant
 lock_checkout
 
@@ -54,16 +65,25 @@ elif [ ! -f "$MRA_GENERATED_DIR/bios/bios_recompiled.cpp" ] ||
   die "nothing generated yet; run without --no-regen"
 fi
 
+replay_routes=""
+if [ "$REPLAYS" = 1 ]; then
+  replay_routes="$MRA_BUILD_DIR/replays/replay_routes.cpp"
+  embed_replays "$replay_routes"
+fi
+
 out="$MRA_BUILD_DIR/web-PRIVATE"
-info "Building the browser bundle -> $(rel "$out")"
+info "Building the browser bundle -> $(rel "$out")${replay_routes:+ (test bundle: input replays embedded)}"
 # The three directories keep every build product under build/, out of the
 # submodule (build_web.sh defaults to <gbarecomp>/build-web-host) and out of
 # web/game-lib.
-# MRA_GAME_GENERATED_DIR tells web/game-lib which generated code to compile.
+# MRA_GAME_GENERATED_DIR tells web/game-lib which generated code to compile,
+# and MRA_REPLAY_ROUTES the routes table (empty: none), because build_web.sh
+# passes no -D options to it.
 GBARECOMP_WEB_BUILD_DIR="$MRA_BUILD_DIR/web/runtime" \
 GBARECOMP_WEB_GAME_BUILD_DIR="$MRA_BUILD_DIR/web/game" \
 GBARECOMP_WEB_OUT_DIR="$out" \
 MRA_GAME_GENERATED_DIR="$MRA_GENERATED_DIR/game" \
+MRA_REPLAY_ROUTES="$replay_routes" \
   bash "$GBARECOMP_DIR/packaging/web/build_web.sh" ${PASS[@]+"${PASS[@]}"} \
   "$MRA_ROOT/web/game-lib" "$MRA_GENERATED_DIR/bios" \
   "$MRA_ROM" "$MRA_BIOS" "$MRA_GAME_CONFIG"

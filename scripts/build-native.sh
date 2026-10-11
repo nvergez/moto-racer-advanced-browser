@@ -2,7 +2,7 @@
 # Build the native (macOS/Linux) executable from the ROM and the BIOS dump.
 #
 #   scripts/build-native.sh [--rom PATH] [--bios PATH] [--no-regen] [--lle] [--debug]
-#                           [--without NAME]...
+#                           [--replays] [--without NAME]...
 #
 #   --rom PATH      the ROM (default roms/moto-racer-advance.gba)
 #   --bios PATH     the 16 KiB GBA BIOS dump (default bios/gba_bios.bin)
@@ -10,6 +10,9 @@
 #   --lle           per-pixel (LLE) scanline renderer instead of gbarecomp's HLE
 #                   default, into build/native-lle, for frame comparisons
 #   --debug         CMake Debug build instead of Release
+#   --replays       test build: compile in every route's input replay, for
+#                   MRA_REPLAY=embedded:ROUTE (tools/replay/README.md). The
+#                   next build without it removes them again
 #   --without NAME  A/B build: leave gbarecomp patch NAME (0003) out, and put
 #                   everything, generated code included, under
 #                   build/without-NAME/ (patches/gbarecomp/README.md)
@@ -22,6 +25,7 @@ set -euo pipefail
 REGEN=1
 SCANLINE=HLE
 BUILD_TYPE=Release
+REPLAYS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --rom | --bios) [ $# -ge 2 ] || die "$1 needs a path"; set_input "$1" "$2"; shift ;;
@@ -29,9 +33,10 @@ while [ $# -gt 0 ]; do
     --no-regen) REGEN=0 ;;
     --lle) SCANLINE=LLE ;;
     --debug) BUILD_TYPE=Debug ;;
+    --replays) REPLAYS=1 ;;
     --without) [ $# -ge 2 ] || die "--without needs a patch name or number"; add_without "$2"; shift ;;
     --without=*) add_without "${1#*=}" ;;
-    -h | --help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
@@ -56,7 +61,15 @@ build_dir="$MRA_BUILD_DIR/native"
 generator=()
 if command -v ninja > /dev/null 2>&1; then generator=(-G Ninja); fi
 
-info "Configuring $(rel "$build_dir") ($BUILD_TYPE, scanline $SCANLINE)"
+# Always passed: without --replays it resets MRA_REPLAY_ROUTES to empty, so an
+# earlier test build of the same directory does not carry over.
+replay_routes=""
+if [ "$REPLAYS" = 1 ]; then
+  replay_routes="$MRA_BUILD_DIR/replays/replay_routes.cpp"
+  embed_replays "$replay_routes"
+fi
+
+info "Configuring $(rel "$build_dir") ($BUILD_TYPE, scanline $SCANLINE${replay_routes:+, input replays embedded})"
 mkdir -p "$MRA_BUILD_DIR"
 cmake -S "$MRA_ROOT" -B "$build_dir" ${generator[@]+"${generator[@]}"} \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
@@ -64,6 +77,7 @@ cmake -S "$MRA_ROOT" -B "$build_dir" ${generator[@]+"${generator[@]}"} \
   -DMRA_GAME_CONFIG="$MRA_GAME_CONFIG" \
   -DMRA_GENERATED_DIR="$MRA_GENERATED_DIR/game" \
   -DGBARECOMP_GENERATED_BIOS_DIR="$MRA_GENERATED_DIR/bios" \
+  -DMRA_REPLAY_ROUTES="$replay_routes" \
   > "$build_dir.configure.log" 2>&1 || {
     cat "$build_dir.configure.log" >&2
     die "configure failed"

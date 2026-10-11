@@ -58,8 +58,10 @@ foreach(case IN LISTS MRA_REPRO_CASES)
         set(case_sources "${CMAKE_CURRENT_SOURCE_DIR}/${name}_hooks.cpp")
     endif()
 
-    add_executable(repro_${name} "${MRA_ROOT}/src/main.cpp" ${gen_sources}
-        ${case_sources})
+    # src/main.cpp needs the routes table of src/replay_routes.h; the repros
+    # embed no input replays.
+    add_executable(repro_${name} "${MRA_ROOT}/src/main.cpp"
+        "${MRA_ROOT}/src/replay_routes_none.cpp" ${gen_sources} ${case_sources})
     target_include_directories(repro_${name} PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/${name}_config"
         "${gen}"
