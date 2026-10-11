@@ -1,0 +1,47 @@
+# Pause the race and choose RESTART. Same path as boot_to_race.txt (Solo >
+# Single race > Cross > Kenya > Coolfix 250 > Auto) up to frame 4210, then
+# pause, Restart, and race again for about 1,000 frames. Fresh empty save;
+# frame numbers as in boot_to_race.txt.
+# Expected: Restart stays in the race program (the IWRAM image does not
+# change): the display goes off at 4286 and the race shows again from 4304,
+# back on the start line with the timer at zero.
+
+until 2450
+tap START                  # -> language select (English preselected)
+wait 60
+tap A                      # English -> main menu
+wait 180
+tap A                      # solo
+wait 120
+tap A                      # single race
+wait 90
+tap A                      # cross -> track select (Kenya)
+wait 90
+tap A                      # Kenya -> bike select
+wait 90
+tap A                      # Coolfix 250 -> gearbox
+wait 90
+tap A                      # Auto -> race loads
+until 3608
+hold A                     # accelerate
+until 3950
+hold RIGHT                 # first right-hand bend
+wait 70
+release RIGHT
+until 4210
+release
+tap START                  # pause
+wait 30
+tap DOWN 1                 # continue / restart / abort
+wait 20
+shot restart_selected
+mark restart
+tap A                      # restart
+until 4420                 # race shows again from 4304
+mark restarted
+hold A                     # accelerate from the new start
+until 5400
+shot restarted_race
+release
+wait 100
+end

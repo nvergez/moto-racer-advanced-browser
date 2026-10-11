@@ -100,14 +100,22 @@ One command per line; `#` starts a comment. Keys: `A B SELECT START RIGHT LEFT U
 
 Held keys are not part of a savestate: re-issue `hold A` after `--load-state`.
 
-| Script | Path and expected result (fresh save, checked on 2026-10-10) |
+An input given after `until F`, or after a `wait` that ends at frame F, is used for frame F+1, and `trace.tsv`'s `keys` column shows it there: `until 2714` then `tap A` puts A in the rows of frames 2715-2720.
+
+Every script starts from boot. The scripts and their checkpoints are listed in the route manifest (see [Routes](#routes)).
+
+| Script | Path and expected result (fresh save unless stated, checked on 2026-10-11) |
 |---|---|
-| `boot_to_race.txt` | Title, English, Solo, Single race, Cross, Kenya, Coolfix 250, Auto. Title 2450, main menu 2714, race image installed 3290, race display from 3303, A held from 3608, lap 1 at 3826. Writes `race_running.state` (3800) and `mid_race.state` (4200). |
+| `boot_to_race.txt` | Title, English, Solo, Single race, Cross, Kenya, Coolfix 250, Auto. Title 2450, main menu 2714, race image installed 3290, race display from 3303, A held from 3608, lap 1 at 3826. Writes `race_running.state` (3800) and `mid_race.state` (4200). No SRAM write. |
 | `full_race_cross.txt` | Same path, A held to the end. Finishes 3 laps in 8th place; race display ends at 21788, "Try again" screen from 21813. No SRAM write. |
-| `race_gp.txt`, `race_traffic.txt` | GP on California and Traffic on Moscow (the only unlocked tracks), with a pause at 4200. Race display from 3346 (GP) and 3358 (Traffic). |
+| `race_gp.txt`, `race_traffic.txt` | GP on California and Traffic on Moscow (the only unlocked tracks), with a pause at 4200. Race display from 3346 (GP) and 3358 (Traffic). No SRAM write. |
 | `options_save.txt` | Options, Language, Français, then B. Writes the 0xCD0-byte save block at frame 3415. Use with `--save FILE`. |
-| `multiplayer_lobby.txt` | The link lobby with no partner. CpuSet (SWI 0x0B) runs about 5 times per frame there, and nowhere else. |
-| `abort_race.txt` | From `mid_race.state`: pause, Abort. The race program hands back to the front end at 4298. |
+| `boot_with_save.txt` | Boot from the save `options_save.txt` writes (pass a copy with `--save`: the harness writes the run's save back to it). No language menu: the main menu is up at 2484, in French. Solo and back. No SRAM write. |
+| `multiplayer_lobby.txt` | The link lobby with no partner. CpuSet (SWI 0x0B) runs about 5 times per frame there, and nowhere else. No SRAM write. |
+| `abort_race.txt` | `boot_to_race.txt`'s path up to 4210, then pause, Abort. The race program hands back to the front end at 4298 (front-end image from 4303); Kenya track select at about 4600, then bike and gearbox. No SRAM write. Until 2026-10-11 it started from `mid_race.state`, which gbarecomp cannot load. |
+| `restart_race.txt` | Same path up to 4210, then pause, Restart. The race program restarts the race itself (no image switch): display off at 4286, race again from 4304, A held from 4420. No SRAM write. |
+| `two_races.txt` | The Kenya race of `abort_race.txt`, then RIGHT on the track select for Texas: race image 5110, display 5123, aborted back to the front end at 6323. Both image switches happen twice. No SRAM write. |
+| `cup.txt` | Championship, Cross, Rookie: Kenya, Texas, France. The game's unlock code on the main menu (hold L, then A UP B DOWN) opens the Championship (unlock bits set at 2761). Race displays 3593-22384, 26079-42288 and 45980-59844, with A held from each fly-in; 8th in every race and 8th overall with 3 points. SRAM written at 25132, 45032 and 62932. Ends on the Rookie / Pro / Reverse menu at 63542. See [phase2-routes.md](../../docs/research/phase2-routes.md). |
 
 The boot timeline of `boot_to_race.txt`:
 
@@ -127,11 +135,25 @@ The boot timeline of `boot_to_race.txt`:
 
 Without steering the bike leaves the road after about frame 4000, but the race keeps running and still finishes.
 
+### Routes
+
+[`tools/difftest/routes.toml`](../difftest/routes.toml) lists every script as a route: its frame count, its starting save (none, or the save another route writes), whether it writes SRAM and the SHA-1 of its final save, and its checkpoints. A checkpoint is a game-state event that both engines' per-frame captures can show (DISPCNT, the first word of the resident IWRAM image, a few RAM bytes such as the selected track), with the mGBA frame where it happens and the frame of the first later input that relies on it. A run of another engine follows the route when every event happens, in order, before that input. The fields and their evidence are in the manifest and in [phase2-routes.md](../../docs/research/phase2-routes.md).
+
+```sh
+tools/difftest/mgba-routes.sh            # every route, twice each (about 3 minutes)
+tools/difftest/mgba-routes.sh cup        # one route
+python3 -I tools/difftest/routes.py check ROUTE TRACE.tsv     # checkpoints of any per-frame trace
+python3 -I -m unittest discover tools/difftest/tests          # no game data needed
+```
+
+`mgba-routes.sh` runs each route twice from boot, each time from a fresh copy of its starting save, with `--trace 1-<frames>` and a `--trace-mem` column for every RAM field. It checks that the two `trace.tsv` and the two final saves are byte-identical, that the run stops at the route's frame count, that the checkpoints hold on their recorded frames, and that the final save is as the manifest says. It stops before the first run if the harness is not built or the ROM or BIOS is not the pinned one. A route whose starting-save route failed is reported as failed without running, and a failing route keeps run b's output for comparison. Outputs go to `analysis-out/routes/`. The tools need Python 3.11 or newer (`tomllib`).
+
 ### Options
 
 ```
 run_harness.sh [--rom FILE] [--bios FILE] [--no-hash-check] --out DIR [options]
-  --script FILE | --frames N               # at least one; --frames also runs past the script end
+  --script FILE | --frames N               # at least one; --frames N stops the run at frame N, and also
+                                           # runs past the end of a script that has no end command
   --load-state FILE                        # start from a savestate written by the harness
   --save FILE                              # persistent cartridge save (default: fresh, in memory)
   --save-type TYPE                         # force sram|flash512|flash1m|eeprom|eeprom512|none
@@ -178,6 +200,7 @@ The code that produced the Phase 1 evidence is this one minus the changes below.
 - `--wav` was silent: the empty config left mGBA's master volume at 0. The harness now sets it to full volume. Only audio changes, including the "rendered samples" field of savestates.
 - Range lists longer than 32 entries used to be truncated silently; they are now an error.
 - New `--save-type` and `--openbus` options, which reproduce two Phase 1 experiments: a missing or Flash/EEPROM save chip (the game shows "Error while saving"), and replacing the BIOS open-bus value (see the findings, section 6).
+- A script `end` before the `--frames` count used to hang the harness (the loop up to `--frames` never advanced once `end` had stopped the run). `end` now ends the run there. Runs that did not hang are unchanged.
 
 ### Pitfalls
 

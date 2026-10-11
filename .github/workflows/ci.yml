@@ -28,7 +28,7 @@ jobs:
       - name: Lint the scripts
         run: |
           shellcheck --version
-          shellcheck -x scripts/*.sh scripts/lib/*.sh tests/tooling/*.sh
+          shellcheck -x scripts/*.sh scripts/lib/*.sh tests/tooling/*.sh tools/difftest/*.sh
 
   tooling:
     name: patch tooling
@@ -41,6 +41,18 @@ jobs:
           fetch-depth: 0
       - name: Test scripts/apply-patches.sh and A/B builds on a toy repository
         run: tests/tooling/apply-patches-test.sh
+
+  python-tools:
+    name: route tools (no game data)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check the route manifest and run the unit tests
+        run: |
+          python3 --version
+          python3 -I tools/difftest/routes.py validate
+          python3 -I -m unittest discover -v tools/difftest/tests
 
   native:
     name: native (${{ matrix.os }})

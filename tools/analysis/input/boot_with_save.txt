@@ -1,0 +1,19 @@
+# Boot from the save that options_save.txt writes (language: Français).
+# Run with --save FILE, where FILE is a copy of that save: the harness writes
+# the run's save back to the file it loads. The language menu is skipped:
+# START on the title goes straight to the main menu (2484, against 2524 on a
+# fresh save, where the language menu comes first). Then Solo and back.
+# Frame numbers as in boot_to_race.txt.
+
+until 2450
+tap START                  # -> main menu (language from the save)
+wait 180
+mark main_menu
+shot main_menu
+tap A                      # solo
+wait 120
+shot solo_menu
+tap B                      # back to the main menu
+wait 120
+shot back_to_main_menu
+end
