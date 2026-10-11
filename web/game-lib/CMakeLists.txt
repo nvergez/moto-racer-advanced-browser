@@ -25,12 +25,30 @@ if(NOT MRA_GENERATED_SOURCES)
     message(FATAL_ERROR "No generated code in ${MRA_GENERATED_DIR}. Run scripts/regen.sh.")
 endif()
 
-add_library(gbarecomp_game STATIC ${MRA_GENERATED_SOURCES})
+# The routes table of src/replay_routes.h (docs/phase2-plan.md, P2-02): for a
+# test bundle, the source tools/replay/script2replay.py --embed wrote, which
+# scripts/build-web.sh --dev --replays hands over in the environment; otherwise
+# an empty table. Not cached, so a build without the variable is never a test
+# build. Nothing in the bundle uses the table until our own main is linked in
+# the browser (P2-12); the stock main does not reference it.
+if(DEFINED ENV{MRA_REPLAY_ROUTES} AND NOT "$ENV{MRA_REPLAY_ROUTES}" STREQUAL "")
+    set(MRA_REPLAY_ROUTES_SOURCE "$ENV{MRA_REPLAY_ROUTES}")
+    if(NOT IS_ABSOLUTE "${MRA_REPLAY_ROUTES_SOURCE}" OR NOT EXISTS "${MRA_REPLAY_ROUTES_SOURCE}")
+        message(FATAL_ERROR "MRA_REPLAY_ROUTES: ${MRA_REPLAY_ROUTES_SOURCE} is not an existing absolute path")
+    endif()
+    message(STATUS "Test build: input replays embedded from ${MRA_REPLAY_ROUTES_SOURCE}")
+else()
+    set(MRA_REPLAY_ROUTES_SOURCE "${MRA_ROOT}/src/replay_routes_none.cpp")
+endif()
+
+add_library(gbarecomp_game STATIC ${MRA_GENERATED_SOURCES} "${MRA_REPLAY_ROUTES_SOURCE}")
 set_target_properties(gbarecomp_game PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES)
-# Generated code includes only <cstdint>, runtime_arm.h and its own header.
+# Generated code includes only <cstdint>, runtime_arm.h and its own header; the
+# routes table includes src/replay_routes.h.
 target_include_directories(gbarecomp_game PRIVATE
     "${MRA_GENERATED_DIR}"
-    "${GBARECOMP_ROOT}/src/armv4t")
+    "${GBARECOMP_ROOT}/src/armv4t"
+    "${MRA_ROOT}/src")
 if(EMSCRIPTEN)
     # Guaranteed tail calls: runtime_arm.h refuses to compile without them.
     target_compile_options(gbarecomp_game PRIVATE -mtail-call)

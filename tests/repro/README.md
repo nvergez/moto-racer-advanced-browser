@@ -55,6 +55,10 @@ With `--without 0006 --expect-failure overlay1heal`, the one run must log `0xA1`
 
 Why it is opt-in: the gcc backend compiles each heal with the host's C++ compiler at run time (`c++` on `PATH`, or `GBARECOMP_HEAL_CXX`, `src/runtime/overlay_compile.cpp:66-75` at the pin), and the plan's test runs keep healing off. It is not in the default list and not run in CI.
 
+## The input replay hook of `src/main.cpp` (P2-02)
+
+The repro executables are our `src/main.cpp`, so `scripts/repro-test.sh` also checks how it installs gbarecomp's `RunOptions::input_frame`, which CI cannot check on the game. Every run unsets `MRA_REPLAY` and `MRA_INTERP_BIOS` (but for the variables it is given), and each irqleak and overlay run must print no `touch_policy` line (a non-null `input_frame` makes gbarecomp print `touch_policy=ENABLED`, `src/runtime/runtime.cpp:2424-2431` at the pin) and no line of `src/main.cpp`. Then the first case runs 60 frames with `MRA_REPLAY` set to a one-event replay, as the run `CASE-replay`, and must exit 0 and print `mra_replay=... events=1 frames=10-10` and `touch_policy=ENABLED claims=0x0`. These checks are skipped with `--expect-failure`: the irqleak runs then abort, and their buffered stdout is lost.
+
 ## The stand-in BIOS
 
 gbarecomp needs a 16 KiB BIOS image twice: recompiled at build time, so that IRQs and SWIs run through generated code, and loaded at run time (its size is checked; a SHA-1 other than the retail one only warns, and `scripts/repro-test.sh` passes `--bios-sha1` so there is no warning). With `[bios] skip_intro = true` the repro ROMs use only three things from it, so `make_bios.py` writes just those: the exception vectors, an IRQ dispatcher that calls the user handler stored at `0x03007FFC` and returns, and `VBlankIntrWait` (SWI `0x05`), which enables IME and halts until the handler flags a VBlank in `0x03007FF8`. Any other SWI returns at once; reset is a branch to itself. It is not a GBA BIOS and is not meant for games.

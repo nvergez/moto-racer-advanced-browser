@@ -25,6 +25,12 @@ set(GBARECOMP_GENERATED_BIOS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated/bios"
 option(MRA_ALLOW_BIOS_PLACEHOLDER
     "Link without a recompiled BIOS (smoke tests only: the runtime then boots through BIOS HLE)"
     OFF)
+# Test builds only (docs/phase2-plan.md, P2-02): the C++ source with the
+# routes' input replays that tools/replay/script2replay.py --embed writes under
+# build/ (scripts/build-native.sh --replays). src/main.cpp looks routes up in it
+# for MRA_REPLAY=embedded:ROUTE. Empty, the default: an empty table.
+set(MRA_REPLAY_ROUTES "" CACHE FILEPATH
+    "Test builds only: embedded input replays (script2replay.py --embed); empty for none")
 
 if(NOT EXISTS "${GBARECOMP_ROOT}/CMakeLists.txt")
     message(FATAL_ERROR
@@ -92,7 +98,19 @@ add_subdirectory("${GBARECOMP_ROOT}" gbarecomp_build EXCLUDE_FROM_ALL)
 configure_file(src/mra_build_config.h.in
     "${CMAKE_CURRENT_BINARY_DIR}/generated_config/mra_build_config.h" @ONLY)
 
-add_executable(MotoRacerAdvanceRecomp src/main.cpp ${MRA_GENERATED_SOURCES})
+if(MRA_REPLAY_ROUTES)
+    get_filename_component(MRA_REPLAY_ROUTES_SOURCE "${MRA_REPLAY_ROUTES}" ABSOLUTE
+        BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(NOT EXISTS "${MRA_REPLAY_ROUTES_SOURCE}")
+        message(FATAL_ERROR "MRA_REPLAY_ROUTES: ${MRA_REPLAY_ROUTES_SOURCE} not found")
+    endif()
+    message(STATUS "Test build: input replays embedded from ${MRA_REPLAY_ROUTES_SOURCE}")
+else()
+    set(MRA_REPLAY_ROUTES_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/replay_routes_none.cpp")
+endif()
+
+add_executable(MotoRacerAdvanceRecomp src/main.cpp "${MRA_REPLAY_ROUTES_SOURCE}"
+    ${MRA_GENERATED_SOURCES})
 
 # Keep the large guest shards cheaper to compile than the runtime, as MKSC
 # does. The dispatch table and symbol map stay ordinary small units.
@@ -104,6 +122,7 @@ endif()
 
 target_include_directories(MotoRacerAdvanceRecomp PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/generated_config"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${MRA_GENERATED_DIR}"
     "${GBARECOMP_ROOT}/src/armv4t"
     "${GBARECOMP_ROOT}/src/gba"

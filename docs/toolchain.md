@@ -118,8 +118,8 @@ It runs the real pipeline on two freely licensed test ROMs from [jsmolka/gba-tes
 
 1. `scripts/fetch-test-roms.sh` downloads them from the repository at pinned commit `a7113b6` into `test-roms/` (gitignored) and checks their SHA-256. They are the binaries committed upstream: they are assembled with FASMARM, an x86 tool, so building them here was not practical.
 2. Each ROM is recompiled with `gba_recompile` and its config in `tests/smoke/`, with the same function `recompile_rom` in `scripts/lib/common.sh` that recompiles the game. `arm.gba` gives 350 functions, `thumb.gba` 210.
-3. **Native.** Each ROM's generated code is linked into gbarecomp's test ROM runner, which boots the cartridge directly without a BIOS, and run. Both pass. Then our own executable (`CMakeLists.txt`, `src/main.cpp`) is built with the `arm.gba` code in place of the game's, and started without a BIOS. It must stop with `BIOS resolution failed`, which shows that it starts and parses its arguments, `--state-dir` included.
-4. **Web.** The same runners are compiled with Emscripten and run under Node, the one emsdk ships. Both pass with the same final state as natively. gbarecomp's browser host (`packaging/web/main.cpp`, the browser backend, the canonical link options from `cmake/web_host_link_options.cmake`) is linked with each ROM's code. `web/game-lib`, the project `scripts/build-web.sh` hands to `build_web.sh`, is built with `emcc`.
+3. **Native.** Each ROM's generated code is linked into gbarecomp's test ROM runner, which boots the cartridge directly without a BIOS, and run. Both pass. Then our own executable (`CMakeLists.txt`, `src/main.cpp`) is built with the `arm.gba` code in place of the game's, as a test build with a small input replay compiled in, and started without a BIOS, from a directory of its own (from the repository root the runtime would read `./game.toml`, whose `[bios]` path finds a BIOS dump on a machine that has one). It must stop with `BIOS resolution failed`, which shows that it starts and parses its arguments, `--state-dir` included. It is then started with each of `src/main.cpp`'s test variables ([tools/replay/README.md](../tools/replay/README.md)): a replay file and an embedded replay must be taken, and bad values refused with exit code 2.
+4. **Web.** The same runners are compiled with Emscripten and run under Node, the one emsdk ships. Both pass with the same final state as natively. gbarecomp's browser host (`packaging/web/main.cpp`, the browser backend, the canonical link options from `cmake/web_host_link_options.cmake`) is linked with each ROM's code. `web/game-lib`, the project `scripts/build-web.sh` hands to `build_web.sh`, is built with `emcc`, once with the empty routes table and once with the replay table, as `scripts/build-web.sh --dev --replays` builds it.
 
 Everything goes to `build/smoke/`, logs to `build/smoke/logs/`. On the M4 Pro the whole test takes under a minute from a warm build tree.
 
@@ -178,6 +178,7 @@ scripts/build-native.sh            # regenerate, then build build/native/MotoRac
 scripts/build-native.sh --no-regen # reuse generated/
 scripts/build-native.sh --lle      # LLE scanline renderer, into build/native-lle
 scripts/build-native.sh --without 0003  # A/B build without patch 0003, into build/without-0003/
+scripts/build-native.sh --replays  # test build with every route's input replay compiled in
 scripts/build-native.sh --rom ~/dumps/mra.gba --bios ~/dumps/gba_bios.bin
 ```
 
@@ -197,6 +198,8 @@ GBARECOMP_SELFHEAL_RECOMPILE=0 ./MotoRacerAdvanceRecomp \
   --dump-png frame-2700.png ../../game.toml
 ```
 
+**Test variables.** `src/main.cpp` takes two environment variables of ours, both off unless set: `MRA_REPLAY=FILE` (or `embedded:ROUTE` in a `--replays` build) replays an input trace made from a harness script at VBlank start, as the harness applies its inputs, and `MRA_INTERP_BIOS=1` with `GBARECOMP_FORCE_INTERP=1` makes the interpreter run the BIOS too, the reference of comparison 1. See [tools/replay/README.md](../tools/replay/README.md) and [phase2-replay.md](research/phase2-replay.md). Use `MRA_REPLAY`, not `GBARECOMP_INPUT_REPLAY`, to compare with the mGBA harness: gbarecomp's own replay applies inputs from its run loop on other frames, and not while an interpreter bridge runs.
+
 Run from `build/native` so the runtime's working-directory files (`recomp_cache/`, `recomp_coverage_A9MP.json`, `recomp_master_misses_A9MP.toml.frag`, `bios.cfg`, `rom.cfg`) stay under `build/`. At exit the runtime prints a coverage banner (`self_heal_coverage=... dispatch_misses=... interpreted_insns=...`); read it after every run. `--dump-png` writes the last frame, which is a picture of the game: keep it under `build/`. Phase 1 discovery runs need more care with saves and coverage files; the integration study's playbook (docs/research/gbarecomp-integration.md, §10, PR #2) covers them.
 
 ## Web build
@@ -204,6 +207,7 @@ Run from `build/native` so the runtime's working-directory files (`recomp_cache/
 ```sh
 scripts/build-web.sh               # regenerate, then build build/web-PRIVATE/
 scripts/build-web.sh --no-regen --embed-private-rom --dev
+scripts/build-web.sh --no-regen --embed-private-rom --dev --replays   # test bundle with the input replays
 scripts/serve-web.sh [port]        # http://127.0.0.1:8080/ by default
 scripts/serve-web.sh --without 0001 [port]   # the A/B bundle of build-web.sh --without 0001
 ```
@@ -212,7 +216,7 @@ scripts/serve-web.sh --without 0001 [port]   # the A/B bundle of build-web.sh --
 
 **Do not publish `build/web-PRIVATE/`**, with or without `--embed-private-rom`: `game.wasm` is compiled from the recompiled ROM and the recompiled Nintendo BIOS. Whether anything is ever published is the owner's decision (integration study, §5.6, PR #2). `web-PRIVATE/` is gitignored wherever it appears.
 
-With the game, the page currently stops at the title screen (known issue 13). The stock page links gbarecomp's generic `main()`, so no game-owned code reaches the browser yet. That will need our own link step (Phase 3); `tests/smoke/CMakeLists.txt` already links the browser host that way, with `gbarecomp_web_host_link_options()`.
+With the game, the page currently stops at the title screen (known issue 13). The stock page links gbarecomp's generic `main()`, so no game-owned code reaches the browser yet: `--replays` compiles the input replays into `web/game-lib` for a test bundle, but nothing uses them until our own main is linked in the browser (P2-12). That will need our own link step (Phase 3); `tests/smoke/CMakeLists.txt` already links the browser host that way, with `gbarecomp_web_host_link_options()`.
 
 ## How the game-dependent scripts were verified
 
@@ -335,6 +339,7 @@ Next steps, for Phase 1: declare the IWRAM images (`[[code_copy]]`), review the 
 - **patch tooling** on `ubuntu-24.04`: `tests/tooling/apply-patches-test.sh`, with the full history checked out so that it can also run PR #5's `apply-patches.sh` (`a7efc60`) on the same case.
 - **native** on `macos-15` (Apple silicon, with SDL2) and `ubuntu-24.04` (GNU ld, no SDL2): `setup.sh`, `fetch-test-roms.sh`, `test-engine.sh` (all of gbarecomp's tests, the two test ROM tests included), `smoke-test.sh --native-only` and `repro-test.sh` (on the stand-in BIOS). On Ubuntu, gbarecomp's `web_bootstrap_tests` needs `patches/gbarecomp/0002` (known issue 11), and the job also runs `repro-test.sh --without 0003 --without 0006 --expect-failure`, so that each repro keeps failing without the fix it tests (one A/B build for both).
 - **web smoke** on `ubuntu-24.04`: emsdk 6.0.10, cached by version, then `smoke-test.sh --web-only`.
+- **route tools (no game data)** on `ubuntu-24.04`: `tools/difftest/routes.py validate` and the unit tests of `tools/difftest`, `tools/capture` and `tools/replay`.
 
 The full gbarecomp build is small (186 build steps), so CI builds all of it and caches only the emsdk install.
 
@@ -343,7 +348,7 @@ The full gbarecomp build is small (186 build steps), so CI builds all of it and 
 | Path | Tracked | Contents |
 |---|---|---|
 | `gbarecomp/` | Submodule | gbarecomp at the pin; PolyForm Noncommercial 1.0.0 (`gbarecomp/LICENSE`, <https://polyformproject.org/licenses/noncommercial/1.0.0>) |
-| `CMakeLists.txt`, `src/` | Yes | Native host: `main.cpp` and the build-config template |
+| `CMakeLists.txt`, `src/` | Yes | Native host: `main.cpp` with its test hooks, the empty routes table of builds without input replays, and the build-config template |
 | `game.toml` | Yes | Game config for the Europe ROM (`A9MP`); Phase 1 TODOs as comments |
 | `web/game-lib/` | Yes | The generated game as a library for `build_web.sh` |
 | `tests/smoke/` | Yes | Smoke test project and test ROM configs |

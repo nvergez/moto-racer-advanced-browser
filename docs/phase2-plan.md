@@ -154,9 +154,11 @@ Tests:
 ```sh
 mkdir -p build/replays
 python3 -I tools/replay/script2replay.py tools/analysis/input/boot_to_race.txt > build/replays/boot_to_race.csv
-(cd build/native && export GBARECOMP_FORCE_INTERP=1 <replay env var>=../replays/boot_to_race.csv <capture env> && <native run, 4400 frames>)
+(cd build/native && export GBARECOMP_FORCE_INTERP=1 MRA_REPLAY=../replays/boot_to_race.csv <capture env> && <native run, 4400 frames>)
 (cd build/native && export GBARECOMP_FORCE_INTERP=1 MRA_INTERP_BIOS=1 GBARECOMP_ABORT_AFTER_BRANCHES=0 && <native run, 600 frames>)
 ```
+
+As implemented: `MRA_REPLAY=FILE` or `MRA_REPLAY=embedded:ROUTE`, and `MRA_INTERP_BIOS=1` ([tools/replay/README.md](../tools/replay/README.md)). Results: [phase2-replay.md](research/phase2-replay.md).
 
 ### P2-03. Capture the same observations from both engines
 
@@ -286,7 +288,7 @@ Tests: `scripts/test-engine.sh`, `scripts/repro-test.sh`.
 
 *Depends on:* P2-01 (on PR #5's config a run of 2,716 frames or more aborts without it, diagnosis §1.3), P2-03 (per-frame captures) and P2-09 (its runner checks the result against mGBA). The patch can be written earlier. *Effort:* 0.5.
 
-Scope: patch 0007 (diagnosis §5.1) in both compositors and the wide margin path, with the semi-transparency flag, plus a synthetic PPU test: mode 0, one normal OBJ, BLDCNT=`0x0090`, BLDY=16, expect white.
+Scope: patch 0007 (diagnosis §5.1) in both compositors and the wide margin path, with the semi-transparency flag, plus a synthetic PPU test: mode 0, one normal OBJ, BLDCNT=`0x0090`, BLDY=16, expect white. P2-02 found the same bug on the game's own fades of `boot_to_race`, frames 2453-2481 and 3258-3289 (BLDCNT `0x00FF`; [phase2-replay.md](research/phase2-replay.md) §3), so the patch should change those frames too.
 
 Acceptance:
 
@@ -319,6 +321,7 @@ Scope:
 Acceptance:
 
 - On `boot_to_race` frames 1-3290, against mGBA with gbarecomp's interpreter, the runner reproduces the diagnosis. Frames 220-269 fail layer 2 (the OBJ 1st-target bug, diagnosis §5.1; P2-08 then shows they pass with patch 0007). The timing-shaped frames of diagnosis §5.4 fail layer 1 and are allowlisted with that cause. Everything else passes.
+  - P2-02's run of this route found more front-end frames that fail layer 2 ([phase2-replay.md](research/phase2-replay.md) §3): the same OBJ 1st-target bug on the game's fades, 2453-2481 and 3258-3289, and 2968-2973, which §5.4 lists as timing-shaped but whose line state is equal in both engines except on one line of 2972 (two OBJs overlap an affine BG there; cause **unverified**). This task classifies them.
 - A deliberately wrong replay offset makes the run fail.
 - The checkpoints of `boot_to_race` and `full_race_cross` hold on gbarecomp's interpreter. A replay with one menu input moved off its screen fails its checkpoint.
 - **RAM-hash equality is measured before it gates.** Every RAM-hash difference between the recompiled build and the reference, from P2-05's measurement and from a 3,600-frame boot without input, is either fixed as a bug or explained. If some state legitimately differs between backends at VBlank start (gbarecomp's own cross-backend hash excludes such bookkeeping, `COSIM_ORACLE.md:123-131`; whether any of it lives in guest RAM is **unverified**), the fallback is a named list of excluded regions, each with its cause, or a different sampling point. The list is the one exit criterion 2 uses.
