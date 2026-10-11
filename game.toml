@@ -36,6 +36,17 @@ entry_pc = 0x08000000
 # playbook option, into a separate output directory.
 speculative_literal_harvest = false
 codegen_shards = 16
+# A static entry (resume alias) at every instruction boundary inside each
+# emitted function (gbarecomp docs/TOML_SCHEMA.md). After every SWI gbarecomp
+# unwinds the host stack, so the guest's next `bx lr` or `pop {pc}` dispatches
+# a return address in the middle of a function; without resume entries each
+# one is a dispatch miss. On the previous config, 38 of the 44 ROM misses of a
+# 12,000-frame boot follow a `bl` (docs/research/phase2-dispatch-misses.md;
+# docs/research/phase2-diagnosis.md section 2.1). It needs gbarecomp patch
+# 0003: without the leak fix, resume entries make the IRQ call-return leak
+# more frequent (diagnosis section 2.1). Results:
+# docs/research/phase2-resume-roots.md.
+static_resume_all = true
 
 [identity]
 # shasum -a 1 / md5 -q of the dump. gba_recompile aborts on any other ROM.
@@ -67,6 +78,79 @@ sha1 = "b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0"
 # find no save chip. 32768 is the only size gbarecomp accepts for sram.
 type = "sram"
 size = 32768
+
+# --- The save library's routines in EWRAM -----------------------------------
+# The front end copies two Thumb routines of the save library from ROM to
+# EWRAM and calls them only there, through pointers (Phase 1 findings,
+# section 1: the ROM originals never execute). No other code runs at these
+# addresses. Evidence and the disassembly behind the notes:
+# docs/research/phase2-resume-roots.md, section 2.
+
+[[code_copy]]
+runtime_start = 0x0203D7D4
+source_start = 0x0801192C
+size = 0x34
+name = "sram_read_ewram"
+note = "ROM SHA-1 b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0. Save read routine. The installer at 0x080119D0 (Thumb) copies (0x08011961 - 0x0801192D) / 2 = 0x1A halfwords from 0x0801192C to 0x0203D7D4 (literals at 0x08011A44, 0x08011A48, 0x08011A4C) and stores 0x0203D7D5 to 0x02000BF4 (literal 0x08011A50). Read with llvm-objdump from the ROM file; Phase 1 section 1 found the same in Ghidra and in mGBA."
+
+[[code_copy]]
+runtime_start = 0x0203D734
+source_start = 0x08011994
+size = 0x3C
+name = "sram_verify_ewram"
+note = "ROM SHA-1 b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0. Save verify routine. The same installer copies (0x080119D1 - 0x08011995) / 2 = 0x1E halfwords from 0x08011994 to 0x0203D734 (literals at 0x08011A54, 0x08011A58, 0x08011A5C) and stores 0x0203D735 to 0x02000BF8. Read with llvm-objdump from the ROM file; Phase 1 section 1."
+
+[[extra_func]]
+addr = 0x0203D7D4
+mode = "thumb"
+note = "ROM SHA-1 b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0. Entry of the EWRAM save read routine (code_copy sram_read_ewram), Thumb: the installer stores 0x0203D7D5 (bit 0 set) as its pointer. Reached only through that pointer, which the finder cannot follow: the boot load at 0x08001E44-0x08001E5C loads it from 0x02000BF4 and calls it with mov lr, pc and bx r3 to read 3,280 bytes from 0x0E000000. mGBA harness --calls, boot_to_race: called once, at frame 596, from 0x08001E5C, in Thumb."
+
+[[extra_func]]
+addr = 0x0203D734
+mode = "thumb"
+note = "ROM SHA-1 b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0. Entry of the EWRAM save verify routine (code_copy sram_verify_ewram), Thumb: the installer stores 0x0203D735 as its pointer at 0x02000BF8. Reached only through it: the save writer 0x0800E50C loads it from 0x02000BF8 (literal 0x0800E730) at 0x0800E564 and calls it with mov lr, pc and bx r3 at 0x0800E570-0x0800E574. mGBA harness --calls, options_save: called once, at frame 3415, from 0x0800E574, in Thumb."
+
+# --- ROM roots reached only through the front end's IWRAM code --------------
+# The front end's IRQ dispatcher runs from IWRAM (0x03000708, ROM source
+# 0x08159E04) and ends with bx r0 to a slot of a 13-entry handler table at
+# IWRAM 0x030007B0. The game's code stores the handlers there, and the VBlank
+# handler calls 0x08004854, which tail-jumps through a function pointer. The
+# finder follows neither branch, and while the IWRAM image is not declared
+# (P2-10) the interpreter runs the dispatcher. Every store to the table found
+# in the ROM, and which handlers mGBA enters on boot_to_race, are in
+# docs/research/phase2-resume-roots.md, section 3. The VCount handler
+# 0x08002580 needs no seed: six direct bl calls reach it (0x08005858,
+# 0x08006378, 0x08007638, 0x080080C0, 0x08009BA0, 0x0800A298).
+
+[[extra_func]]
+addr = 0x0800255C
+mode = "arm"
+note = "ROM SHA-1 b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0. VBlank IRQ handler, slot 2 of the front end's IRQ table at IWRAM 0x030007B0. The setup function 0x080025B4 loads it from literal 0x08002694 and stores it at 0x08002600 (str r0, [r2, 8], r2 = 0x030007B0 from literal 0x0800268C); the IWRAM dispatcher (ROM source 0x08159E04-0x08159EA8) selects slot 2 for IE AND IF bit 0 and enters it with bx r0. mGBA harness --calls, boot_to_race to frame 4400: entered 2,992 times by bx from 0x030007AC, first at frame 295."
+
+[[extra_func]]
+addr = 0x080025B0
+mode = "arm"
+note = "ROM SHA-1 b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0. Empty IRQ handler (a single bx lr), the default of every slot of the front end's IRQ table: 0x080025B4 loads it from literal 0x08002690 and the loop at 0x080025E8-0x080025F4 stores it to all 13 slots of 0x030007B0; literals at 0x08001AFC, 0x08005A44, 0x08008234 and 0x08009D90 also hold it. The IWRAM dispatcher would enter it with bx r0 for an interrupt whose slot has no handler; mGBA IWRAM dumps at frames 600, 2000 and 3000 show it in every slot but 2 and 3 (diagnosis section 2.3). Not entered on boot_to_race, options_save or multiplayer_lobby in mGBA (harness --calls)."
+
+[[extra_func]]
+addr = 0x08004168
+mode = "arm"
+note = "ROM SHA-1 b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0. Reached only by a tail jump through a function pointer: 0x08004854 (called from the VBlank handler at 0x0800256C) loads [0x03000840 + 0x28] and ends with bx r0 at 0x0800485C. 0x08004168 is stored there at 0x08004218 and at 0x080045B0, both times from literal 0x08004A9C. mGBA harness --calls, boot_to_race to frame 4400: entered 2,992 times by bx from 0x0800485C, first at frame 295. With the VBlank handler native and this entry missing, the diagnosis saw it bridged once per frame and the call-return stack grow by one entry per frame (section 2.4)."
+
+[[extra_func]]
+addr = 0x0800596C
+mode = "arm"
+note = "ROM SHA-1 b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0. VCount IRQ handler of the main menu, slot 3 of the front end's IRQ table: the main-menu function 0x08005658 loads it from literal 0x08005A38 at 0x08005684 and stores it at 0x0800568C (str r0, [r2, 0xC], r2 = 0x030007B0 from literal 0x08005A3C); 0x08005934 puts 0x080025B0 back. mGBA harness --calls, boot_to_race to frame 4400: entered 1,040 times by bx from 0x030007AC, first at frame 2525. Without it, its return addresses 0x08005980 and 0x080059BC were dispatch misses on boot_to_race (docs/research/phase2-resume-roots.md)."
+
+[[extra_func]]
+addr = 0x0800814C
+mode = "arm"
+note = "ROM SHA-1 b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0. VCount IRQ handler of a front-end menu, slot 3 of the IRQ table: loaded from literal 0x08008220 at 0x08007E48 and stored at 0x08007E50 (str r1, [r2, 0xC], r2 = 0x030007B0 from literal 0x08008224); 0x0800811C puts 0x080025B0 back. mGBA harness --calls, boot_to_race to frame 4400: entered 1,160 times by bx from 0x030007AC, first at frame 2733. Without it, its return address 0x0800817C was a dispatch miss on boot_to_race."
+
+[[extra_func]]
+addr = 0x08009CAC
+mode = "arm"
+note = "ROM SHA-1 b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0. VCount IRQ handler of a front-end menu, slot 3 of the IRQ table: loaded from literal 0x08009D80 at 0x08009A34 and stored at 0x08009A3C (str r1, [r2, 0xC], r2 = 0x030007B0 from literal 0x08009D84); 0x08009C64 puts 0x080025B0 back. mGBA harness --calls, boot_to_race to frame 4400: entered 240 times by bx from 0x030007AC, first at frame 2484. Without it, its return addresses 0x08009CC0 and 0x08009CEC were dispatch misses on boot_to_race."
 
 # TODO(phase1): IWRAM code images. The game copies ARM code from ROM to IWRAM
 # 0x03000000 and runs most of a race from there (**unverified** here; it is
