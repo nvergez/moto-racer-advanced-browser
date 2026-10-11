@@ -178,6 +178,7 @@ The code that produced the Phase 1 evidence is this one minus the changes below.
 - `--wav` was silent: the empty config left mGBA's master volume at 0. The harness now sets it to full volume. Only audio changes, including the "rendered samples" field of savestates.
 - Range lists longer than 32 entries used to be truncated silently; they are now an error.
 - New `--save-type` and `--openbus` options, which reproduce two Phase 1 experiments: a missing or Flash/EEPROM save chip (the game shows "Error while saving"), and replacing the BIOS open-bus value (see the findings, section 6).
+- A script `end` before the `--frames` count used to hang the harness (the loop up to `--frames` never advanced once `end` had stopped the run). `end` now ends the run there. Runs that did not hang are unchanged.
 
 ### Pitfalls
 

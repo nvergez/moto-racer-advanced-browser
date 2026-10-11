@@ -1477,7 +1477,9 @@ int main(int argc, char** argv) {
 	clock_t t0 = clock();
 	if (opt.script) runScript(opt.script);
 	if (opt.frames >= 0) {
-		while (!frameLimitReached()) runFrames(1, heldKeys);
+		/* A script "end" stops the run even before --frames (runFrames does
+		 * nothing once stopRequested is set, so looping on would hang). */
+		while (!stopRequested && !frameLimitReached()) runFrames(1, heldKeys);
 	}
 	double secs = (double) (clock() - t0) / CLOCKS_PER_SEC;
 
