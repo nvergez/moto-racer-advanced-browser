@@ -109,6 +109,16 @@ class Decoding(unittest.TestCase):
         self.assertFalse(fst.effects(0xE129F000)[0])           # msr cpsr_fc, r0
         self.assertEqual(fst.effects(0xE4931004)[1], {1, 3})   # ldr r1, [r3], #4
 
+    def test_effects_halfword(self):
+        self.assertEqual(fst.effects(0xE1C010B0), (True, set(), False, False))  # strh r1, [r0]
+        self.assertEqual(fst.effects(0xE1D010B0), (True, {1}, False, False))    # ldrh r1, [r0]
+        self.assertEqual(fst.effects(0xE1D010F0), (True, {1}, False, False))    # ldrsh r1, [r0]
+        self.assertEqual(fst.effects(0xE0C010B2)[1], {0})                       # strh r1, [r0], #2
+        # L clear with SH 10 or 11: ldrd/strd on ARMv5TE, unpredictable on
+        # ARMv4T. Unknown, so the walk to the cmp stops there.
+        self.assertFalse(fst.effects(0xE1C020D0)[0])  # ldrd r2, [r0]
+        self.assertFalse(fst.effects(0xE1C020F0)[0])  # strd r2, [r0]
+
 
 class Scan(unittest.TestCase):
 
@@ -147,6 +157,7 @@ class Scan(unittest.TestCase):
             "branch": 0xE12FFF1E,
             "conditional": 0x03A03001,  # moveq r3, #1
             "unmodeled": 0xEF000005,     # swi
+            "ldrd": 0xE1C030D0,          # ldrd r3, [r0] on v5TE: writes r3 and r4
             "other cmp": cmp_imm(3, 1),
         }
         for name, w in cases.items():
@@ -262,14 +273,16 @@ class Scan(unittest.TestCase):
 
 class Output(unittest.TestCase):
     SHA1 = "0" * 40
+    COPY = ("img", 0x08000700, 0x200, 0x03000000)
 
-    def tables(self):
+    def tables(self, unsized=True):
         rom = Rom()
         rom.switch(0x08000100, rm=1, cases=3)
         rom.switch(0x08000200, rm=2, cases=2, between=(ldr_imm(0, 4),))
         rom.switch(0x08000800, rm=0, cases=2)  # in the copy below
-        rom.put(0x08000300, add_pc(3))         # unsized
-        return rom, scan(rom, [fst.Copy("img", 0x08000700, 0x200, 0x03000000)])
+        if unsized:
+            rom.put(0x08000300, add_pc(3))     # rejected: no cmp
+        return rom, scan(rom, [fst.Copy(*self.COPY)])
 
     def test_report(self):
         _, tables = self.tables()
@@ -307,52 +320,149 @@ class Output(unittest.TestCase):
             if not line.startswith("#"):
                 self.assertNotIn("#", line)
 
+    def test_toml_shows_rejected_rom_tables(self):
+        _, tables = self.tables()
+        text = self.toml(tables)
+        self.assertIn("2 tables in ROM code, 5 case slots;\n"
+                      "# 1 dispatchers in ROM code rejected, 0 tables flagged for review.", text)
+        self.assertIn("\n# REJECTED: the addls pc, pc, r3, lsl 2 at 0x08000300, no entries: no cmp", text)
+        # In address order, between the two tables.
+        self.assertLess(text.index("0x08000208"), text.index("REJECTED"))
+        self.assertNotIn("0x08000800", text)  # the table in the copy
+
+    def check(self, tables, body, copies=None):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "game.toml")
+            with open(path, "w") as f:
+                f.write(body)
+            out = io.StringIO()
+            copies = [fst.Copy(*self.COPY)] if copies is None else copies
+            return fst.check_config(tables, copies, self.SHA1, path, out), out.getvalue()
+
     def test_check_config(self):
         if sys.version_info < (3, 11):
             self.skipTest("needs tomllib")
-        _, tables = self.tables()
+        _, tables = self.tables(unsized=False)
+        text = "# A hand-written comment above the section.\n\n" + self.toml(tables) + "\n# After.\n"
+
+        ok, msg = self.check(tables, text)
+        self.assertTrue(ok, msg)
+        self.assertIn("ok: 5 candidate slots, 5 entries noted as case slots, "
+                      "0 rejected and 0 to review in ROM code, 0 problem(s)", msg)
+
+        # One slot left out.
+        cut = text.index("[[extra_func]]\naddr = 0x08000110")
+        nxt = text.index("[[extra_func]]", cut + 1)
+        ok, msg = self.check(tables, text[:cut] + text[nxt:])
+        self.assertFalse(ok)
+        self.assertIn("missing: no [[extra_func]] at case slot 0x08000110", msg)
+        self.assertIn("FAIL: ", msg)
+
+        # A slot declared in Thumb.
+        ok, msg = self.check(tables, text.replace('addr = 0x08000114\nmode = "arm"',
+                                                  'addr = 0x08000114\nmode = "thumb"'))
+        self.assertFalse(ok)
+        self.assertIn("0x08000114 is declared 1 time(s), as thumb", msg)
+
+        # An entry noted as a case slot that the scan does not find.
+        extra = ('\n[[extra_func]]\naddr = 0x08000400\nmode = "arm"\n'
+                 'note = "Case slot 0 of 1 of the armcc switch at 0x080003F8"\n')
+        ok, msg = self.check(tables, text + extra)
+        self.assertFalse(ok)
+        self.assertIn("extra: the note of 0x08000400", msg)
+
+    def test_check_config_notes_and_text(self):
+        if sys.version_info < (3, 11):
+            self.skipTest("needs tomllib")
+        _, tables = self.tables(unsized=False)
         text = self.toml(tables)
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "game.toml")
+        # A wrong b target, slot index or ROM SHA-1 in a note.
+        for old, new in (("the slot is b 0x0800021C", "the slot is b 0x08000220"),
+                         ("for index 0, and the slot is b 0x08000218",
+                          "for index 1, and the slot is b 0x08000218"),
+                         ("ROM SHA-1 %s. Case slot 0 of 2" % self.SHA1,
+                          "ROM SHA-1 %s. Case slot 0 of 2" % ("1" * 40))):
+            with self.subTest(old):
+                self.assertIn(old, text)
+                ok, msg = self.check(tables, text.replace(old, new, 1))
+                self.assertFalse(ok)
+                self.assertRegex(msg, r"note: the note of case slot 0x080002\d\w is not the one --toml writes")
+        # Entries right, a generated comment edited.
+        self.assertIn("# Switch at 0x08000104", text)
+        ok, msg = self.check(tables, text.replace("# Switch at 0x08000104", "# switch at 0x08000104"))
+        self.assertFalse(ok)
+        self.assertIn("verbatim: ", msg)
+        self.assertNotIn("note: ", msg)
 
-            def check(body):
-                with open(path, "w") as f:
-                    f.write(body)
-                out = io.StringIO()
-                return fst.check_config(tables, path, out), out.getvalue()
+    def test_check_config_malformed_entries(self):
+        if sys.version_info < (3, 11):
+            self.skipTest("needs tomllib")
+        _, tables = self.tables(unsized=False)
+        text = self.toml(tables)
+        for extra, want in (('addr = 0x08000400\nnote = 5\n', "number 6 (addr 0x08000400)"),
+                            ('addr = "0x08000400"\n', "number 6 (addr '0x08000400') has an addr of type str")):
+            with self.subTest(extra):
+                ok, msg = self.check(tables, text + "\n[[extra_func]]\n" + extra)
+                self.assertFalse(ok)
+                self.assertIn("malformed: [[extra_func]] " + want, msg)
 
-            ok, msg = check(text)
-            self.assertTrue(ok, msg)
-            self.assertIn("ok: 5 candidate slots, 5 entries noted as case slots", msg)
+    def test_check_config_code_copies(self):
+        if sys.version_info < (3, 11):
+            self.skipTest("needs tomllib")
+        _, tables = self.tables(unsized=False)
+        text = self.toml(tables)
 
-            # One slot left out.
-            cut = text.index("[[extra_func]]\naddr = 0x08000110")
-            nxt = text.index("[[extra_func]]", cut + 1)
-            ok, msg = check(text[:cut] + text[nxt:])
-            self.assertFalse(ok)
-            self.assertIn("missing: no [[extra_func]] at case slot 0x08000110", msg)
+        def copy(name, source, size, runtime):
+            return ('\n[[code_copy]]\nname = "%s"\nsource_start = 0x%X\nsize = 0x%X\n'
+                    'runtime_start = 0x%X\n' % (name, source, size, runtime))
 
-            # A slot declared in Thumb.
-            ok, msg = check(text.replace('addr = 0x08000114\nmode = "arm"',
-                                         'addr = 0x08000114\nmode = "thumb"'))
-            self.assertFalse(ok)
-            self.assertIn("0x08000114 is declared 1 time(s), as thumb", msg)
+        ok, msg = self.check(tables, text + copy(*self.COPY))
+        self.assertTrue(ok, msg)
+        # The same range under another name is the same copy.
+        ok, msg = self.check(tables, text + copy("other", *self.COPY[1:]))
+        self.assertTrue(ok, msg)
+        ok, msg = self.check(tables, text + copy("img", 0x08000700, 0x180, 0x03000000))
+        self.assertFalse(ok)
+        self.assertIn("copy: [[code_copy]] img is source 0x08000700, size 0x180, runtime 0x03000000 "
+                      "in ", msg)
+        self.assertIn("but source 0x08000700, size 0x200, runtime 0x03000000 in the scan", msg)
+        ok, msg = self.check(tables, text + copy("new", 0x08000900, 0x10, 0x02000000))
+        self.assertFalse(ok)
+        self.assertIn("'new' (source 0x08000900, size 0x10, runtime 0x02000000) is not one of "
+                      "the scan's copies: pass --copy NAME=0x08000900,0x10,0x02000000", msg)
 
-            # An entry noted as a case slot that the scan does not find.
-            extra = ('\n[[extra_func]]\naddr = 0x08000400\nmode = "arm"\n'
-                     'note = "Case slot 0 of 1 of the armcc switch at 0x080003F8"\n')
-            ok, msg = check(text + extra)
-            self.assertFalse(ok)
-            self.assertIn("extra: the note of 0x08000400", msg)
+    def test_check_config_rejected_and_review(self):
+        if sys.version_info < (3, 11):
+            self.skipTest("needs tomllib")
+        _, tables = self.tables()
+        ok, msg = self.check(tables, self.toml(tables))
+        self.assertFalse(ok)
+        self.assertIn("rejected: the addls pc, pc, r3, lsl 2 at 0x08000300: no cmp", msg)
+        self.assertIn("FAIL: 5 candidate slots, 5 entries noted as case slots, "
+                      "1 rejected and 0 to review in ROM code, 1 problem(s)", msg)
+
+        rom = Rom()
+        disp = rom.switch(0x08000100, rm=1, cases=3)
+        rom.put(disp + 8 + 12, b(disp + 20, 0x08000300))  # a b after the last slot
+        tables = scan(rom)
+        ok, msg = self.check(tables, self.toml(tables), copies=[])
+        self.assertFalse(ok)
+        self.assertIn("review: the switch at 0x%08X: the word after the last slot" % disp, msg)
+        self.assertIn("0 rejected and 1 to review in ROM code", msg)
 
 
 class Command(unittest.TestCase):
 
-    def run_main(self, rom_bytes, *args):
+    def run_main(self, rom_bytes, *args, config=None):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "rom.gba")
             with open(path, "wb") as f:
                 f.write(rom_bytes)
+            if config is not None:
+                cfg = os.path.join(d, "game.toml")
+                with open(cfg, "w") as f:
+                    f.write(config)
+                args = args + ("--check-config", cfg)
             out, err = io.StringIO(), io.StringIO()
             old = sys.stdout, sys.stderr
             sys.stdout, sys.stderr = out, err
@@ -361,6 +471,40 @@ class Command(unittest.TestCase):
             finally:
                 sys.stdout, sys.stderr = old
             return rc, out.getvalue(), err.getvalue()
+
+    def test_check_config_exit_codes(self):
+        if sys.version_info < (3, 11):
+            self.skipTest("needs tomllib")
+        rom = Rom()
+        rom.switch(0x08000100, rm=1, cases=2)
+        rc, toml, _ = self.run_main(rom.bytes(), "--toml")
+        self.assertEqual(rc, 0)
+        rc, out, _ = self.run_main(rom.bytes(), config=toml)
+        self.assertEqual(rc, 0, out)
+        # A finding is 1, also for an entry of the wrong type.
+        rc, out, err = self.run_main(rom.bytes(), config=toml + "\n[[extra_func]]\naddr = 1\nnote = 5\n")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("malformed", out)
+        self.assertNotIn("Traceback", err)
+        # A file the check cannot use is 2.
+        rc, _, err = self.run_main(rom.bytes(), config="extra_func = [")
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot read", err)
+
+    def test_unexpected_error_is_exit_2(self):
+        rom = Rom()
+        old = fst.scan
+
+        def broken(*args):
+            raise RuntimeError("boom")
+
+        fst.scan = broken
+        try:
+            rc, _, err = self.run_main(rom.bytes())
+        finally:
+            fst.scan = old
+        self.assertEqual(rc, 2)
+        self.assertIn("RuntimeError: boom", err)
 
     def test_unpinned_rom_warns_and_takes_copies(self):
         rom = Rom()

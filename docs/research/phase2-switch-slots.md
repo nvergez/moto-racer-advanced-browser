@@ -37,6 +37,8 @@ gbarecomp's finder treats the `addls` as an indirect branch it cannot resolve: i
 
 `tools/seeds/find_switch_tables.py` ([README](../../tools/seeds/README.md); the checks are listed at its top) takes every 4-byte aligned word of the ROM that encodes `add<cond> pc, pc, rM, lsl #2`, walks back to the `cmp rM, #imm` that bounds it, and keeps the table only if the default slot and every case slot is an unconditional `b` into the same region. Between the `cmp` and the dispatcher it allows at most 15 unconditional instructions that write neither `rM` nor the flags and do not branch. It classifies tables by region, with the four code copies of [phase1-findings.md](phase1-findings.md) section 4 built in for this ROM, and reports, without rejecting, any `b` or `bl` in the ROM that lands between a `cmp` and its dispatcher, and any `b` right after a table's last slot. Its unit tests (`tools/seeds/tests`, run in CI) use hand-encoded ARM words only.
 
+`--toml` prints the candidates under a generated header, one comment per table, and a `# REJECTED:` comment for any dispatcher in ROM code that fails the checks. In `game.toml` everything from that header to the section's last entry is the `--toml` output byte for byte, below a hand-written introduction. `--check-config game.toml` holds the section to that: an ARM `[[extra_func]]` at every candidate slot, with exactly the note `--toml` writes for it (so the ROM SHA-1, the slot index and the `b` target are checked); no other entry whose note calls it a case slot; the generated part verbatim; every `[[code_copy]]` of `game.toml` one of the scanner's copies; and no dispatcher in ROM code rejected or flagged for review. It exits 1 on any finding and 2 when it cannot run.
+
 `python3 -I tools/seeds/find_switch_tables.py roms/moto-racer-advance.gba` finds 20 dispatchers, all `addls`, none rejected and none flagged for review: Phase 1's count of `addls pc` switches ([phase1-findings.md](phase1-findings.md) section 3) and the diagnosis's 16 tables with 239 slots in ROM code plus 4 in the race image (§2.2).
 
 | Dispatcher | Program | `cmp` | Cases | Case slots | Default target | Distinct case targets |
@@ -72,7 +74,7 @@ The `cmp` is right before the dispatcher in 17 tables. In the other three it is 
 
 **Against the prototype.** The runtime-bugs prototype's configuration (`configs/c2.toml` of the diagnosis's scratch directory) has 239 `[[extra_func]]` case slots for the same 16 dispatchers with the same case counts; the diagnosis measured that configuration (§2.2).
 
-**What mGBA executes.** mGBA coverage on every route of the manifest that starts from a fresh save (`boot_to_race`, `options_save`, `multiplayer_lobby`, `full_race_cross`, `race_gp`, `race_traffic`, `abort_race`, `restart_race`, `two_races` and `cup`, 63,542 frames) executes 7 of the 16 ROM dispatchers and 12 of the 239 slots:
+**What mGBA executes.** mGBA coverage on every route of the manifest that starts from a fresh save (`boot_to_race`, `options_save`, `multiplayer_lobby`, `full_race_cross`, `race_gp`, `race_traffic`, `abort_race`, `restart_race`, `two_races` and `cup`, 129,538 frames in all, 63,542 of them on `cup`) executes 7 of the 16 ROM dispatchers and 12 of the 239 slots:
 
 | Dispatcher | Slots executed (case index) | Routes |
 |---|---|---|
