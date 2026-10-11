@@ -1,0 +1,54 @@
+Let IRQ handlers run to their iret after a present-in-place quit.
+
+Headless present-in-place sets the sticky g_frame_present_quit at the first
+eligible VBlank after --frames. From then on runtime_should_yield() returns
+true at every generated instruction, including inside an IRQ handler: the
+quit check has no IRQ-depth guard, while the VBlank yield right below it
+has one (g_irq_nest_depth == 0). An IRQ that arrives after the quit
+dispatches the BIOS vector 0x18, the generated code yields at its first
+instruction, and runtime_irq()'s drive loop re-dispatches it until its
+watchdog gives up: "runtime_irq: handler at depth 1 did not iret after
+4000000 dispatches (R15=0x00000018, ...) -- abandoning". IRQs keep arriving
+after the quit only while an interpreter bridge is still running and
+ticking the clock, so the number of messages is the number of IRQs between
+the quit and the end of that bridge.
+
+Fix: apply the same guard to the quit check. The handler runs to its iret,
+and the mainline yields at its next generated instruction, as it does for
+the VBlank yield. The quit is only ever set at IRQ depth 0, so no other
+path changes.
+
+Tested on macOS arm64 (Apple clang 21) at gbarecomp 5e89943 plus this
+series: gbarecomp's ctest, 52 of 52. On a commercial game whose runs end
+while a long interpreter bridge runs (headless, healing off), runs of
+3,600 and 12,000 frames printed the watchdog message 80 and 772 times
+without this patch, and none with it; runs of 2,700 and 5,400 frames print
+none with it either. With and without the patch, the 12,000-frame run
+exits 0 at the same frame, 12,385 (the bridge ends 385 frames after the
+quit), and the 3,600-frame run at 3,644.
+
+Apply it together with the call-return leak fix (0003 in this series). In
+the game above, without that fix, an IRQ handler abandoned after the quit
+was what ended a mis-stopped bridge: the bridge's stop PC is only reached
+when that handler's code is interpreted. With this patch alone the handler
+runs natively, the bridge never stops, and the 2,700-frame run aborts at
+the 200M-instruction cap instead of stopping at frame 2,706.
+
+diff --git a/src/runtime/runtime_bus_bridge.cpp b/src/runtime/runtime_bus_bridge.cpp
+index 044fc13..efd5af1 100644
+--- a/src/runtime/runtime_bus_bridge.cpp
++++ b/src/runtime/runtime_bus_bridge.cpp
+@@ -1032,7 +1032,12 @@ extern "C" bool runtime_should_yield(void) {
+     }
+ 
+     // Present-in-place quit: fully unwind the guest to the runner once requested.
+-    if (g_frame_present_quit) return true;
++    // Not while an IRQ handler is on the host stack: runtime_irq() drives it to
++    // its iret, so a yield at every instruction would spin its loop to the
++    // 4,000,000-dispatch watchdog and abandon the interrupt. The handler runs
++    // to its iret, and the mainline yields at its next instruction instead.
++    // Same guard as the VBlank yield below.
++    if (g_frame_present_quit && g_irq_nest_depth == 0u) return true;
+ 
+     bool halted = bus && bus->io().halted();
+ 
