@@ -51,8 +51,9 @@ series, arm-recomp-core 1f13cdf plus its half:
 
 - gbarecomp's ctest, 52 of 52 (with the gba-tests test ROMs), including
   codegen_tests and the new interpreter_smoke case. Removing the reset
-  from runtime_refill_cycles makes codegen_tests fail on arm_pop_r4_pc,
-  arm_ldmia_pc_computed, arm_ldmia_empty_wb and thumb_pop_r4_pc.
+  from runtime_refill_cycles makes codegen_tests fail on its 14 cases
+  whose PC write is known only at run time (BX, MOV and ADD to PC, POP and
+  LDM with PC).
 - A synthetic 4 KiB ROM (no Nintendo data, header logo zero), prefetch1,
   times three loops of 64 stores to EWRAM from the cartridge with WAITCNT
   0x4317, between two timer 0 reads at F/1: the loop above, the same loop

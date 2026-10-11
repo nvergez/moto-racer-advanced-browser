@@ -47,9 +47,9 @@ The two halves of the prefetch fix depend on each other: `0011` overrides a virt
 
 | Removed | Fails |
 |---|---|
-| the interpreter's call (`if (wrote_pc) bus.prefetch_reset();`) | `interpreter_smoke` (`prefetch_reset_on_pc_write: b reset the buffer 0 time(s) (expected 1)`, and the other PC writes) |
-| the codegen's reset after a static refill | `codegen_tests`: `arm_b_forward`, `arm_bl`, `arm_b_backward`, `thumb_beq_taken` |
-| the reset in `runtime_refill_cycles` | `codegen_tests`: `arm_pop_r4_pc`, `arm_ldmia_pc_computed`, `arm_ldmia_empty_wb`, `thumb_pop_r4_pc` |
+| the interpreter's call (`if (wrote_pc) bus.prefetch_reset();`) | `interpreter_smoke` on every kind of PC write (`prefetch_reset_on_pc_write: b reset the buffer 0 time(s) (expected 1)`, ...), and `codegen_tests` on its 18 PC-writing cases (26 of 131 runs) |
+| the codegen's reset after a static refill | `codegen_tests` on the 4 static branches: `arm_b_forward`, `arm_bl`, `arm_b_backward`, `thumb_beq_taken` (4 of 131 runs) |
+| the reset in `runtime_refill_cycles` | `codegen_tests` on the 14 PC writes known only at run time: BX (`arm_bx_to_arm`, `arm_bx_to_thumb`, `arm_bx_lr_to_thumb_sets_t`, `thumb_bx_lr_to_arm_clears_t`), MOV and ADD to PC (`arm_mov_pc_lr`, `arm_mov_pc_reg_shift`, `thumb_mov_pc_clears_bit0`, `arm_add_pc_imm`, `arm_add_pc_pc_r0`, `arm_add_pc_pc_r0_lsl2`), POP and LDM with PC (`arm_pop_r4_pc`, `thumb_pop_r4_pc`, `arm_ldmia_pc_computed`, `arm_ldmia_empty_wb`) (22 of 131 runs) |
 
 `scripts/repro-test.sh` ([tests/repro/README.md](../../tests/repro/README.md), "CPU timing against mGBA"), each case on generated code (`GBARECOMP_STRICT_STATIC=1`, fully static) and on the interpreter with the BIOS interpreted too; mGBA's values from the harness on the same ROM and BIOS image (`--skip-bios`):
 

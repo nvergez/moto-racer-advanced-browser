@@ -51,10 +51,11 @@ gbarecomp 5e89943 with its runtime half:
   checks that prefetch_reset runs once after each kind of PC write and
   never otherwise (mov, cmp, str, a branch not taken).
 - Mutations: without the interpreter's call, interpreter_smoke fails on
-  every PC write; without the codegen's reset, codegen_tests fails on
-  arm_b_forward, arm_bl, arm_b_backward and thumb_beq_taken; without the
-  runtime_refill_cycles reset, on arm_pop_r4_pc, arm_ldmia_pc_computed,
-  arm_ldmia_empty_wb and thumb_pop_r4_pc.
+  every kind of PC write and codegen_tests on its 18 PC-writing cases;
+  without the codegen's reset, codegen_tests fails on the 4 static
+  branches (arm_b_forward, arm_bl, arm_b_backward, thumb_beq_taken);
+  without the runtime_refill_cycles reset, on the 14 PC writes known only
+  at run time (BX, MOV and ADD to PC, POP and LDM with PC).
 - A synthetic 4 KiB ROM (no Nintendo data, header logo zero), prefetch1,
   times three loops of 64 stores to EWRAM from the cartridge with WAITCNT
   0x4317, each between two timer 0 reads at F/1: the loop above, the same
