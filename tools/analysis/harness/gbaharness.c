@@ -1,7 +1,8 @@
 /*
  * gbaharness: headless, deterministic GBA run harness built on libmgba 0.10.5.
  *
- * Boots a ROM through a real BIOS image (no HLE BIOS, no BIOS skip), feeds a
+ * Boots a ROM through a real BIOS image (no HLE BIOS; the BIOS boot is skipped
+ * only with --skip-bios, and the image still handles SWIs and IRQs), feeds a
  * scripted input sequence, and writes state dumps, traces and logs.
  * See ../README.md for usage. Contains no game data: the ROM and BIOS are
  * supplied at run time with --rom and --bios.
@@ -106,6 +107,12 @@ static struct {
 	bool openbusOn;      /* --openbus: replace the BIOS open-bus value game code reads */
 	uint32_t openbus;
 	const char* saveType; /* --save-type: force the cartridge backup type */
+	bool skipBios;        /* --skip-bios: start at the cartridge entry with the loaded BIOS in place */
+	bool dumpPcOn;        /* --dump-at-pc: full dump the first time execution reaches dumpPc */
+	uint32_t dumpPc;
+	bool logBiosReads;    /* --log-bios-reads: game-code loads from 0x0-0x3FFF -> biosreads.tsv */
+	bool traceRam;        /* --trace-ram: IWRAM and EWRAM CRC32 columns in trace.tsv */
+	bool swiCycles;       /* --swi-cycles: cycles from each SWI to its return -> swicycles.tsv (stepping) */
 } opt = {
 	.frames = -1,
 	.dumpVcount = -1,
@@ -136,6 +143,25 @@ static long nWriteLines;
 static long nPcLines;
 static long logCounts[8];
 static uint64_t openbusHits;
+static FILE* fBiosReads;
+static FILE* fSwiCycles;
+/* --swi-cycles: SWIs waiting for their return, innermost last (an IRQ handler
+ * can issue a SWI while another one is in progress). */
+typedef struct {
+	uint32_t ret;   /* caller's next instruction */
+	bool thumb;     /* caller's mode */
+	uint32_t start; /* mTimingCurrentTime at the SWI instruction, as uint32_t: it wraps
+	                 * past INT32_MAX 2^31 cycles (about frame 7,645) into a run */
+	uint32_t frame, pc;
+	int vcount, num;
+	uint32_t r[4];
+} PendingSwi;
+static PendingSwi swiStack[16];
+static int swiDepth;
+static bool swiStepping; /* the current frame is stepped, so returns can be seen */
+static uint64_t biosReadsTotal;
+static long nBiosReadLines;
+static bool dumpPcDone;
 
 /* Per-frame write statistics (bytes). */
 enum { WS_VRAM0, WS_VRAM1, WS_VRAM2, WS_VRAM3, WS_VRAM4, WS_VRAM5, WS_PAL, WS_OAM, WS_EWRAM, WS_IWRAM, WS_IO, WS_COUNT };
@@ -721,8 +747,12 @@ static void onLoad(uint32_t addr, int size, uint32_t value) {
  * To see how the game reacts to another BIOS image, swap that latch for the
  * override around the original load, so mGBA's own size and rotation logic
  * still applies. DMA reads are left alone. */
+static bool gameBiosLoad(uint32_t address) {
+	return address < 0x4000 && gba->memory.activeRegion != REGION_BIOS && !gba->performingDMA;
+}
+
 static bool isGameBiosLoad(uint32_t address) {
-	return opt.openbusOn && address < 0x4000 && gba->memory.activeRegion != REGION_BIOS && !gba->performingDMA;
+	return opt.openbusOn && gameBiosLoad(address);
 }
 
 #define OPENBUS_WRAP(call) \
@@ -738,10 +768,35 @@ static bool isGameBiosLoad(uint32_t address) {
 		} \
 	} while (0)
 
+/* --log-bios-reads: one row per load from the BIOS region (0x0-0x3FFF) by code
+ * running outside the BIOS, with the value the game got (the open-bus latch of
+ * whichever BIOS image is loaded, or the --openbus override). DMA reads are not
+ * logged. size is 1, 2 or 4; an LDM is logged once with size 4*N and value "-". */
+static void logBiosRead(uint32_t address, int size, uint32_t value, bool multiple) {
+	if (!fBiosReads || !gameBiosLoad(address)) return;
+	biosReadsTotal++;
+	if (nBiosReadLines >= opt.watchMax) {
+		if (nBiosReadLines == opt.watchMax) fprintf(fBiosReads, "# truncated at --watch-max\n");
+		nBiosReadLines++;
+		return;
+	}
+	nBiosReadLines++;
+	char ctx[32] = "-";
+	if (lastSwi >= 0) snprintf(ctx, sizeof(ctx), "swi%02X@%08X", lastSwi, lastSwiPc);
+	fprintf(fBiosReads, "%u\t%d\t%08X\t%c\t%08X\t%s\t%08X\t%d\t", curFrame() + 1, gba->video.vcount, execPc(),
+	        cpu->executionMode == MODE_THUMB ? 'T' : 'A', cpu->gprs[ARM_LR], ctx, address, size);
+	if (multiple) {
+		fprintf(fBiosReads, "-\n");
+	} else {
+		fprintf(fBiosReads, "%0*X\n", size * 2, value & (size == 4 ? 0xFFFFFFFFu : size == 2 ? 0xFFFFu : 0xFFu));
+	}
+}
+
 static uint32_t hLoad32(struct ARMCore* c, uint32_t address, int* cc) {
 	uint32_t v;
 	OPENBUS_WRAP(origLoad32(c, address, cc));
 	if (opt.nWatchRead) onLoad(address & ~3u, 4, v);
+	if (opt.logBiosReads) logBiosRead(address, 4, v, false);
 	return v;
 }
 
@@ -749,6 +804,7 @@ static uint32_t hLoad16(struct ARMCore* c, uint32_t address, int* cc) {
 	uint32_t v;
 	OPENBUS_WRAP(origLoad16(c, address, cc));
 	if (opt.nWatchRead) onLoad(address & ~1u, 2, v);
+	if (opt.logBiosReads) logBiosRead(address, 2, v, false);
 	return v;
 }
 
@@ -756,6 +812,7 @@ static uint32_t hLoad8(struct ARMCore* c, uint32_t address, int* cc) {
 	uint32_t v;
 	OPENBUS_WRAP(origLoad8(c, address, cc));
 	if (opt.nWatchRead) onLoad(address, 1, v);
+	if (opt.logBiosReads) logBiosRead(address, 1, v, false);
 	return v;
 }
 
@@ -772,6 +829,7 @@ static uint32_t hLoadMultiple(struct ARMCore* c, uint32_t address, int mask, enu
 		int n = mask ? popcount32(mask) : 1;
 		for (int i = 0; i < n; ++i) onLoad(a + 4 * i, 4, peek(a + 4 * i, 4)); /* value = memory content */
 	}
+	if (opt.logBiosReads) logBiosRead(address, 4 * (mask ? popcount32(mask) : 1), 0, true);
 	uint32_t v;
 	OPENBUS_WRAP(origLoadMultiple(c, address, mask, direction, cc));
 	return v;
@@ -807,6 +865,18 @@ static void logSwi(int num, uint32_t pc) {
 	lastSwi = num;
 	lastSwiPc = pc;
 	swiCounts[num & 0xFF]++;
+	if (fSwiCycles && swiStepping && swiDepth < (int) (sizeof(swiStack) / sizeof(swiStack[0]))) {
+		bool thumb = cpu->executionMode == MODE_THUMB;
+		PendingSwi* p = &swiStack[swiDepth++];
+		p->ret = pc + (thumb ? 2 : 4);
+		p->thumb = thumb;
+		p->start = (uint32_t) mTimingCurrentTime(&gba->timing);
+		p->frame = curFrame() + 1;
+		p->vcount = gba->video.vcount;
+		p->pc = pc;
+		p->num = num & 0xFF;
+		for (int i = 0; i < 4; ++i) p->r[i] = cpu->gprs[i];
+	}
 	if (fSwi) {
 		fprintf(fSwi, "%u\t%d\t%08X\t%c\t%02X\t%s\t%08X\t%08X\t%08X\t%08X\t%08X\n", curFrame() + 1, gba->video.vcount, pc,
 		        cpu->executionMode == MODE_THUMB ? 'T' : 'A', num & 0xFF, (num & 0xFF) < 0x2B ? SWI_NAMES[num & 0xFF] : "?",
@@ -832,7 +902,9 @@ static bool stepActive(uint32_t frame) {
 	bool pc = opt.nPc && inStep;
 	bool lines = opt.nLines && inRanges(opt.lines, opt.nLines, frame);
 	bool vdump = opt.dumpVcount >= 0 && opt.nDumpAt && inRanges(opt.dumpAt, opt.nDumpAt, frame);
-	return cov || pc || lines || vdump;
+	bool pcdump = opt.dumpPcOn && !dumpPcDone;
+	bool swic = opt.swiCycles && inStep;
+	return cov || pc || lines || vdump || pcdump || swic;
 }
 
 /* Dynamic call-target detection (stepping mode). Open-addressing hash tables. */
@@ -967,6 +1039,18 @@ static void runFrameStepping(void) {
 		}
 		uint32_t pc = nextPc();
 		bool thumb = cpu->executionMode == MODE_THUMB;
+		if (swiDepth && pc == swiStack[swiDepth - 1].ret && thumb == swiStack[swiDepth - 1].thumb) {
+			PendingSwi* p = &swiStack[--swiDepth];
+			fprintf(fSwiCycles, "%u\t%d\t%08X\t%c\t%02X\t%s\t%08X\t%08X\t%08X\t%08X\t%u\n", p->frame, p->vcount, p->pc,
+			        p->thumb ? 'T' : 'A', p->num, p->num < 0x2B ? SWI_NAMES[p->num] : "?", p->r[0], p->r[1], p->r[2], p->r[3],
+			        (uint32_t) mTimingCurrentTime(&gba->timing) - p->start); /* unsigned: defined across the wrap */
+		}
+		if (opt.dumpPcOn && !dumpPcDone && pc == opt.dumpPc) {
+			char label[32];
+			snprintf(label, sizeof(label), "pc%08X", pc);
+			dumpStateAt(label, frame, gba->video.vcount);
+			dumpPcDone = true;
+		}
 		if (cov) covRecord(pc, thumb);
 		if (pcOn && inRanges(opt.pc, opt.nPc, pc) && nPcLines < opt.pcMax) {
 			nPcLines++;
@@ -1051,6 +1135,7 @@ static void traceHeader(void) {
 	fprintf(fTrace, "\tvramw_dma");
 	for (int i = 0; i < opt.nTraceIo; ++i) fprintf(fTrace, "\t%s", opt.traceIo[i]);
 	for (int i = 0; i < opt.nTraceMem; ++i) fprintf(fTrace, "\tmem_%08X", opt.traceMem[i].lo);
+	if (opt.traceRam) fprintf(fTrace, "\tcrc_iwram_0000_6FFF\tcrc_iwram_7000_7FFF\tcrc_ewram");
 	fprintf(fTrace, "\n");
 }
 
@@ -1081,6 +1166,13 @@ static void traceRow(uint32_t keys) {
 	for (int i = 0; i < opt.nTraceMem; ++i) {
 		int sz = (int) opt.traceMem[i].hi;
 		fprintf(fTrace, "\t%0*X", sz * 2, peek(opt.traceMem[i].lo, sz));
+	}
+	if (opt.traceRam) {
+		/* IWRAM split at 0x03007000: the top 4 KiB hold the stacks and the BIOS
+		 * words, which differ with IRQ timing alone (phase1-findings.md, section 6). */
+		uint8_t* iw = (uint8_t*) gba->memory.iwram;
+		fprintf(fTrace, "\t%08X\t%08X\t%08X", crcRange(iw, 0x7000), crcRange(iw + 0x7000, 0x1000),
+		        crcRange(gba->memory.wram, 0x40000));
 	}
 	fprintf(fTrace, "\n");
 }
@@ -1128,8 +1220,12 @@ static void runFrames(long n, uint32_t keys) {
 		core->setKeys(core, keys);
 		lastKeys = keys;
 		if (stepActive(curFrame() + 1)) {
+			swiStepping = true;
 			runFrameStepping();
 		} else {
+			/* SWIs that started in a stepped frame cannot be timed any more. */
+			swiStepping = false;
+			swiDepth = 0;
 			core->runFrame(core);
 		}
 		afterFrame(keys);
@@ -1276,6 +1372,15 @@ static void usage(void) {
 	        "                       (default: mGBA autodetect on first access)\n"
 	        "  --openbus VALUE      game-code loads from the BIOS region (0x0-0x3FFF) see VALUE instead of\n"
 	        "                       the open-bus latch the real BIOS left (A/B tests for other BIOS images)\n"
+	        "  --log-bios-reads     log game-code loads from the BIOS region and the value read -> biosreads.tsv\n"
+	        "                       (capped by --watch-max)\n"
+	        "  --skip-bios          skip the BIOS boot: start at the cartridge entry (mGBA skipBios) with the\n"
+	        "                       loaded BIOS image still handling SWIs and IRQs\n"
+	        "  --dump-at-pc ADDR    full dump the first time execution reaches ADDR (stepping until then),\n"
+	        "                       e.g. 0x08000000 for the BIOS-to-cartridge handoff\n"
+	        "  --trace-ram          add IWRAM and EWRAM CRC32 columns to trace.tsv\n"
+	        "  --swi-cycles         cycles from each SWI instruction to its return to the caller (IRQs taken\n"
+	        "                       in between included) -> swicycles.tsv; steps every frame (or --step-frames)\n"
 	        "  --log-level MASK     mGBA log mask (default 0x7 = fatal|error|warn; 0x7F all incl. debug)\n"
 	        "  --quiet\n");
 	exit(2);
@@ -1297,6 +1402,9 @@ int main(int argc, char** argv) {
 		{ "load-state", required_argument, 0, 'l' }, { "idle", required_argument, 0, 'y' },
 		{ "log-level", required_argument, 0, 'g' }, { "quiet", no_argument, 0, 'q' },
 		{ "save-type", required_argument, 0, 'T' }, { "openbus", required_argument, 0, 'O' },
+		{ "log-bios-reads", no_argument, 0, 'B' }, { "skip-bios", no_argument, 0, 'k' },
+		{ "dump-at-pc", required_argument, 0, 'D' }, { "trace-ram", no_argument, 0, 'm' },
+		{ "swi-cycles", no_argument, 0, 'Y' },
 		{ "help", no_argument, 0, 'h' }, { 0, 0, 0, 0 },
 	};
 	int ch;
@@ -1352,6 +1460,11 @@ int main(int argc, char** argv) {
 		case 'q': opt.quiet = true; break;
 		case 'T': opt.saveType = optarg; break;
 		case 'O': opt.openbusOn = true; opt.openbus = parseNum(optarg); break;
+		case 'B': opt.logBiosReads = true; break;
+		case 'k': opt.skipBios = true; break;
+		case 'D': opt.dumpPcOn = true; opt.dumpPc = parseNum(optarg); break;
+		case 'm': opt.traceRam = true; break;
+		case 'Y': opt.swiCycles = true; break;
 		default: usage();
 		}
 	}
@@ -1365,7 +1478,10 @@ int main(int argc, char** argv) {
 	mCoreInitConfig(core, NULL); /* empty config: the user's mGBA config.ini is NOT read */
 	mCoreConfigSetValue(&core->config, "idleOptimization", opt.idle);
 	mCoreConfigSetIntValue(&core->config, "useBios", 1);
-	mCoreConfigSetIntValue(&core->config, "skipBios", 0);
+	/* --skip-bios: GBASkipBIOS jumps to 0x08000000 and sets VCOUNT=0x7E and
+	 * POSTFLG=1 whatever BIOS is loaded (mGBA 0.10.5 src/gba/gba.c GBASkipBIOS);
+	 * the BIOS image stays mapped and handles every SWI and IRQ. */
+	mCoreConfigSetIntValue(&core->config, "skipBios", opt.skipBios ? 1 : 0);
 	/* With an empty config opts.volume is 0, which sets mGBA's masterVolume to 0
 	 * and makes --wav output silent. 0x100 is mGBA's full volume. Audio output
 	 * only; emulation is unaffected. */
@@ -1411,7 +1527,8 @@ int main(int argc, char** argv) {
 	core->reset(core);
 	if (!gba->memory.fullBios || !gba->biosVf) die("real BIOS not active after reset");
 	uint32_t resetPc = nextPc();
-	if (!opt.loadState && resetPc >= 0x4000) die("BIOS was skipped (PC=0x%08X after reset)", resetPc);
+	if (!opt.loadState && !opt.skipBios && resetPc >= 0x4000) die("BIOS was skipped (PC=0x%08X after reset)", resetPc);
+	if (!opt.loadState && opt.skipBios && resetPc != 0x08000000) die("--skip-bios: PC=0x%08X after reset, expected 0x08000000", resetPc);
 
 	if (opt.loadState) {
 		struct VFile* vf = VFileOpen(opt.loadState, O_RDONLY);
@@ -1439,7 +1556,11 @@ int main(int argc, char** argv) {
 		fReads = openOut("reads.tsv", "w");
 		fprintf(fReads, "frame\tvcount\tsource\tpc\tmode\tlr\tswi_ctx\taddr\tsize\tvalue\n");
 	}
-	if (opt.nWatchRead || opt.openbusOn) installLoadHooks();
+	if (opt.logBiosReads) {
+		fBiosReads = openOut("biosreads.tsv", "w");
+		fprintf(fBiosReads, "frame\tvcount\tpc\tmode\tlr\tswi_ctx\taddr\tsize\tvalue\n");
+	}
+	if (opt.nWatchRead || opt.openbusOn || opt.logBiosReads) installLoadHooks();
 	if (opt.nWatch || opt.nTrace) installStoreHooks();
 	if (opt.nPc) {
 		fPc = openOut("pctrace.tsv", "w");
@@ -1450,6 +1571,10 @@ int main(int argc, char** argv) {
 	origSwi32 = cpu->irqh.swi32;
 	cpu->irqh.swi16 = hSwi16;
 	cpu->irqh.swi32 = hSwi32;
+	if (opt.swiCycles) {
+		fSwiCycles = openOut("swicycles.tsv", "w");
+		fprintf(fSwiCycles, "frame\tvcount\tpc\tmode\tswi\tname\tr0\tr1\tr2\tr3\tcycles\n");
+	}
 	if (opt.traceSwi) {
 		fSwi = openOut("swi.tsv", "w");
 		fprintf(fSwi, "frame\tvcount\tpc\tmode\tswi\tname\tr0\tr1\tr2\tr3\tlr\n");
@@ -1530,6 +1655,9 @@ int main(int argc, char** argv) {
 	fprintf(s, "  \"loaded_state\": %s%s%s,\n  \"idle_optimization\": \"%s\",\n", opt.loadState ? "\"" : "", opt.loadState ? opt.loadState : "null", opt.loadState ? "\"" : "", opt.idle);
 	fprintf(s, "  \"savedata_type\": \"%s\",\n", savedataName(gba->memory.savedata.type));
 	if (opt.saveType) fprintf(s, "  \"forced_save_type\": \"%s\",\n", opt.saveType);
+	if (opt.skipBios) fprintf(s, "  \"skip_bios\": true,\n");
+	if (opt.dumpPcOn) fprintf(s, "  \"dump_at_pc\": {\"pc\": \"0x%08X\", \"reached\": %s},\n", opt.dumpPc, dumpPcDone ? "true" : "false");
+	if (opt.logBiosReads) fprintf(s, "  \"bios_region_game_loads\": %llu,\n", (unsigned long long) biosReadsTotal);
 	if (opt.openbusOn) {
 		fprintf(s, "  \"openbus_override\": {\"value\": \"0x%08X\", \"game_loads_overridden\": %llu},\n", opt.openbus,
 		        (unsigned long long) openbusHits);
@@ -1560,6 +1688,8 @@ int main(int argc, char** argv) {
 	if (fReads) fclose(fReads);
 	if (fPc) fclose(fPc);
 	if (fSwi) fclose(fSwi);
+	if (fBiosReads) fclose(fBiosReads);
+	if (fSwiCycles) fclose(fSwiCycles);
 	fclose(fIndex);
 	fclose(fMarks);
 	core->deinit(core);

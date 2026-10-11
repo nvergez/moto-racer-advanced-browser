@@ -19,6 +19,7 @@ Every address, frame number and file offset in these scripts refers to one ROM: 
 | `ghidra/ghidra_import.sh`, `ghidra/make_seed_data.sh` | Build the Ghidra project |
 | `ghidra/ghidra_run.sh`, `ghidra/*.java` | Run queries against it |
 | `py/*.py` | Screenshot sheets, VRAM rendering, RAM-to-ROM matching, the output-path check |
+| `open-bios-ab/` | The open-BIOS A/B: `run_ab.sh` (retail and Cult-of-GBA BIOS, from the cartridge entry and through each BIOS's own boot, plus a screenshot of each finished race's results overlay), `ab_report.py` (the metrics), `shift_script.py` (moves an input script in time), and two race-to-the-finish scripts. See [docs/research/open-bios-ab.md](../../docs/research/open-bios-ab.md) |
 
 ## Setup
 
@@ -66,7 +67,7 @@ $G/ghidra_run.sh FindSwi.java
 
 ### What it guarantees
 
-- **Real BIOS boot.** The BIOS is loaded with `useBios=1, skipBios=0`. The run aborts unless mGBA reports a full BIOS and the PC after reset is inside it. `summary.json` records the BIOS checksum (`0xBAAE187F` for the official one) and `pc_after_reset`.
+- **Real BIOS boot.** The BIOS is loaded with `useBios=1, skipBios=0`. The run aborts unless mGBA reports a full BIOS and the PC after reset is inside it. `summary.json` records the BIOS checksum (`0xBAAE187F` for the official one) and `pc_after_reset`. With `--skip-bios` the boot is skipped (`skipBios=1`): mGBA jumps to `0x08000000` with VCOUNT 0x7E and POSTFLG 1 (`GBASkipBIOS`, `src/gba/gba.c` at 0.10.5), the BIOS image stays mapped and handles every SWI and IRQ, and the run aborts unless the PC after reset is `0x08000000`. On a retail boot the cartridge entry is at frame 271, VCOUNT 126, so a script shifted by -270 frames (`open-bios-ab/shift_script.py`) replays the same inputs from the cartridge entry.
 - **No user configuration.** The user's mGBA `config.ini` is not read. `idleOptimization` defaults to `ignore`, so busy-wait loops run as on hardware and dominate instruction counts.
 - **Deterministic.** Two full runs of `boot_to_race.txt` gave byte-identical dumps and savestates. Stepping mode (`--coverage`, `--calls`, `--trace-pc`) gave the same dumps as plain runs. Resuming from a savestate gave the same dumps as a full replay. Read and write hooks do not change emulation.
 - It inherits mGBA 0.10.5's accuracy. Nothing here has been compared with hardware.
@@ -169,6 +170,11 @@ run_harness.sh [--rom FILE] [--bios FILE] [--no-hash-check] --out DIR [options]
   --step-frames LIST                       # limit --coverage/--calls/--trace-pc to these frames
   --trace-swi                              # SWI log -> swi.tsv (counts are always in summary.json)
   --openbus VALUE                          # game loads from 0x0-0x3FFF see VALUE (open-BIOS A/B tests)
+  --log-bios-reads                         # game loads from 0x0-0x3FFF and the value read -> biosreads.tsv
+  --skip-bios                              # start at the cartridge entry; the BIOS still handles SWIs and IRQs
+  --dump-at-pc ADDR                        # full dump the first time execution reaches ADDR (stepping until then)
+  --trace-ram                              # IWRAM and EWRAM CRC32 columns in trace.tsv
+  --swi-cycles                             # cycles from each SWI to its return -> swicycles.tsv (stepping)
   --wav FILE                               # stereo s16, 32768 Hz
   --idle ignore|remove|detect              # mGBA idle-loop optimization (default ignore)
   --log-level MASK                         # mGBA log mask to stderr (default 0x7)
@@ -183,13 +189,15 @@ RANGES are inclusive, `A-B` or `A+LEN`, at most 32 per option. Mirrors are canon
 | `summary.json` | start/end frame, wall time, ROM CRC32, BIOS checksum, PC after reset, detected save type, mGBA log counts, SWI counts by function, executed instructions by region (with `--coverage`), forced save type and open-bus override if used |
 | `marks.tsv`, `index.tsv` | script marks; every dump, shot and savestate with its frame |
 | `dumps/fNNNNNN[_vLLL][_label]/` | `screen.png`, `io.bin` (0x400 raw I/O), `io.json` (named registers; decoded DISPCNT, BG0-3, BG2/3 affine, DMA0-3 with timing and mGBA's internal source/destination, timers, SOUNDCNT_H, IE/IF/IME, VCOUNT, save type), `palette.bin`, `vram.bin`, `oam.bin`, `iwram.bin`, `ewram.bin`, `cpu.json` |
-| `trace.tsv` | per frame: keys, DISPCNT/mode/page, DISPSTAT, BG0-3CNT, BG2/BG3 affine, BLDCNT, DMA0-3CNT_H, IE, CRC32 of VRAM regions, palette and OAM, bytes written per VRAM 16 KiB chunk, palette, OAM, EWRAM, IWRAM and I/O (CPU and DMA), plus `--trace-io`/`--trace-mem` columns |
+| `trace.tsv` | per frame: keys, DISPCNT/mode/page, DISPSTAT, BG0-3CNT, BG2/BG3 affine, BLDCNT, DMA0-3CNT_H, IE, CRC32 of VRAM regions, palette and OAM, bytes written per VRAM 16 KiB chunk, palette, OAM, EWRAM, IWRAM and I/O (CPU and DMA), plus `--trace-io`/`--trace-mem` columns, and with `--trace-ram` CRC32s of IWRAM 0x03000000-0x03006FFF, IWRAM 0x03007000-0x03007FFF (stacks and BIOS words) and EWRAM |
 | `lines.tsv` | per scanline: DISPCNT, BGxCNT, scroll, BG2/BG3 affine, windows, blend, mosaic (no OAM) |
 | `writes.tsv` / `reads.tsv` | frame, vcount, source (`cpu`, `bios`, `dmaN`), pc, mode, lr, most recent SWI and its call site, address, size, old/new value or value. Includes LDM/STM words and DMA transfers |
 | `pctrace.tsv` | frame, vcount, pc, mode, opcode [, r0-r15, cpsr] |
 | `coverage.tsv` | every executed address in BIOS, EWRAM, IWRAM and ROM, with mode (A, T or AT) and count |
 | `calls.tsv` | call targets: `call` = non-sequential PC change with LR = previous instruction + size (BL, `mov lr,pc; bx`, SWI and IRQ vectors); `bx` = BX to an address never seen as a return address. Count, first caller, first frame |
 | `swi.tsv` | frame, vcount, SWI address, mode, BIOS function and name, r0-r3, lr |
+| `swicycles.tsv` | one row per SWI that returned to its caller in a stepped frame: frame, vcount, SWI address, mode, function and name, r0-r3 at the call, cycles from the SWI instruction to the caller's next instruction (IRQs taken in between included) |
+| `biosreads.tsv` | frame, vcount, pc, mode, lr, most recent SWI and its call site, address, size, and the value game code got from the BIOS region (the open-bus latch of the loaded image, or the `--openbus` value). DMA reads are not logged; an LDM is one row with value `-`. Capped by `--watch-max` |
 
 Performance: boot to frame 4400 with dumps takes about 1.5 s; with per-instruction stepping on every frame about 2.5 s.
 
@@ -201,6 +209,7 @@ The code that produced the Phase 1 evidence is this one minus the changes below.
 - Range lists longer than 32 entries used to be truncated silently; they are now an error.
 - New `--save-type` and `--openbus` options, which reproduce two Phase 1 experiments: a missing or Flash/EEPROM save chip (the game shows "Error while saving"), and replacing the BIOS open-bus value (see the findings, section 6).
 - A script `end` before the `--frames` count used to hang the harness (the loop up to `--frames` never advanced once `end` had stopped the run). `end` now ends the run there. Runs that did not hang are unchanged.
+- For the open-BIOS A/B (P2-17): `--skip-bios`, `--dump-at-pc`, `--log-bios-reads`, `--trace-ram` and `--swi-cycles`. Without them the outputs are unchanged: a `boot_to_race.txt` run with `--trace 3290-4400 --trace-swi --watch-write` and one with `--coverage --trace-pc` over a few stepped frames gave byte-identical files to the previous build (`summary.json` apart from `wall_seconds`, `index.tsv` apart from the run directory). With `--swi-cycles` (every frame stepped), `trace.tsv` was byte-identical to a run without it.
 
 ### Pitfalls
 

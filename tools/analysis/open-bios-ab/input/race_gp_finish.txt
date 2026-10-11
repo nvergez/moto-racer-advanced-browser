@@ -1,0 +1,43 @@
+# race_gp.txt run to the finish: GP on California, A held from frame 3600,
+# START pauses at 4200 and resumes, then A stays held until the race is over.
+# Fresh empty save; frame numbers as in ../../input/boot_to_race.txt. Used by
+# run_ab.sh.
+#
+# With this script, on a retail-BIOS boot, the race display (DISPCNT 0x1741)
+# runs from frame 3346 to 18307 (ab_report.py race_result; open-bios-ab.md
+# section 4). Phase 1's 18415 for a GP race (phase1-findings.md section 2)
+# does not apply here: race_gp.txt ends at frame 6000, and what that run did
+# after it is not recorded. The end can also move with the BIOS and the
+# start, so the results overlay is not shot from this script at a fixed
+# frame: run_ab.sh shoots it 60 frames before each run's own race-display end
+# (ROUTE/result/shots/).
+
+until 2450
+tap START
+wait 60
+tap A                      # English -> main menu
+wait 180
+tap A                      # solo
+wait 120
+tap A                      # single race
+wait 90
+tap DOWN 1                 # cross -> GP
+wait 30
+tap A                      # -> track select
+wait 90
+tap A                      # -> bike select
+wait 90
+tap A                      # -> gearbox
+wait 90
+tap A                      # Auto -> race loads
+until 3600
+hold A
+until 4200
+tap START                  # pause
+wait 30
+tap START                  # resume
+wait 60
+until 19500                # race over, "Try again" screen
+mark after_race
+shot after_race
+end
