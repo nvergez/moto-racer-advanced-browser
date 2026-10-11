@@ -247,6 +247,8 @@ Acceptance:
 
 Tests: `scripts/build-native.sh`, then native runs of 3,290 and 4,400 frames with the `boot_to_race` replay and capture, the same 3,290 frames on the BIOS-interpreting reference (`GBARECOMP_FORCE_INTERP=1` and P2-02's variable), and 12,000 frames without input; read the coverage banner and `recomp_master_misses_A9MP.toml.frag`.
 
+As implemented: the menu VCount handlers `0x0800596C`, `0x0800814C` and `0x08009CAC` are seeded too (prototype seeds with evidence), `0x08002580` is not (the finder reaches it), and frames 2185, 2188 and 2189 differ from the reference because of a stale HALT flag left by the intro player's bridge. Results: [phase2-resume-roots.md](research/phase2-resume-roots.md).
+
 ### P2-06. armcc switch-table case slots
 
 *Depends on:* P2-05: its checks reuse P2-05's runs, and both edit `game.toml`. The script can be written earlier. *Effort:* 1.
