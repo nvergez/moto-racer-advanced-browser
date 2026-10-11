@@ -1,0 +1,35 @@
+# gba_recompile and runtime config for the synthetic repro ROM irqleak2
+# (tests/repro/make_rom.py irqleak2; no Nintendo data inside). It reproduces
+# the IRQ call-return leak that patches/gbarecomp/0003 fixes, in the form that
+# aborted the game: a leaked frame becomes the stop address of a mainline
+# bridge. See tests/repro/README.md. scripts/repro-test.sh generates the ROM,
+# checks its SHA-1 against [identity] below, recompiles it with this file and
+# runs it.
+[game]
+name = "IRQ leak repro 2"
+short_name = "irqleak2"
+
+[program]
+name = "irqleak2"
+id = "ZZZY"                     # header game code written by make_rom.py
+load_address = 0x08000000
+size = 0x00001000               # 4096 bytes
+entry_pc = 0x08000000
+speculative_literal_harvest = false
+# Off on purpose: the handler's return address 0x08000194 has a static entry
+# only because the branch at 0x08000188 targets it, and the main loop's
+# return address 0x080000FC has none, so every return there is a dispatch
+# miss that the interpreter bridges.
+static_resume_all = false
+
+[identity]
+sha1 = "b59d626bc60fefd820bd9d4ae2c283f38383e031"
+
+[bios]
+# The header logo is zero, so the BIOS intro, which checks it, must not run.
+skip_intro = true
+
+[[extra_func]]
+addr = 0x08000180
+mode = "arm"
+note = "VBlank IRQ handler. Its address appears only in the literal at 0x08000104, which the start-up code stores at 0x03007FFC (make_rom.py)"

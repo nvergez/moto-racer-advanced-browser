@@ -1,0 +1,25 @@
+# gba_recompile config for the repro stand-in BIOS (tests/repro/make_bios.py;
+# not a GBA BIOS, no Nintendo data inside). scripts/repro-test.sh recompiles
+# it with `gba_recompile --bios`, as gbarecomp's bios/gba_bios.toml is used
+# for a BIOS dump, unless --bios PATH is given.
+[program]
+name         = "repro stand-in BIOS"
+id           = "repro_bios"
+load_address = 0x00000000
+size         = 0x00004000       # 16 KiB, the size the runtime requires
+entry_pc     = 0x00000000
+# The runtime re-dispatches the instruction after a Halt (0x80) when the
+# interrupt that ends it has been served: every instruction needs an entry.
+static_resume_all = true
+
+[identity]
+sha1 = "71c6dcf544d14dfb13bbb046d9b476217db4cf33"
+md5  = "df6b77f78bb003dd8e3e76fea0703f9a"
+
+# gba_recompile seeds the vectors 0x00, 0x08 and 0x18 itself in --bios mode.
+
+[[extra_func]]
+addr = 0x00000030
+mode = "arm"
+name = "irq_after_handler"
+note = "Where the user IRQ handler returns: 'add lr, pc, #0' at 0x28 sets lr to 0x30, then 'ldr pc, [r0, #-4]' at 0x2C ends the function, so discovery cannot reach it (make_bios.py)"
