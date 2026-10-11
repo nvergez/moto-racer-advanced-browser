@@ -37,9 +37,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --check) MODE=check ;;
     --reverse) MODE=reverse ;;
-    --diff) MODE=diff ;;
-    --write-patch) [ $# -ge 2 ] || die "--write-patch needs a file"; MODE=write; OUT=$2; shift ;;
-    --write-patch=*) MODE=write; OUT=${1#*=} ;;
+    --diff) MODE="diff" ;;
+    --write-patch) [ $# -ge 2 ] || die "--write-patch needs a file"; MODE="write"; OUT=$2; shift ;;
+    --write-patch=*) MODE="write"; OUT=${1#*=} ;;
     --without) [ $# -ge 2 ] || die "--without needs a patch name or number"; add_without "$2"; shift ;;
     --without=*) add_without "${1#*=}" ;;
     -q | --quiet) QUIET=1 ;;
@@ -344,7 +344,7 @@ switch_tree() {
   now=$(worktree_tree)
   [ "$now" = "$to" ] ||
     die "internal error: after writing, $(rel "$sub") is not the expected tree ($now instead of $to)"
-  write_stamp done "$to"
+  write_stamp "done" "$to"
   written=$(tr -cd '\000' < "$tmp/write" | wc -c | tr -d ' ')
   removed=$(tr -cd '\000' < "$tmp/remove" | wc -c | tr -d ' ')
 }
@@ -473,7 +473,7 @@ fi
   die "nested submodules of $(rel "$sub") are not at their pinned commit or have local changes: $nested(see git -C $(rel "$sub") submodule status). No patch series explains that; nothing was changed."
 
 # Nothing to do when the stamp says this exact tree is what the series gives.
-if [ "$(stamp_get state)" = done ] && [ "$(stamp_get pin)" = "$pin" ] &&
+if [ "$(stamp_get state)" = "done" ] && [ "$(stamp_get pin)" = "$pin" ] &&
    [ "$(stamp_get series)" = "$target_id" ] && [ "$(stamp_get tree)" = "$W" ]; then
   report
   [ "$QUIET" = 1 ] || echo "  (up to date)"
@@ -485,7 +485,7 @@ target_trees=$(series_trees strict "$tmp/target.idx" $target_names) || exit 1
 target_tree=$(last_tree "$target_trees")
 check_not_ignored "$target_tree"
 if [ "$W" = "$target_tree" ]; then
-  write_stamp done "$W"
+  write_stamp "done" "$W"
   report
   [ "$QUIET" = 1 ] || echo "  (already in place)"
   exit 0
