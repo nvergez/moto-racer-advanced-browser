@@ -38,7 +38,10 @@ This patch adds:
   under GBARECOMP_STRICT_STATIC.
 - runtime_has_static_entry consults it the same way, so the bridge's
   heal-to-static check hands control back only to an entry of the resident
-  image.
+  image. That check runs after every instruction a top-level or
+  IRQ-continuation bridge interprets (runtime_arm_default_aborts.cpp:640-641
+  at the pin), so the selector is called once per such instruction at a RAM
+  PC, as well as at every dispatch to one: it should be cheap.
 - Claimed PCs skip both heal tiers: the overlay_try_dispatch tier in
   dispatch_resolve, and overlay_request_compile in runtime_dispatch_miss
   (through runtime_ram_overlay_claims()), because of the PC-only heal key
@@ -58,15 +61,21 @@ This patch adds:
 What the selector checks is up to the game; the engine checks nothing
 itself. The selectors this patch was tested with compare the 32-bit word at
 the dispatch target with the word at the same offset of each image's ROM
-source, and nothing else. The selector runs only at dispatch: a generated
-direct branch inside a selected body is a C call by name and is never
-re-checked (external/arm-recomp-core/profiles/armv4t_gba/arm_codegen.cpp:
-510-548, at arm-recomp-core 1f13cdf), and a word-by-word copy
-leaves every word matching one image or the other, so a dispatch in the
-middle of a copy would select a corpus rather than miss. Such a selector is
-correct only under the game's own invariants: images that differ at every
-dispatch target, no code modified after it is copied, and no code running in
-the overlap while an image is being copied.
+source, and nothing else. The selector runs only at dispatch. gba_recompile
+compiles a direct B or BL to any function of the same corpus as a C call by
+name (tools/gba_recompile/main.cpp:784-789 builds the name map from the
+whole corpus; external/arm-recomp-core/profiles/armv4t_gba/arm_codegen.cpp:
+511-546, at arm-recomp-core 1f13cdf, uses it), which is never re-checked:
+inside a selected body, but also from other code of the same corpus that
+reaches an overlay range, such as EWRAM code (within BL range of IWRAM) or
+the tail of a longer image, which stays in IWRAM while a shorter one is
+resident. Only branches to unknown targets go through runtime_dispatch. And
+a word-by-word copy leaves every word matching one image or the other, so a
+dispatch in the middle of a copy would select a corpus rather than miss.
+Such a selector is correct only under the game's own invariants: images that
+differ at every dispatch target, no code modified after it is copied, no
+code running in the overlap while an image is being copied, and no direct
+branch (B or BL) into an overlay range from code outside the resident image.
 
 Upstream may prefer its own mechanisms. Its documented answer for bytes that
 change under a static entry is g_runtime_force_interp_hook
@@ -109,12 +118,18 @@ Tested on macOS arm64 (Apple clang 21) at gbarecomp 5e89943 plus this series:
   https://github.com/nvergez/moto-racer-advanced-browser (make_rom.py
   overlay1, overlay1.toml, overlay1.ovl.toml, overlay1_hooks.cpp); attach them
   when filing this patch.
-- The heal-tier guard in runtime_dispatch_miss, on the same ROM with RAM
-  healing on (GBARECOMP_SELFHEAL_RECOMPILE=1, GBARECOMP_RAM_OVERLAY_HEAL=1,
-  gcc backend), a main corpus without image A, and a selector that answers 0
-  for A and -1 for B: A's first dispatch heals 0x03000000 from A's bytes; with
-  the guard, B is bridged and logs 0xB2 (601 cycles in 600 frames); with the
-  guard removed, the heal tier runs A's heal for B, which logs 0xA1.
+- The heal-tier guard in runtime_dispatch_miss (tail_dispatch_tests links a
+  stub runtime_dispatch_miss, so the unit tests do not reach it), on the same
+  ROM with RAM healing on (GBARECOMP_SELFHEAL_RECOMPILE=1,
+  GBARECOMP_RAM_OVERLAY_HEAL=1, gcc backend, 2,000 frames), no corpus for
+  either image, and a selector that answers 0 for A and -1 for anything else:
+  A's first dispatch heals 0x03000000 from A's bytes. With the guard, B's
+  claimed miss is bridged (5 interpreted instructions per cycle, 10,005 in
+  all) and logs 0xB2 in all 2,001 records. With the guard removed, the heal
+  tier runs A's heal for B, which logs 0xA1 (4,002 heal calls, 0
+  interpreted); so does the same run with the selector uninstalled. This is
+  the overlay1heal case of the same repository (overlay1heal.toml,
+  overlay1heal_hooks.cpp); it needs a C++ compiler at run time.
 - Unchanged when no selector is set: a commercial game (Moto Racer Advance),
   booted without input for 3,000 frames with the retail BIOS, gives
   byte-identical per-frame captures (frame CRC, per-line state, memory
@@ -239,10 +254,10 @@ index ba03741..6b99dc1 100644
      g_runtime_fn_entry_hook = in.entry_hook;
      g_bios_hle_hook = in.bios_hook;
 diff --git a/src/armv4t/runtime_arm.h b/src/armv4t/runtime_arm.h
-index 1320736..2ee19fc 100644
+index 1320736..e70e218 100644
 --- a/src/armv4t/runtime_arm.h
 +++ b/src/armv4t/runtime_arm.h
-@@ -69,6 +69,40 @@ extern RuntimeBusReadOverride g_runtime_bus_read_override;
+@@ -69,6 +69,52 @@ extern RuntimeBusReadOverride g_runtime_bus_read_override;
  typedef int (*RuntimeRamDispatchHook)(uint32_t pc, int thumb);
  extern RuntimeRamDispatchHook g_runtime_ram_dispatch_hook;
  
@@ -256,7 +271,9 @@ index 1320736..2ee19fc 100644
 +// It returns
 +//    0  not claimed: the static table answers, as without a selector;
 +//    1  claimed: look (pc, thumb) up in *table, a generated DispatchEntry
-+//       array of *len entries (the layout gba_recompile emits);
++//       array of *len entries as gba_recompile emits it: sorted by address
++//       (the lookup is a binary search) and never freed (lookups cache
++//       pointers into it);
 +//   -1  claimed, but no compiled image matches the live bytes.
 +// A claimed PC found in *table is entered exactly like a static hit (tail
 +// call, resume alias), so long-running overlay code keeps the generated
@@ -266,12 +283,22 @@ index 1320736..2ee19fc 100644
 +// self-heal tiers are skipped for it: heals are keyed by PC and mode only, so
 +// the heal tier would run whichever image's heal was compiled first.
 +// The engine checks nothing itself: what identifies the resident image is the
-+// selector's choice, and generated direct branches inside a selected body are
-+// never re-checked. The selector may be called more than once per dispatch and
-+// must not change guest or bus state (read guest memory directly, not through
-+// bus_read_*). In a multiplayer session it is per-guest state
-+// (RuntimeArmContext::ram_overlay_select), called after the session's RAM
-+// dispatch boundary, and a claimed miss throws like any missing native entry.
++// selector's choice, made only for transfers that go through the dispatcher.
++// gba_recompile compiles a direct B or BL to any function of the same corpus
++// as a C call by name, which is never re-checked: inside a selected body, but
++// also from other code of that corpus, such as EWRAM code (within BL range of
++// IWRAM) or the tail of a longer image, which stays in IWRAM while a shorter
++// one is resident. Such a branch runs that corpus's body whichever image is
++// resident, so a game that uses a selector must not branch directly into an
++// overlay range from code outside the resident image.
++// The selector is called on every dispatch to a RAM PC, possibly more than
++// once, and, through runtime_has_static_entry, after every instruction that a
++// top-level or IRQ-continuation interpreter bridge runs when the next PC is
++// in RAM, so it should be cheap. It must not change guest or bus state (read
++// guest memory directly, not through bus_read_*). In a multiplayer session it
++// is per-guest state (RuntimeArmContext::ram_overlay_select), called after
++// the session's RAM dispatch boundary, and a claimed miss throws like any
++// missing native entry.
 +typedef int (*RuntimeRamOverlaySelect)(uint32_t pc, int thumb,
 +                                       const void** table, unsigned* len);
 +extern RuntimeRamOverlaySelect g_runtime_ram_overlay_select;
