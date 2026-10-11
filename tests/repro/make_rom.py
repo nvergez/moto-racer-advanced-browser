@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic 4 KiB GBA ROMs that reproduce gbarecomp's IRQ call-return leak.
 
-    make_rom.py CASE OUT.gba      CASE is irqleak1 or irqleak2
+    make_rom.py CASE OUT.gba      CASE is irqleak1, irqleak2 or irqleak3
 
 Prints the SHA-1 of the ROM it wrote. Each case has a gba_recompile config
 next to this script (CASE.toml) whose [identity].sha1 pins these bytes.
@@ -34,6 +34,15 @@ irqleak2: static_resume_all = false. The handler's BL returns to 0x08000194,
   stack as the address to stop at: a leaked 0x08000194, which only IRQ code
   ever reaches. On the pin the bridge interprets the main loop for the rest of
   the run while frames keep leaking, until the same overflow.
+
+irqleak3: irqleak1's code under another header title and game code. Its
+  executable also installs a gbarecomp function-entry hook at F
+  (tests/repro/irqleak3_hooks.cpp) that performs F's `bx lr`. The bridge for
+  F then returns from its hook check, before it interprets anything, without
+  popping the frame; that exit does not go through the heal-to-static check
+  that the first part of patch 0003 fixes. Only the second part, which drops
+  frames left above the IRQ's entry depth when runtime_irq() returns, stops
+  this leak. On the pin it overflows at return_pc=0x08000188, as irqleak1.
 """
 import hashlib
 import struct
@@ -136,6 +145,7 @@ IRQLEAK2 = {
 CASES = {
     'irqleak1': (b'IRQLEAKTEST', b'ZZZZ', IRQLEAK1),
     'irqleak2': (b'IRQLEAKTST2', b'ZZZY', IRQLEAK2),
+    'irqleak3': (b'IRQLEAKTST3', b'ZZZX', IRQLEAK1),
 }
 
 

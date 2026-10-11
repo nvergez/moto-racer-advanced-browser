@@ -4,8 +4,9 @@
 # image into GBARECOMP_GENERATED_BIOS_DIR.
 #
 # For each case it builds repro_<case>: our own src/main.cpp, which runs
-# gbarecomp's full runtime (run_game), linked with that case's generated code
-# and the recompiled BIOS. The runtime library is built once for all cases.
+# gbarecomp's full runtime (run_game), linked with that case's generated code,
+# tests/repro/<case>_hooks.cpp if there is one, and the recompiled BIOS. The
+# runtime library is built once for all cases.
 cmake_minimum_required(VERSION 3.20)
 project(mra_repro C CXX)
 
@@ -51,7 +52,14 @@ foreach(case IN LISTS MRA_REPRO_CASES)
     configure_file("${MRA_ROOT}/src/mra_build_config.h.in"
         "${CMAKE_CURRENT_BINARY_DIR}/${name}_config/mra_build_config.h" @ONLY)
 
-    add_executable(repro_${name} "${MRA_ROOT}/src/main.cpp" ${gen_sources})
+    # A case may add host code of its own, such as a function-entry hook.
+    set(case_sources "")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${name}_hooks.cpp")
+        set(case_sources "${CMAKE_CURRENT_SOURCE_DIR}/${name}_hooks.cpp")
+    endif()
+
+    add_executable(repro_${name} "${MRA_ROOT}/src/main.cpp" ${gen_sources}
+        ${case_sources})
     target_include_directories(repro_${name} PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/${name}_config"
         "${gen}"

@@ -37,8 +37,15 @@ Fix, in two parts:
     returned to. A message is printed for the 1st, 2nd, 4th, 8th...
     truncation, as for call-return evictions.
 
-With both parts, part (b) never fired in any run listed below: part (a)
-leaves nothing for it to drop.
+(a) fixes the leak where it happens. (b) is a backstop for IRQ-continuation
+exits that do not go through the heal-to-static check (a) changes. One
+exists at 5e89943: when a function-entry hook handles a call inside the
+bridge (gba_mod_function_entry in runtime_bridge_interpret's loop), the
+bridge returns 1 at once and, in IRQ-continuation mode, skips the
+call-return stack restore, so the caller's frame stays pushed
+(src/runtime/runtime_arm_default_aborts.cpp:534-541). Test ROM 3 below
+takes that exit, and only (b) stops its leak. In every other run listed
+below (b) never fired: (a) leaves it nothing to drop.
 
 Known ambiguity, not new: part (a) matches return addresses by value, as
 runtime_call_should_return already does for generated returns, so a heal at
@@ -48,24 +55,33 @@ Tested on macOS arm64 (Apple clang 21) at gbarecomp 5e89943 plus this
 series:
 
 - gbarecomp's ctest: 52 of 52 pass (with the gba-tests test ROMs).
-- Two synthetic 4 KiB ROMs (no Nintendo data, header logo zero, run with
-  --bios-skip-intro and GBARECOMP_SELFHEAL_RECOMPILE=0 for 2000 frames):
-  a VBlank handler at 0x08000180 does `bl` to a routine that tail-calls,
-  through a pointer in EWRAM, a function with no static entry.
-  - With static_resume_all = true (the return address 0x08000188 has an
-    entry): without this patch, "generated call-return stack overflow at
-    return_pc=0x08000188", exit 134. With it, 2000 frames, exit 0, 2,000
-    interpreted instructions (the callee, once per IRQ).
-  - With static_resume_all = false, the BL returning to a loop label that
-    a branch targets, and a main loop that calls VBlankIntrWait: without
-    this patch, the bridge for the main loop's return address takes a
-    leaked frame as its stop PC, and the run ends with the same overflow
-    at return_pc=0x08000194, exit 134. With it, 2000 frames, exit 0,
-    4,001 interpreted instructions.
-  Both give the same results on the retail BIOS and on a minimal stand-in
-  BIOS (vectors, IRQ dispatcher, VBlankIntrWait). The generators are
-  tests/repro/make_rom.py and make_bios.py in the repository that carries
-  this patch.
+- Three synthetic 4 KiB ROMs (no Nintendo data, header logo zero, run with
+  --bios-skip-intro and GBARECOMP_SELFHEAL_RECOMPILE=0 for 2000 frames).
+  In each, a VBlank handler at 0x08000180 does `bl` to a routine that
+  tail-calls, through a pointer in EWRAM, a function with no static entry.
+  1. With static_resume_all = true (the return address 0x08000188 has an
+     entry): without this patch, "generated call-return stack overflow at
+     return_pc=0x08000188", exit 134. With it, 2000 frames, exit 0, 2,000
+     interpreted instructions (the callee, once per IRQ).
+  2. With static_resume_all = false, the BL returning to a loop label that
+     a branch targets, and a main loop that calls VBlankIntrWait: without
+     this patch, the bridge for the main loop's return address takes a
+     leaked frame as its stop PC, and the run ends with the same overflow
+     at return_pc=0x08000194, exit 134. With it, 2000 frames, exit 0,
+     4,001 interpreted instructions.
+  3. ROM 1's code, with a function-entry hook registered at the callee
+     (gba_mod_register_function_entry_plugin; the callback sets R15 to LR
+     and returns 1), so the callee's bridge leaves through the hook exit
+     above: without this patch, the overflow at return_pc=0x08000188, exit
+     134. With it, 2000 frames, exit 0, 0 interpreted instructions, and (b)
+     drops one frame at the end of every IRQ (messages for events 1, 2,
+     4 ... 1024).
+  All three give the same results on the retail BIOS and on a minimal
+  stand-in BIOS (vectors, an IRQ dispatcher, VBlankIntrWait). The ROM and
+  BIOS generators, the configs and the hook are in tests/repro/ of
+  https://github.com/nvergez/moto-racer-advanced-browser (make_rom.py,
+  make_bios.py, irqleak1-3.toml, irqleak3_hooks.cpp); attach them when
+  filing this patch.
 - A commercial game whose IRQ handler calls an IWRAM sound mixer through a
   ROM veneer, with the mixer not statically recompiled (the case that
   found the bug), headless, healing off: without this patch, a 3,600-frame
@@ -74,6 +90,10 @@ series:
   2,700, 3,600, 5,400 and 12,000 frames exit 0, and the instructions
   interpreted in 2,700 frames fall from 228,577,755 (with neither this
   patch nor the next) to 119,865,640.
+- Each part on its own was tried only with an earlier prototype of this
+  patch (the same code without the message), on the game: either part
+  alone stopped the abort. That was not repeated with this version; ROM 3
+  is this version's test of (b) on a path that (a) does not cover.
 
 diff --git a/src/armv4t/runtime_arm.cpp b/src/armv4t/runtime_arm.cpp
 index 3d07d55..ba03741 100644
@@ -115,24 +135,26 @@ index 3d07d55..ba03741 100644
  }
  
 diff --git a/src/runtime/runtime_arm_default_aborts.cpp b/src/runtime/runtime_arm_default_aborts.cpp
-index 4b16bf4..e2b3adb 100644
+index 4b16bf4..dd4ea33 100644
 --- a/src/runtime/runtime_arm_default_aborts.cpp
 +++ b/src/runtime/runtime_arm_default_aborts.cpp
-@@ -639,6 +639,13 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
+@@ -639,6 +639,15 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
          // runtime_irq()'s drive loop.
          if ((irq_cont || top_level) && (cpu.R[15] & ~1u) != entry_pc &&
              runtime_has_static_entry(cpu.R[15], cpu.thumb ? 1 : 0)) {
-+            // An IRQ continuation that heals at a live call-return frame has
-+            // just performed that frame's guest return in the interpreter.
-+            // Consume the frame as a generated return would
-+            // (runtime_call_should_return scans only down to the IRQ floor);
-+            // otherwise the waiting caller resumes with its frame still
-+            // pushed and every such call leaks one entry.
++            // An IRQ continuation that heals at a live call-return frame's
++            // return address has normally just performed that frame's guest
++            // return in the interpreter. Consume the frame as a generated
++            // return would (runtime_call_should_return scans only down to
++            // the IRQ floor); otherwise the waiting caller resumes with its
++            // frame still pushed and every such call leaks one entry. Like a
++            // generated return, this matches by value: a heal at a loop head
++            // equal to a pending return address pops that frame early.
 +            if (irq_cont) runtime_call_should_return(cpu.R[15]);
              break;
          }
  
-@@ -672,7 +679,8 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
+@@ -672,7 +681,8 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
      bus->set_bios_access_enabled(g_cpu.R[15] < 0x00004000u);
      // An IRQ continuation that healed to static is not a subroutine return —
      // runtime_irq()'s loop re-dispatches the static entry natively — so do not
