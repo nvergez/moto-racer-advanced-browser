@@ -106,6 +106,19 @@ static struct {
 	bool openbusOn;      /* --openbus: replace the BIOS open-bus value game code reads */
 	uint32_t openbus;
 	const char* saveType; /* --save-type: force the cartridge backup type */
+	/* --capture: per-frame records in the format of gbarecomp's GBARECOMP_CAPTURE
+	 * (patches/gbarecomp/0005, tools/capture/README.md). */
+	bool capture;
+	Range captureFrames[MAX_RANGES]; /* none = every frame */
+	int nCaptureFrames;
+	const char* captureSpec;
+	const char* captureMem;
+	Range captureLines[MAX_RANGES];
+	int nCaptureLines;
+	Range captureFifo[MAX_RANGES];
+	int nCaptureFifo;
+	Range captureRaw[MAX_RANGES];
+	int nCaptureRaw;
 } opt = {
 	.frames = -1,
 	.dumpVcount = -1,
@@ -563,6 +576,401 @@ static void shot(const char* label) {
 	if (!opt.quiet) fprintf(stderr, "shot  f%u %s\n", curFrame(), path);
 }
 
+/* ---------------------------------------------------------------- capture
+ *
+ * --capture writes the same records as gbarecomp's GBARECOMP_CAPTURE
+ * (patches/gbarecomp/0005-frame-capture.patch, src/runtime/frame_capture.cpp
+ * in the patched tree), so the two engines can be compared by joining files
+ * on the frame column. The format is in tools/capture/README.md; change both
+ * engines together. The record of frame N is taken in afterFrame, right after
+ * the VBlank-start event that moves the frame counter to N (video.c
+ * _startHdraw sets earlyExit, so no instruction runs in between). VBlank-timed
+ * DMA is scheduled 3 cycles and the IRQ 7 cycles after that event (dma.c
+ * GBADMARunVblank, gba.c GBATestIRQ), so they come after the record unless the
+ * event itself was handled that late; the game enables no VBlank-timed DMA
+ * (docs/research/phase2-capture.md). Line records are taken where mGBA renders
+ * each line (the renderer's drawScanline, at HBlank start). */
+
+#define CAP_MAX_RAM 64
+#define CAP_MAX_MASKS 128
+#define CAP_MAX_MEM 32
+
+static const struct {
+	const char* name;
+	uint16_t off;
+	uint8_t size;
+} CAP_LINE_REGS[] = {
+	{ "DISPCNT", 0x000, 2 }, { "BG0CNT", 0x008, 2 },  { "BG1CNT", 0x00A, 2 },  { "BG2CNT", 0x00C, 2 },
+	{ "BG3CNT", 0x00E, 2 },  { "BG0HOFS", 0x010, 2 }, { "BG0VOFS", 0x012, 2 }, { "BG1HOFS", 0x014, 2 },
+	{ "BG1VOFS", 0x016, 2 }, { "BG2HOFS", 0x018, 2 }, { "BG2VOFS", 0x01A, 2 }, { "BG3HOFS", 0x01C, 2 },
+	{ "BG3VOFS", 0x01E, 2 }, { "BG2PA", 0x020, 2 },   { "BG2PB", 0x022, 2 },   { "BG2PC", 0x024, 2 },
+	{ "BG2PD", 0x026, 2 },   { "BG2X", 0x028, 4 },    { "BG2Y", 0x02C, 4 },    { "BG3PA", 0x030, 2 },
+	{ "BG3PB", 0x032, 2 },   { "BG3PC", 0x034, 2 },   { "BG3PD", 0x036, 2 },   { "BG3X", 0x038, 4 },
+	{ "BG3Y", 0x03C, 4 },    { "WIN0H", 0x040, 2 },   { "WIN0V", 0x044, 2 },   { "WIN1H", 0x042, 2 },
+	{ "WIN1V", 0x046, 2 },   { "WININ", 0x048, 2 },   { "WINOUT", 0x04A, 2 },  { "BLDCNT", 0x050, 2 },
+	{ "BLDALPHA", 0x052, 2 }, { "BLDY", 0x054, 2 },   { "MOSAIC", 0x04C, 2 },
+};
+#define CAP_N_LINE_REGS (sizeof(CAP_LINE_REGS) / sizeof(CAP_LINE_REGS[0]))
+
+typedef struct {
+	char name[33];
+	uint32_t first, last;
+	Range masks[CAP_MAX_MASKS]; /* sorted, merged */
+	int nMasks;
+} CapRam;
+
+/* A CRC recomputed only when the bytes differ from the copy taken last time. */
+typedef struct {
+	uint8_t* shadow;
+	size_t size;
+	uint32_t crc;
+} CapCached;
+
+static struct {
+	bool on;
+	FILE* out;
+	FILE* lines;
+	FILE* fifo;
+	char rawDir[4096];
+	uint32_t regMask[CAP_N_LINE_REGS];
+	CapRam ram[CAP_MAX_RAM];
+	int nRam, nMasks;
+	uint32_t memAddr[CAP_MAX_MEM];
+	int memSize[CAP_MAX_MEM];
+	int nMem;
+	/* accumulated since the previous record */
+	uint32_t linesCrc;
+	uint64_t fifoN[2];
+	uint32_t fifoCrc[2];
+	uint8_t fifoBytes[2][65536];
+	size_t fifoLen[2];
+	uint64_t ioWrites, haltWrites;
+	CapCached oam, pal, vramBg, vramObj;
+	uint16_t fb[W * H];
+	void (*origDraw)(struct GBAVideoRenderer*, int);
+} cap;
+
+static uint32_t capCached(CapCached* c, const void* p, size_t n) {
+	if (c->shadow && c->size == n && !memcmp(c->shadow, p, n)) return c->crc;
+	if (!c->shadow || c->size != n) {
+		free(c->shadow);
+		c->shadow = malloc(n);
+		if (!c->shadow) die("out of memory");
+		c->size = n;
+	}
+	memcpy(c->shadow, p, n);
+	c->crc = (uint32_t) crc32(0L, (const Bytef*) p, (uInt) n);
+	return c->crc;
+}
+
+static uint32_t capCrcZeros(uint32_t crc, size_t n) {
+	static const uint8_t zeros[256];
+	while (n) {
+		size_t k = n < sizeof(zeros) ? n : sizeof(zeros);
+		crc = (uint32_t) crc32(crc, zeros, (uInt) k);
+		n -= k;
+	}
+	return crc;
+}
+
+static bool capInRam(uint64_t a) {
+	return (a >= 0x02000000u && a <= 0x0203FFFFu) || (a >= 0x03000000u && a <= 0x03007FFFu);
+}
+
+static bool capSameRam(uint64_t a, uint64_t b) {
+	return capInRam(a) && capInRam(b) && (a >> 24) == (b >> 24);
+}
+
+/* Strict number: decimal, or hexadecimal with 0x (never octal), nothing after it. */
+static bool capNum(const char* s, uint64_t* out) {
+	if (!s || !isdigit((unsigned char) s[0])) return false;
+	bool hex = s[0] == '0' && (s[1] == 'x' || s[1] == 'X');
+	char* end = NULL;
+	errno = 0;
+	unsigned long long v = strtoull(s, &end, hex ? 16 : 10);
+	if (errno || !end || *end) return false;
+	*out = v;
+	return true;
+}
+
+static bool capRange(const char* s, uint64_t* first, uint64_t* last) {
+	char buf[128];
+	snprintf(buf, sizeof(buf), "%s", s);
+	char* dash = strchr(buf, '-');
+	if (!dash) {
+		if (!capNum(buf, first)) return false;
+		*last = *first;
+		return true;
+	}
+	*dash = 0;
+	return capNum(buf, first) && capNum(dash + 1, last) && *first <= *last;
+}
+
+static void capAddMem(const char* tok, const char* where) {
+	char buf[128];
+	snprintf(buf, sizeof(buf), "%s", tok);
+	char* colon = strchr(buf, ':');
+	uint64_t addr = 0, size = 0;
+	if (colon) *colon = 0;
+	if (!colon || !capNum(buf, &addr) || !capNum(colon + 1, &size) || (size != 1 && size != 2 && size != 4) ||
+	    !capSameRam(addr, addr + size - 1)) {
+		die("%s: bad memory field '%s' (want ADDR:SIZE, size 1, 2 or 4, in EWRAM or IWRAM)", where, tok);
+	}
+	for (int i = 0; i < cap.nMem; ++i) {
+		if (cap.memAddr[i] != addr) continue;
+		if (cap.memSize[i] != (int) size) die("%s: memory field %s given twice with different sizes", where, tok);
+		return;
+	}
+	if (cap.nMem >= CAP_MAX_MEM) die("%s: more than %d memory fields", where, CAP_MAX_MEM);
+	cap.memAddr[cap.nMem] = (uint32_t) addr;
+	cap.memSize[cap.nMem] = (int) size;
+	cap.nMem++;
+}
+
+static int capCmpRange(const void* a, const void* b) {
+	const Range* x = a;
+	const Range* y = b;
+	return x->lo < y->lo ? -1 : x->lo > y->lo;
+}
+
+/* The spec grammar of frame_capture.h: entries separated by newlines or ';',
+ * '#' starts a comment that runs to the end of the line; reg NAME MASK |
+ * ram NAME FIRST-LAST | mask NAME FIRST-LAST | mem ADDR:SIZE. */
+static void capSpecEntry(char* entry, const char* where) {
+	char* t[4] = { 0 };
+	int n = 0;
+	char* save2 = NULL;
+	for (char* tok = strtok_r(entry, " \t\r", &save2); tok; tok = strtok_r(NULL, " \t\r", &save2)) {
+		if (n < 4) t[n] = tok;
+		n++;
+	}
+	if (n == 0) return;
+	if (!strcmp(t[0], "reg") && n == 3) {
+		size_t i = 0;
+		while (i < CAP_N_LINE_REGS && strcmp(t[1], CAP_LINE_REGS[i].name)) ++i;
+		uint64_t mask = 0;
+		if (i == CAP_N_LINE_REGS) die("%s: unknown line register '%s'", where, t[1]);
+		if (!capNum(t[2], &mask) || mask > 0xFFFFFFFFu) die("%s: bad mask '%s'", where, t[2]);
+		cap.regMask[i] &= (uint32_t) mask;
+	} else if (!strcmp(t[0], "ram") && n == 3) {
+		uint64_t first = 0, last = 0;
+		size_t len = strlen(t[1]);
+		bool okName = len > 0 && len <= 32;
+		for (size_t i = 0; i < len; ++i) okName = okName && (isalnum((unsigned char) t[1][i]) || t[1][i] == '_');
+		if (!okName) die("%s: bad region name '%s'", where, t[1]);
+		for (int i = 0; i < cap.nRam; ++i) {
+			if (!strcmp(cap.ram[i].name, t[1])) die("%s: region %s defined twice", where, t[1]);
+		}
+		if (!capRange(t[2], &first, &last) || !capSameRam(first, last)) {
+			die("%s: bad range '%s' (one range inside EWRAM or IWRAM)", where, t[2]);
+		}
+		if (cap.nRam >= CAP_MAX_RAM) die("%s: more than %d ram regions", where, CAP_MAX_RAM);
+		CapRam* g = &cap.ram[cap.nRam++];
+		snprintf(g->name, sizeof(g->name), "%s", t[1]);
+		g->first = (uint32_t) first;
+		g->last = (uint32_t) last;
+		g->nMasks = 0;
+	} else if (!strcmp(t[0], "mask") && n == 3) {
+		CapRam* g = NULL;
+		for (int i = 0; i < cap.nRam; ++i) {
+			if (!strcmp(cap.ram[i].name, t[1])) g = &cap.ram[i];
+		}
+		uint64_t first = 0, last = 0;
+		if (!g) die("%s: mask for unknown region '%s' (define it first)", where, t[1]);
+		if (!capRange(t[2], &first, &last) || first < g->first || last > g->last) {
+			die("%s: mask '%s' is not inside region %s", where, t[2], t[1]);
+		}
+		if (cap.nMasks >= CAP_MAX_MASKS) die("%s: more than %d masks", where, CAP_MAX_MASKS);
+		cap.nMasks++;
+		g->masks[g->nMasks].lo = (uint32_t) first;
+		g->masks[g->nMasks].hi = (uint32_t) last;
+		g->nMasks++;
+	} else if (!strcmp(t[0], "mem") && n == 2) {
+		capAddMem(t[1], where);
+	} else {
+		die("%s: cannot parse an entry starting with '%s'", where, t[0]);
+	}
+}
+
+static void capParseSpec(char* text, const char* where) {
+	for (char* line = text; line;) {
+		char* next = strchr(line, '\n');
+		if (next) *next++ = 0;
+		char* hash = strchr(line, '#'); /* a comment runs to the end of the line */
+		if (hash) *hash = 0;
+		char* save = NULL;
+		for (char* entry = strtok_r(line, ";", &save); entry; entry = strtok_r(NULL, ";", &save)) capSpecEntry(entry, where);
+		line = next;
+	}
+	for (int r = 0; r < cap.nRam; ++r) {
+		CapRam* g = &cap.ram[r];
+		qsort(g->masks, g->nMasks, sizeof(Range), capCmpRange);
+		int m = 0;
+		for (int i = 0; i < g->nMasks; ++i) {
+			if (m && g->masks[i].lo <= g->masks[m - 1].hi + 1) {
+				if (g->masks[i].hi > g->masks[m - 1].hi) g->masks[m - 1].hi = g->masks[i].hi;
+			} else {
+				g->masks[m++] = g->masks[i];
+			}
+		}
+		g->nMasks = m;
+	}
+}
+
+static void capHex(char** p, uint32_t v, int digits) {
+	static const char hex[] = "0123456789ABCDEF";
+	for (int i = digits - 1; i >= 0; --i) *(*p)++ = hex[(v >> (4 * i)) & 0xF];
+}
+
+static void capDraw(struct GBAVideoRenderer* r, int y) {
+	uint32_t f = gba->video.frameCounter + 1;
+	bool full = cap.lines && inRanges(opt.captureLines, opt.nCaptureLines, f);
+	if (full || !opt.nCaptureFrames || inRanges(opt.captureFrames, opt.nCaptureFrames, f)) {
+		char rec[512];
+		char* p = rec + snprintf(rec, 32, "%u\t%d", f, y);
+		for (size_t i = 0; i < CAP_N_LINE_REGS; ++i) {
+			*p++ = '\t';
+			capHex(&p, ioRaw(CAP_LINE_REGS[i].off, CAP_LINE_REGS[i].size) & cap.regMask[i], CAP_LINE_REGS[i].size * 2);
+		}
+		const uint8_t* vram = (const uint8_t*) gba->video.vram;
+		*p++ = '\t';
+		capHex(&p, gba->video.palette[0], 4);
+		*p++ = '\t';
+		capHex(&p, capCached(&cap.oam, gba->video.oam.raw, 1024), 8);
+		*p++ = '\t';
+		capHex(&p, capCached(&cap.pal, gba->video.palette, 1024), 8);
+		*p++ = '\t';
+		capHex(&p, capCached(&cap.vramBg, vram, 0x10000), 8);
+		*p++ = '\t';
+		capHex(&p, capCached(&cap.vramObj, vram + 0x10000, 0x8000), 8);
+		*p++ = '\n';
+		cap.linesCrc = (uint32_t) crc32(cap.linesCrc, (const Bytef*) rec, (uInt) (p - rec));
+		if (full) fwrite(rec, 1, (size_t) (p - rec), cap.lines);
+	}
+	cap.origDraw(r, y);
+}
+
+/* Every committed store to I/O (CPU and DMA), from onStore. */
+static void capIoWrite(uint32_t c, int size, uint32_t value) {
+	uint32_t off = c - 0x04000000u;
+	if (off >= 0x400) return;
+	cap.ioWrites++;
+	if (off <= 0x301 && off + size > 0x301) cap.haltWrites++;
+	for (int i = 0; i < size; ++i) {
+		uint32_t o = off + i;
+		if (o < 0xA0 || o >= 0xA8) continue;
+		int ch = o >= 0xA4;
+		uint8_t b = (uint8_t) (value >> (8 * i));
+		cap.fifoN[ch]++;
+		cap.fifoCrc[ch] = (uint32_t) crc32(cap.fifoCrc[ch], &b, 1);
+		if (cap.fifoLen[ch] < sizeof(cap.fifoBytes[ch])) cap.fifoBytes[ch][cap.fifoLen[ch]++] = b;
+	}
+}
+
+static uint32_t capRegionCrc(const CapRam* g) {
+	uint32_t crc = 0, at = g->first;
+	size_t avail = 0;
+	for (int i = 0; i < g->nMasks; ++i) {
+		if (g->masks[i].lo > at) crc = (uint32_t) crc32(crc, backing(at, &avail), g->masks[i].lo - at);
+		crc = capCrcZeros(crc, g->masks[i].hi - g->masks[i].lo + 1);
+		at = g->masks[i].hi + 1;
+	}
+	if (at <= g->last) crc = (uint32_t) crc32(crc, backing(at, &avail), g->last - at + 1);
+	return crc;
+}
+
+static void capSetup(void) {
+	if (!opt.capture) return;
+	for (size_t i = 0; i < CAP_N_LINE_REGS; ++i) cap.regMask[i] = 0xFFFFFFFFu;
+	if (opt.captureSpec) {
+		FILE* f = fopen(opt.captureSpec, "rb");
+		if (!f) die("cannot read --capture-spec %s", opt.captureSpec);
+		static char text[65536];
+		size_t n = fread(text, 1, sizeof(text) - 1, f);
+		if (!feof(f)) die("--capture-spec %s: larger than %zu bytes", opt.captureSpec, sizeof(text) - 1);
+		fclose(f);
+		text[n] = 0;
+		capParseSpec(text, opt.captureSpec);
+	}
+	if (opt.captureMem) {
+		char* s = strdup(opt.captureMem);
+		char* save = NULL;
+		for (char* tok = strtok_r(s, ",; \t\r\n", &save); tok; tok = strtok_r(NULL, ",; \t\r\n", &save)) {
+			capAddMem(tok, "--capture-mem");
+		}
+		free(s);
+	}
+	cap.out = openOut("capture.tsv", "w");
+	fprintf(cap.out, "frame\tfb\tlines\tDISPCNT");
+	for (int i = 0; i < cap.nMem; ++i) fprintf(cap.out, "\tmem_%08X", cap.memAddr[i]);
+	for (int i = 0; i < cap.nRam; ++i) fprintf(cap.out, "\tram_%s", cap.ram[i].name);
+	fprintf(cap.out, "\tfifo_a_n\tfifo_a\tfifo_b_n\tfifo_b\tio_writes\thalt_writes\tcycles\tbridge_insns\n");
+	if (opt.nCaptureLines) {
+		cap.lines = openOut("capture.lines.tsv", "w");
+		fprintf(cap.lines, "frame\tline");
+		for (size_t i = 0; i < CAP_N_LINE_REGS; ++i) fprintf(cap.lines, "\t%s", CAP_LINE_REGS[i].name);
+		fprintf(cap.lines, "\tPAL0\tOAM\tPAL\tVRAM_BG\tVRAM_OBJ\n");
+	}
+	if (opt.nCaptureFifo) {
+		cap.fifo = openOut("capture.fifo.tsv", "w");
+		fprintf(cap.fifo, "frame\tchannel\tn\tbytes\n");
+	}
+	if (opt.nCaptureRaw) {
+		snprintf(cap.rawDir, sizeof(cap.rawDir), "%s/capture.raw", opt.out);
+		mkdirs(cap.rawDir);
+	}
+	cap.origDraw = gba->video.renderer->drawScanline;
+	gba->video.renderer->drawScanline = capDraw;
+	cap.on = true;
+}
+
+/* At the end of frame f (VBlank start), from afterFrame. */
+static void capFrame(uint32_t f) {
+	bool record = !opt.nCaptureFrames || inRanges(opt.captureFrames, opt.nCaptureFrames, f);
+	bool raw = opt.nCaptureRaw && inRanges(opt.captureRaw, opt.nCaptureRaw, f);
+	if (record || raw) {
+		for (int i = 0; i < W * H; ++i) {
+			uint32_t c = videoBuf[i]; /* XBGR8: R in the low byte */
+			cap.fb[i] = (uint16_t) (((c & 0xFF) >> 3) | ((((c >> 8) & 0xFF) >> 3) << 5) | ((((c >> 16) & 0xFF) >> 3) << 10));
+		}
+	}
+	if (record) {
+		fprintf(cap.out, "%u\t%08X\t%08X\t%04X", f, (unsigned) crc32(0L, (const Bytef*) cap.fb, sizeof(cap.fb)),
+		        cap.linesCrc, ioRaw(0, 2));
+		for (int i = 0; i < cap.nMem; ++i) fprintf(cap.out, "\t%0*X", cap.memSize[i] * 2, peek(cap.memAddr[i], cap.memSize[i]));
+		for (int i = 0; i < cap.nRam; ++i) fprintf(cap.out, "\t%08X", capRegionCrc(&cap.ram[i]));
+		fprintf(cap.out, "\t%llu\t%08X\t%llu\t%08X\t%llu\t%llu\t%llu\t-\n", (unsigned long long) cap.fifoN[0], cap.fifoCrc[0],
+		        (unsigned long long) cap.fifoN[1], cap.fifoCrc[1], (unsigned long long) cap.ioWrites,
+		        (unsigned long long) cap.haltWrites, (unsigned long long) mTimingGlobalTime(&gba->timing));
+		fflush(cap.out);
+	}
+	if (raw) {
+		char path[4200];
+		snprintf(path, sizeof(path), "%s/f%06u.bgr555", cap.rawDir, f);
+		FILE* o = fopen(path, "wb");
+		if (!o) die("cannot write %s", path);
+		fwrite(cap.fb, 1, sizeof(cap.fb), o);
+		fclose(o);
+	}
+	if (cap.fifo && inRanges(opt.captureFifo, opt.nCaptureFifo, f)) {
+		for (int ch = 0; ch < 2; ++ch) {
+			if (cap.fifoLen[ch] < cap.fifoN[ch]) die("frame %u: more FIFO bytes than the capture buffer holds", f);
+			fprintf(cap.fifo, "%u\t%c\t%zu\t", f, ch ? 'B' : 'A', cap.fifoLen[ch]);
+			for (size_t i = 0; i < cap.fifoLen[ch]; ++i) fprintf(cap.fifo, "%02X", cap.fifoBytes[ch][i]);
+			fprintf(cap.fifo, "%s\n", cap.fifoLen[ch] ? "" : "-");
+		}
+		fflush(cap.fifo);
+	}
+	if (cap.lines) fflush(cap.lines);
+	cap.linesCrc = 0;
+	for (int ch = 0; ch < 2; ++ch) {
+		cap.fifoN[ch] = 0;
+		cap.fifoCrc[ch] = 0;
+		cap.fifoLen[ch] = 0;
+	}
+	cap.ioWrites = cap.haltWrites = 0;
+}
+
 /* ---------------------------------------------------------------- write hooks */
 
 static void (*origStore32)(struct ARMCore*, uint32_t, int32_t, int*);
@@ -611,6 +1019,7 @@ static void onStore(uint32_t addr, int size, uint32_t value) {
 	if (wi >= 0) {
 		if (dma) wsDma[wi] += size; else wsCpu[wi] += size;
 	}
+	if (cap.on) capIoWrite(c, size, value);
 	if (!fWrites || !opt.nWatch) return;
 	uint32_t frame = curFrame() + 1;
 	if (opt.nWatchFrames && !inRanges(opt.watchFrames, opt.nWatchFrames, frame)) return;
@@ -1115,6 +1524,7 @@ static bool frameLimitReached(void) {
 static void afterFrame(uint32_t keys) {
 	drainAudio();
 	uint32_t f = curFrame();
+	if (cap.on) capFrame(f);
 	if (fTrace && inRanges(opt.trace, opt.nTrace, f)) traceRow(keys);
 	memset(wsCpu, 0, sizeof(wsCpu));
 	memset(wsDma, 0, sizeof(wsDma));
@@ -1276,6 +1686,14 @@ static void usage(void) {
 	        "                       (default: mGBA autodetect on first access)\n"
 	        "  --openbus VALUE      game-code loads from the BIOS region (0x0-0x3FFF) see VALUE instead of\n"
 	        "                       the open-bus latch the real BIOS left (A/B tests for other BIOS images)\n"
+	        "  --capture            per-frame records in the format of gbarecomp's GBARECOMP_CAPTURE\n"
+	        "                       -> capture.tsv (tools/capture/README.md)\n"
+	        "  --capture-frames LIST  frames that get a record (default: every frame)\n"
+	        "  --capture-spec FILE  capture spec: line-register masks, RAM regions and their masks, memory fields\n"
+	        "  --capture-mem LIST   extra memory fields ADDR:SIZE,... (size 1/2/4, EWRAM or IWRAM)\n"
+	        "  --capture-lines LIST full per-line records for frames -> capture.lines.tsv\n"
+	        "  --capture-fifo LIST  bytes written to FIFO A and B for frames -> capture.fifo.tsv\n"
+	        "  --capture-raw LIST   240x160 BGR555 frames -> capture.raw/fNNNNNN.bgr555\n"
 	        "  --log-level MASK     mGBA log mask (default 0x7 = fatal|error|warn; 0x7F all incl. debug)\n"
 	        "  --quiet\n");
 	exit(2);
@@ -1297,6 +1715,10 @@ int main(int argc, char** argv) {
 		{ "load-state", required_argument, 0, 'l' }, { "idle", required_argument, 0, 'y' },
 		{ "log-level", required_argument, 0, 'g' }, { "quiet", no_argument, 0, 'q' },
 		{ "save-type", required_argument, 0, 'T' }, { "openbus", required_argument, 0, 'O' },
+		{ "capture", no_argument, 0, 1000 }, { "capture-frames", required_argument, 0, 1001 },
+		{ "capture-spec", required_argument, 0, 1002 }, { "capture-mem", required_argument, 0, 1003 },
+		{ "capture-lines", required_argument, 0, 1004 }, { "capture-fifo", required_argument, 0, 1005 },
+		{ "capture-raw", required_argument, 0, 1006 },
 		{ "help", no_argument, 0, 'h' }, { 0, 0, 0, 0 },
 	};
 	int ch;
@@ -1352,11 +1774,21 @@ int main(int argc, char** argv) {
 		case 'q': opt.quiet = true; break;
 		case 'T': opt.saveType = optarg; break;
 		case 'O': opt.openbusOn = true; opt.openbus = parseNum(optarg); break;
+		case 1000: opt.capture = true; break;
+		case 1001: opt.nCaptureFrames += parseRanges(optarg, opt.captureFrames + opt.nCaptureFrames, MAX_RANGES - opt.nCaptureFrames); break;
+		case 1002: opt.captureSpec = optarg; break;
+		case 1003: opt.captureMem = optarg; break;
+		case 1004: opt.nCaptureLines += parseRanges(optarg, opt.captureLines + opt.nCaptureLines, MAX_RANGES - opt.nCaptureLines); break;
+		case 1005: opt.nCaptureFifo += parseRanges(optarg, opt.captureFifo + opt.nCaptureFifo, MAX_RANGES - opt.nCaptureFifo); break;
+		case 1006: opt.nCaptureRaw += parseRanges(optarg, opt.captureRaw + opt.nCaptureRaw, MAX_RANGES - opt.nCaptureRaw); break;
 		default: usage();
 		}
 	}
 	if (!opt.rom || !opt.bios || !opt.out) usage();
 	if (!opt.script && opt.frames < 0) die("need --script and/or --frames");
+	if (!opt.capture && (opt.nCaptureFrames || opt.captureSpec || opt.captureMem || opt.nCaptureLines || opt.nCaptureFifo || opt.nCaptureRaw)) {
+		die("--capture-* options need --capture");
+	}
 	mkdirs(opt.out);
 
 	mLogSetDefaultLogger(&logger);
@@ -1440,7 +1872,8 @@ int main(int argc, char** argv) {
 		fprintf(fReads, "frame\tvcount\tsource\tpc\tmode\tlr\tswi_ctx\taddr\tsize\tvalue\n");
 	}
 	if (opt.nWatchRead || opt.openbusOn) installLoadHooks();
-	if (opt.nWatch || opt.nTrace) installStoreHooks();
+	if (opt.nWatch || opt.nTrace || opt.capture) installStoreHooks();
+	capSetup();
 	if (opt.nPc) {
 		fPc = openOut("pctrace.tsv", "w");
 		fprintf(fPc, "frame\tvcount\tpc\tmode\topcode%s\n", opt.pcRegs ? "\tr0\tr1\tr2\tr3\tr4\tr5\tr6\tr7\tr8\tr9\tr10\tr11\tr12\tsp\tlr\tpc_reg\tcpsr" : "");
@@ -1556,6 +1989,9 @@ int main(int argc, char** argv) {
 
 	if (fTrace) fclose(fTrace);
 	if (fLines) fclose(fLines);
+	if (cap.out) fclose(cap.out);
+	if (cap.lines) fclose(cap.lines);
+	if (cap.fifo) fclose(cap.fifo);
 	if (fWrites) fclose(fWrites);
 	if (fReads) fclose(fReads);
 	if (fPc) fclose(fPc);

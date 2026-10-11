@@ -170,6 +170,9 @@ run_harness.sh [--rom FILE] [--bios FILE] [--no-hash-check] --out DIR [options]
   --trace-swi                              # SWI log -> swi.tsv (counts are always in summary.json)
   --openbus VALUE                          # game loads from 0x0-0x3FFF see VALUE (open-BIOS A/B tests)
   --wav FILE                               # stereo s16, 32768 Hz
+  --capture [--capture-frames LIST] [--capture-spec FILE] [--capture-mem ADDR:SIZE,...]
+            [--capture-lines LIST] [--capture-fifo LIST] [--capture-raw LIST]
+                                           # per-frame records as gbarecomp's GBARECOMP_CAPTURE writes them
   --idle ignore|remove|detect              # mGBA idle-loop optimization (default ignore)
   --log-level MASK                         # mGBA log mask to stderr (default 0x7)
 ```
@@ -190,6 +193,7 @@ RANGES are inclusive, `A-B` or `A+LEN`, at most 32 per option. Mirrors are canon
 | `coverage.tsv` | every executed address in BIOS, EWRAM, IWRAM and ROM, with mode (A, T or AT) and count |
 | `calls.tsv` | call targets: `call` = non-sequential PC change with LR = previous instruction + size (BL, `mov lr,pc; bx`, SWI and IRQ vectors); `bx` = BX to an address never seen as a return address. Count, first caller, first frame |
 | `swi.tsv` | frame, vcount, SWI address, mode, BIOS function and name, r0-r3, lr |
+| `capture.tsv`, `capture.lines.tsv`, `capture.fifo.tsv`, `capture.raw/` | with `--capture`: per frame, at VBlank start, CRCs of the frame (BGR555) and of the frame's line records, DISPCNT, memory fields, RAM region hashes, FIFO A/B bytes, I/O and HALTCNT writes, the clock; full line records, FIFO bytes and raw frames for the requested frames. The format, shared with gbarecomp, is in [tools/capture/README.md](../capture/README.md) |
 
 Performance: boot to frame 4400 with dumps takes about 1.5 s; with per-instruction stepping on every frame about 2.5 s.
 
@@ -201,6 +205,7 @@ The code that produced the Phase 1 evidence is this one minus the changes below.
 - Range lists longer than 32 entries used to be truncated silently; they are now an error.
 - New `--save-type` and `--openbus` options, which reproduce two Phase 1 experiments: a missing or Flash/EEPROM save chip (the game shows "Error while saving"), and replacing the BIOS open-bus value (see the findings, section 6).
 - A script `end` before the `--frames` count used to hang the harness (the loop up to `--frames` never advanced once `end` had stopped the run). `end` now ends the run there. Runs that did not hang are unchanged.
+- New `--capture` options (P2-03). They only add the `capture*` outputs: a `boot_to_race.txt` run with `--trace`, `--trace-mem`, `--dump-at` and `--shot-at` gives the same `trace.tsv`, dumps, screenshots and `summary.json` (wall time aside) with and without `--capture`, and the same as before the options existed.
 
 ### Pitfalls
 
