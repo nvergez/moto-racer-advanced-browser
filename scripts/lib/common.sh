@@ -34,8 +34,6 @@ GBARECOMP_DIR="$MRA_ROOT/gbarecomp"
 # of *.patch files, applied as a stack to the working tree of one repository
 # (series_repo): gbarecomp, then its nested submodule arm-recomp-core.
 MRA_PATCH_SERIES="gbarecomp arm-recomp-core"
-# The gbarecomp series' directory, the default series of --without names.
-MRA_PATCH_DIR="$MRA_ROOT/patches/gbarecomp"
 
 MRA_ROM=${MRA_ROM:-$MRA_ROOT/roms/moto-racer-advance.gba}
 MRA_BIOS=${MRA_BIOS:-$MRA_ROOT/bios/gba_bios.bin}
