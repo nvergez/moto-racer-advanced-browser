@@ -26,6 +26,14 @@
 //     recompiled build do not share the recompiled BIOS. Only 1 turns it on,
 //     and 0 or an empty value leaves it off.
 //
+//   MRA_FP_TAIL=PATH, with GBARECOMP_INSN_TRACE=1 (P2-09)
+//     When the run ends, write the last MRA_FP_TAIL_RECORDS records (default
+//     500,000, at most 2,000,000) of gbarecomp's per-instruction fingerprint
+//     ring to PATH as CSV, for tools/difftest/fpdiff.py. gbarecomp's own
+//     GBARECOMP_FP_SAVE writes the whole ring, 8M records of 80 bytes
+//     (640 MB) once a run has executed that many instructions; the tail keeps
+//     the window around a divergence at about 220 bytes per record.
+//
 // A bad value stops the program with exit code 2 before the game starts.
 #include <algorithm>
 #include <cerrno>
@@ -303,6 +311,56 @@ int install_interp_bios() {
     return 0;
 }
 
+// ---- MRA_FP_TAIL ------------------------------------------------------------
+
+constexpr unsigned long kFpTailDefault = 500000;
+constexpr unsigned long kFpTailMax = 2000000;  // about 440 MB of CSV
+
+const char* g_fp_tail_path = nullptr;
+std::uint32_t g_fp_tail_records = 0;
+
+int parse_fp_tail() {
+    const char* path = std::getenv("MRA_FP_TAIL");
+    const char* records = std::getenv("MRA_FP_TAIL_RECORDS");
+    if (!path || !path[0]) {
+        if (records && records[0]) {
+            std::fprintf(stderr, "mra: MRA_FP_TAIL_RECORDS is set without MRA_FP_TAIL\n");
+            return kConfigError;
+        }
+        return 0;
+    }
+    // gbarecomp arms the ring from GBARECOMP_INSN_TRACE at machine reset
+    // (runtime_trace_reset, runtime_arm.cpp); without it the ring is empty.
+    if (!env_on("GBARECOMP_INSN_TRACE")) {
+        std::fprintf(stderr,
+                     "mra: MRA_FP_TAIL needs GBARECOMP_INSN_TRACE=1, which arms gbarecomp's "
+                     "fingerprint ring\n");
+        return kConfigError;
+    }
+    std::uint64_t n = kFpTailDefault;
+    if (records && records[0]) {
+        if (!parse_decimal(records, n) || n == 0 || n > kFpTailMax) {
+            std::fprintf(stderr, "mra: MRA_FP_TAIL_RECORDS must be a number from 1 to %lu, not '%s'\n",
+                         kFpTailMax, records);
+            return kConfigError;
+        }
+    }
+    g_fp_tail_path = path;
+    g_fp_tail_records = static_cast<std::uint32_t>(n);
+    std::printf("mra_fp_tail=ENABLED path=\"%s\" records=%llu\n", path,
+                static_cast<unsigned long long>(n));
+    return 0;
+}
+
+// After run_game returns: the ring stays allocated (runtime_shutdown does not
+// free it), so its tail is still there to save.
+void save_fp_tail() {
+    if (!g_fp_tail_path) return;
+    const std::uint32_t n = runtime_fp_save_tail_csv(g_fp_tail_path, g_fp_tail_records);
+    std::printf("mra_fp_tail_saved path=\"%s\" records=%u\n", g_fp_tail_path, n);
+    std::fflush(stdout);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -310,7 +368,10 @@ int main(int argc, char** argv) {
     opts.builtin_game_name = MRA_GAME_NAME;
     opts.builtin_rom_sha1 = MRA_ROM_SHA1;
     if (const int rc = install_replay(opts)) return rc;
+    if (const int rc = parse_fp_tail()) return rc;
     // Last: it chains to a force-interp hook installed before it.
     if (const int rc = install_interp_bios()) return rc;
-    return gbarecomp::run_game(argc, argv, opts);
+    const int rc = gbarecomp::run_game(argc, argv, opts);
+    save_fp_tail();
+    return rc;
 }
