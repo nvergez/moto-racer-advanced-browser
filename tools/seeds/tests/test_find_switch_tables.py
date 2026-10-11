@@ -372,8 +372,13 @@ class Command(unittest.TestCase):
         self.assertIn("1 in copied code with 2 case slots (img)", out)
 
     def test_bad_copy_option(self):
-        with self.assertRaises(SystemExit):
-            fst.main(["x.gba", "--copy", "img=1,2"])
+        old, sys.stderr = sys.stderr, io.StringIO()
+        try:
+            with self.assertRaises(SystemExit):
+                fst.main(["x.gba", "--copy", "img=1,2"])
+            self.assertIn("expected NAME=SOURCE,SIZE,RUNTIME", sys.stderr.getvalue())
+        finally:
+            sys.stderr = old
 
     def test_empty_rom(self):
         rc, _, err = self.run_main(b"")
