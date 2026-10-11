@@ -1,0 +1,557 @@
+Add g_runtime_ram_overlay_select: a game-owned selector that picks the
+dispatch table of the code image resident in RAM.
+
+Some games copy different, immutable code images to the same RAM addresses
+at different times (overlays). gba_recompile --output-prefix can compile each
+image as its own corpus ("so multiple immutable code images can be linked into
+one executable", tools/gba_recompile/main.cpp:139-141), but nothing in the
+runtime looks up a prefixed table without a resumable context: a corpus holds
+one function per (address, instruction set), and dispatch_resolve and the
+heal tier look a PC up by address and CPSR.T only. With one image declared as
+a [[code_copy]], its body runs at that address whichever image is resident:
+the wrong code, silently, with no dispatch miss even under
+GBARECOMP_STRICT_STATIC (repro below). The existing mechanisms do not fit:
+
+- g_runtime_ram_dispatch_hook must run the body inside the callback, since
+  dispatch_resolve returns nullptr after it (runtime_arm.cpp:882-894). Every
+  transfer inside the overlay then goes back through the hook and adds a host
+  frame instead of a tail call: thousands nested in a long overlay loop, and a
+  stack overflow under WebAssembly. Its documented contract is narrower
+  (byte-verified position-independent routines, runtime_arm.h:65-70).
+- g_runtime_force_interp_hook interprets the overlay: never strict-static,
+  and a predicate call before every generated instruction.
+- RAM heals are keyed by PC and mode only (heal_key, overlay_loader.cpp:35)
+  and never invalidated, so a heal built from one image runs for the other.
+
+This patch adds:
+
+- RuntimeRamOverlaySelect g_runtime_ram_overlay_select (runtime_arm.h, with
+  the contract). dispatch_resolve consults it for RAM PCs
+  (0x02000000-0x03FFFFFF), after g_runtime_ram_dispatch_hook and before the
+  static table. It returns 0 (not claimed: the static table answers, as
+  without a selector), 1 with a generated DispatchEntry table (look the PC up
+  there) or -1 (claimed, no compiled image matches). A selected entry is
+  returned from dispatch_resolve and entered exactly like a static hit
+  (GBARECOMP_TAIL_CALL from runtime_dispatch_tail, resume alias, yield ABI),
+  so nothing runs inside the callback and no host frame is added. A claimed
+  PC with no entry is an ordinary dispatch miss: recorded, bridged, fatal
+  under GBARECOMP_STRICT_STATIC.
+- runtime_has_static_entry consults it the same way, so the bridge's
+  heal-to-static check hands control back only to an entry of the resident
+  image.
+- Claimed PCs skip both heal tiers: the overlay_try_dispatch tier in
+  dispatch_resolve, and overlay_request_compile in runtime_dispatch_miss
+  (through runtime_ram_overlay_claims()), because of the PC-only heal key
+  above. The miss is still recorded and reported; it is bridged instead.
+- RuntimeArmContext::ram_overlay_select, captured and restored with the other
+  hooks (runtime_arm.cpp:1597-1635), so that each guest of a multiplayer
+  session has its own selector and the single-machine one survives a session.
+  With a resumable context, the session's ram_dispatch_boundary runs before
+  the selector reads guest memory, as before the RAM hook, and a claimed miss
+  throws like any missing native entry there. The session scheduler's
+  batching classification (multiplayer_session.cpp) is unchanged: a RAM
+  dispatch inside a native slice yields at that boundary, as nested RAM hook
+  dispatches do. No multiplayer session was run with a selector; only the
+  unit tests below cover this part.
+- run_game() resets it on exit with the other game-owned dispatch hooks.
+
+What the selector checks is up to the game; the engine checks nothing
+itself. The selectors this patch was tested with compare the 32-bit word at
+the dispatch target with the word at the same offset of each image's ROM
+source, and nothing else. The selector runs only at dispatch: a generated
+direct branch inside a selected body is a C call by name and is never
+re-checked (external/arm-recomp-core/profiles/armv4t_gba/arm_codegen.cpp:
+510-548, at arm-recomp-core 1f13cdf), and a word-by-word copy
+leaves every word matching one image or the other, so a dispatch in the
+middle of a copy would select a corpus rather than miss. Such a selector is
+correct only under the game's own invariants: images that differ at every
+dispatch target, no code modified after it is copied, and no code running in
+the overlap while an image is being copied.
+
+Upstream may prefer its own mechanisms. Its documented answer for bytes that
+change under a static entry is g_runtime_force_interp_hook
+(runtime_arm.h:72-78). RuntimeArmContext::program_dispatch is meant for
+heterogeneous images (runtime_context.h:44-46) but applies only with a
+resumable context, and its callback runs the body itself. A per-program
+registry that binds dispatch tables and fails closed on unknown PCs is planned
+for mixed-cartridge multiplayer (docs/MIXED_CARTRIDGE_MULTIPLAYER.md,
+"Implementation order", step 1). The part of this patch that matters is the
+resolve shape, returning the entry for the engine to enter, which a
+program_dispatch variant usable without a resumable context could take over;
+a global was the smallest change for a single-machine game.
+
+Tested on macOS arm64 (Apple clang 21) at gbarecomp 5e89943 plus this series:
+
+- gbarecomp's ctest: 50 of 50 pass (the two gba-tests test ROM tests were
+  not run locally). tail_dispatch_tests gains the selector's cases: selected
+  entry and resume alias through runtime_dispatch, the tail and the exchange
+  dispatchers; a Thumb PC absent from the selected table, -1, and a claim
+  without a table are misses with the original target that never reach the
+  heal tier; an unclaimed PC falls through to the static table and the heal
+  tier; non-RAM PCs never reach the selector; a handled RAM hook comes first
+  and a declining one leaves the PC to the selector; runtime_has_static_entry
+  and runtime_ram_overlay_claims; context capture and restore; with a
+  resumable context, the boundary before the selector and a throw on a
+  claimed miss. Each of three mutations of the patch (heal-to-static answers
+  1 for any claimed PC, -1 treated as unclaimed, resume PC not set) fails it.
+- A synthetic 4 KiB ROM (no Nintendo data, header logo zero; a stand-in BIOS
+  or the retail one; --bios-skip-intro, 2,000 frames,
+  GBARECOMP_STRICT_STATIC=1). Once per frame it copies image A (4 words) to
+  IWRAM 0x03000000 and calls it, then image B (5 words) and calls it; A
+  writes 0xA1 and B 0xB2 to the same EWRAM word, which the main loop logs
+  after each call. A is in the main corpus, B in a second one built with
+  --output-prefix ovl_, and the selector compares the live word at the
+  target with each image's ROM source. With the selector: FULLY_STATIC,
+  0 misses, 0xA1 then 0xB2 in all 2,001 per-frame records. Without it (not
+  installed, or gbarecomp without this patch): FULLY_STATIC, 0 misses, and
+  0xA1 then 0xA1, A's body run for B. The generator, configs
+  and selector are tests/repro/ of
+  https://github.com/nvergez/moto-racer-advanced-browser (make_rom.py
+  overlay1, overlay1.toml, overlay1.ovl.toml, overlay1_hooks.cpp); attach them
+  when filing this patch.
+- The heal-tier guard in runtime_dispatch_miss, on the same ROM with RAM
+  healing on (GBARECOMP_SELFHEAL_RECOMPILE=1, GBARECOMP_RAM_OVERLAY_HEAL=1,
+  gcc backend), a main corpus without image A, and a selector that answers 0
+  for A and -1 for B: A's first dispatch heals 0x03000000 from A's bytes; with
+  the guard, B is bridged and logs 0xB2 (601 cycles in 600 frames); with the
+  guard removed, the heal tier runs A's heal for B, which logs 0xA1.
+- Unchanged when no selector is set: a commercial game (Moto Racer Advance),
+  booted without input for 3,000 frames with the retail BIOS, gives
+  byte-identical per-frame captures (frame CRC, per-line state, memory
+  fields, RAM hashes, FIFO and IO counts, clock and bridged instructions at
+  every VBlank start) and identical final lines with and without this patch,
+  recompiled and with GBARECOMP_FORCE_INTERP=1.
+
+diff --git a/src/armv4t/runtime_arm.cpp b/src/armv4t/runtime_arm.cpp
+index ba03741..6b99dc1 100644
+--- a/src/armv4t/runtime_arm.cpp
++++ b/src/armv4t/runtime_arm.cpp
+@@ -62,6 +62,7 @@ extern "C" RuntimeThumbAluImmediateOverride
+ extern "C" RuntimeBusReadOverride g_runtime_bus_read_override = nullptr;
+ extern "C" RuntimeRamDispatchHook g_runtime_ram_dispatch_hook = nullptr;
+ extern "C" RuntimeForceInterpHook g_runtime_force_interp_hook = nullptr;
++extern "C" RuntimeRamOverlaySelect g_runtime_ram_overlay_select = nullptr;
+ extern "C" int g_runtime_force_interp_step_active = 0;
+ 
+ // VBlank-start counter (defined in src/runtime/runtime_bus_bridge.cpp).
+@@ -845,6 +846,27 @@ const DispatchEntry* lookup_in(const DispatchEntry* table, unsigned len,
+ // "BIOS for <4000, cart otherwise" — no merged search needed.
+ constexpr uint32_t kBiosRegionEnd = 0x00004000u;
+ 
++// RAM PCs, the range g_runtime_ram_dispatch_hook and
++// g_runtime_ram_overlay_select are consulted for.
++inline bool is_ram_pc(uint32_t pc) {
++    return pc >= 0x02000000u && pc < 0x04000000u;
++}
++
++// Ask g_runtime_ram_overlay_select about an aligned RAM PC. Returns false when
++// it does not claim the PC (the static table answers); otherwise sets *entry
++// to the selected table's entry for (pc, thumb), or nullptr when the table has
++// none or no image matches (-1).
++bool select_ram_overlay_entry(uint32_t pc, bool thumb, const DispatchEntry** entry) {
++    const void* table = nullptr;
++    unsigned len = 0;
++    const int sel = g_runtime_ram_overlay_select(pc, thumb ? 1 : 0, &table, &len);
++    if (sel == 0) return false;
++    *entry = (sel > 0 && table)
++        ? lookup_in(static_cast<const DispatchEntry*>(table), len, pc, thumb)
++        : nullptr;
++    return true;
++}
++
+ }  // namespace
+ 
+ extern "C" {
+@@ -893,6 +915,32 @@ const DispatchEntry* dispatch_resolve(uint32_t target_pc) {
+         } callback_yield;
+         if (g_runtime_ram_dispatch_hook(pc, thumb ? 1 : 0)) return nullptr;
+     }
++    // RAM overlays (runtime_arm.h): the game's selector picks the corpus of
++    // the image resident at pc. A selected entry is entered like a static hit
++    // below; a claimed PC without one is a miss that skips the heal tiers.
++    if (is_ram_pc(pc) && g_runtime_ram_overlay_select) {
++        // The selector reads guest RAM: give a multiplayer scheduler the same
++        // boundary as before the RAM hook.
++        if (g_resumable_context && g_resumable_context->ram_dispatch_boundary)
++            g_resumable_context->ram_dispatch_boundary(pc);
++        const DispatchEntry* selected = nullptr;
++        if (select_ram_overlay_entry(pc, thumb, &selected)) {
++            if (selected) {
++                g_runtime_resume_pc = selected->resume ? pc : 0u;
++                return selected;
++            }
++            if (g_resumable_context) {
++                char message[112];
++                std::snprintf(message, sizeof(message),
++                    "multiplayer native dispatch entry is missing from the "
++                    "selected RAM overlay: %08x (%s)",
++                    pc, thumb ? "Thumb" : "ARM");
++                throw std::logic_error(message);
++            }
++            runtime_dispatch_miss(target_pc);
++            return nullptr;
++        }
++    }
+     const DispatchEntry* entry = nullptr;
+     if (pc < kBiosRegionEnd) {
+         entry = lookup_in(
+@@ -959,12 +1007,26 @@ extern "C" void runtime_dispatch_with_exchange_tail(void) {
+ 
+ extern "C" int runtime_has_static_entry(uint32_t pc, int thumb) {
+     uint32_t a = pc & ~1u;
++    // A PC the RAM overlay selector claims has an entry only in the selected
++    // corpus, so the bridge heals back only into the resident image.
++    if (is_ram_pc(a) && g_runtime_ram_overlay_select) {
++        const DispatchEntry* selected = nullptr;
++        if (select_ram_overlay_entry(a, thumb != 0, &selected))
++            return selected != nullptr ? 1 : 0;
++    }
+     const DispatchEntry* entry = (a < kBiosRegionEnd)
+         ? lookup_in(kBiosDispatchTable, kBiosDispatchTableLen, a, thumb != 0)
+         : lookup_in(kDispatchTable, kDispatchTableLen, a, thumb != 0);
+     return entry != nullptr ? 1 : 0;
+ }
+ 
++extern "C" int runtime_ram_overlay_claims(uint32_t pc, int thumb) {
++    const uint32_t a = pc & ~1u;
++    if (!is_ram_pc(a) || !g_runtime_ram_overlay_select) return 0;
++    const DispatchEntry* selected = nullptr;
++    return select_ram_overlay_entry(a, thumb != 0, &selected) ? 1 : 0;
++}
++
+ extern "C" unsigned long long g_runtime_call_return_evictions = 0;
+ 
+ extern "C" void runtime_call_push_return(uint32_t return_pc) {
+@@ -1628,6 +1690,7 @@ void runtime_capture_arm_context(RuntimeArmContext& out) {
+     out.read_override = g_runtime_bus_read_override;
+     out.ram_dispatch = g_runtime_ram_dispatch_hook;
+     out.force_interp = g_runtime_force_interp_hook;
++    out.ram_overlay_select = g_runtime_ram_overlay_select;
+     out.entry_hook = g_runtime_fn_entry_hook;
+     out.bios_hook = g_bios_hle_hook;
+ }
+@@ -1650,6 +1713,7 @@ void runtime_restore_arm_context(const RuntimeArmContext& in) {
+     g_runtime_bus_read_override = in.read_override;
+     g_runtime_ram_dispatch_hook = in.ram_dispatch;
+     g_runtime_force_interp_hook = in.force_interp;
++    g_runtime_ram_overlay_select = in.ram_overlay_select;
+     g_runtime_force_interp_step_active = 0;
+     g_runtime_fn_entry_hook = in.entry_hook;
+     g_bios_hle_hook = in.bios_hook;
+diff --git a/src/armv4t/runtime_arm.h b/src/armv4t/runtime_arm.h
+index 1320736..2ee19fc 100644
+--- a/src/armv4t/runtime_arm.h
++++ b/src/armv4t/runtime_arm.h
+@@ -69,6 +69,40 @@ extern RuntimeBusReadOverride g_runtime_bus_read_override;
+ typedef int (*RuntimeRamDispatchHook)(uint32_t pc, int thumb);
+ extern RuntimeRamDispatchHook g_runtime_ram_dispatch_hook;
+ 
++// Optional game-owned selector for RAM overlays: different immutable code
++// images that the game copies to the same RAM addresses at different times,
++// each compiled as its own corpus (gba_recompile --output-prefix writes
++// <prefix>kDispatchTable and <prefix>kDispatchTableLen). Consulted for RAM PCs
++// (0x02000000-0x03FFFFFF) after g_runtime_ram_dispatch_hook and before the
++// static table, by runtime_dispatch and by runtime_has_static_entry, so the
++// interpreter bridge also heals back only into the image the selector picks.
++// It returns
++//    0  not claimed: the static table answers, as without a selector;
++//    1  claimed: look (pc, thumb) up in *table, a generated DispatchEntry
++//       array of *len entries (the layout gba_recompile emits);
++//   -1  claimed, but no compiled image matches the live bytes.
++// A claimed PC found in *table is entered exactly like a static hit (tail
++// call, resume alias), so long-running overlay code keeps the generated
++// call/return and yield ABI; unlike g_runtime_ram_dispatch_hook, nothing runs
++// inside the callback. A claimed PC with no entry is an ordinary dispatch miss
++// (recorded, bridged, fatal under GBARECOMP_STRICT_STATIC), except that the
++// self-heal tiers are skipped for it: heals are keyed by PC and mode only, so
++// the heal tier would run whichever image's heal was compiled first.
++// The engine checks nothing itself: what identifies the resident image is the
++// selector's choice, and generated direct branches inside a selected body are
++// never re-checked. The selector may be called more than once per dispatch and
++// must not change guest or bus state (read guest memory directly, not through
++// bus_read_*). In a multiplayer session it is per-guest state
++// (RuntimeArmContext::ram_overlay_select), called after the session's RAM
++// dispatch boundary, and a claimed miss throws like any missing native entry.
++typedef int (*RuntimeRamOverlaySelect)(uint32_t pc, int thumb,
++                                       const void** table, unsigned* len);
++extern RuntimeRamOverlaySelect g_runtime_ram_overlay_select;
++// Non-zero when g_runtime_ram_overlay_select claims (pc, thumb), whether or not
++// the selected table has an entry for it. runtime_dispatch_miss uses it to
++// keep claimed PCs out of the self-heal tier.
++int runtime_ram_overlay_claims(uint32_t pc, int thumb);
++
+ // Optional game/runtime predicate for executable regions whose bytes can change
+ // underneath a static dispatch entry (self-modifying RAM, banked cartridge
+ // apertures). A non-zero result selects the reference interpreter instead of
+diff --git a/src/armv4t/runtime_context.h b/src/armv4t/runtime_context.h
+index 2235d3a..0191856 100644
+--- a/src/armv4t/runtime_context.h
++++ b/src/armv4t/runtime_context.h
+@@ -39,6 +39,9 @@ struct RuntimeArmContext {
+     // inspect mutable memory, including calls nested inside generated code.
+     void (*ram_dispatch_boundary)(std::uint32_t) = nullptr;
+     RuntimeForceInterpHook force_interp = nullptr;
++    // This guest's g_runtime_ram_overlay_select (runtime_arm.h). nullptr uses
++    // the shared generated tables for every RAM PC.
++    RuntimeRamOverlaySelect ram_overlay_select = nullptr;
+     void (*entry_hook)(std::uint32_t) = nullptr;
+     int (*bios_hook)(std::uint32_t) = nullptr;
+     // Optional per-program dispatch, required when heterogeneous images are
+diff --git a/src/runtime/runtime.cpp b/src/runtime/runtime.cpp
+index 52f263e..9a33ed8 100644
+--- a/src/runtime/runtime.cpp
++++ b/src/runtime/runtime.cpp
+@@ -1279,6 +1279,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+     struct RamDispatchHookReset {
+         ~RamDispatchHookReset() {
+             g_runtime_ram_dispatch_hook = nullptr;
++            g_runtime_ram_overlay_select = nullptr;
+             g_runtime_force_interp_hook = nullptr;
+         }
+     } ram_dispatch_hook_reset;
+diff --git a/src/runtime/runtime_arm_default_aborts.cpp b/src/runtime/runtime_arm_default_aborts.cpp
+index 5d09e64..ae7fa7b 100644
+--- a/src/runtime/runtime_arm_default_aborts.cpp
++++ b/src/runtime/runtime_arm_default_aborts.cpp
+@@ -924,7 +924,11 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
+         std::abort();
+     }
+     record_and_log_miss(entry_pc, entry_thumb);
+-    if (gbarecomp::overlay_request_compile(entry_pc, entry_thumb) &&
++    // A PC the RAM overlay selector claims (runtime_arm.h) holds whichever
++    // image is resident, but heals are keyed by PC and mode only: the heal
++    // tier would run, or compile for later, a heal of another image. Bridge it.
++    if (!runtime_ram_overlay_claims(entry_pc, entry_thumb ? 1 : 0) &&
++        gbarecomp::overlay_request_compile(entry_pc, entry_thumb) &&
+         overlay_try_dispatch(entry_pc, entry_thumb ? 1 : 0)) {
+         return;
+     }
+diff --git a/tests/armv4t/tail_dispatch_test.cpp b/tests/armv4t/tail_dispatch_test.cpp
+index 245e50e..40f7f15 100644
+--- a/tests/armv4t/tail_dispatch_test.cpp
++++ b/tests/armv4t/tail_dispatch_test.cpp
+@@ -1,10 +1,15 @@
+ // Reuse the codegen harness bus/miss recorders, with the real runtime helpers.
+ #include "runtime_arm.h"
++#include "runtime_context.h"
+ #include "stubs.h"
+ 
+ #include <cstdio>
+ #include <cstring>
+ #include <initializer_list>
++#include <stdexcept>
++
++// The layout gba_recompile emits in every generated dispatch table.
++struct DispatchEntry { uint32_t addr; uint8_t thumb; uint8_t resume; void (*fn)(void); };
+ 
+ namespace {
+ int failures = 0;
+@@ -98,12 +103,167 @@ void test_swi() {
+     }
+     g_bios_hle_hook = nullptr;
+ }
++// ── RAM overlay selector ───────────────────────────────────────────
++// A second corpus for the image at 0x03000000, as gba_recompile
++// --output-prefix would emit it: an ARM entry, and an ARM resume alias.
++unsigned overlay_entry_calls = 0, overlay_resume_calls = 0;
++void overlay_entry() { ++overlay_entry_calls; }
++void overlay_resume() { ++overlay_resume_calls; }
++const DispatchEntry kOverlayTable[] = {
++    {0x03000000u, 0u, 0u, overlay_entry},
++    {0x03000010u, 0u, 1u, overlay_resume},
++};
++
++// The selector answers what the test sets, and records every call.
++int select_result = 0;
++const DispatchEntry* select_table = kOverlayTable;
++unsigned select_calls = 0;
++uint32_t select_pc = 0;
++int select_thumb = -1;
++int fake_selector(uint32_t pc, int thumb, const void** table, unsigned* len) {
++    ++select_calls; select_pc = pc; select_thumb = thumb;
++    if (select_result > 0) { *table = select_table; *len = 2u; }
++    return select_result;
++}
++unsigned boundary_calls = 0, selects_before_boundary = 0;
++void record_boundary(uint32_t) {
++    ++boundary_calls; selects_before_boundary = select_calls;
++}
++int declining_ram_hook(uint32_t, int) { return 0; }
++
++void reset_overlay(bool thumb, int result) {
++    reset(thumb);
++    overlay_entry_calls = overlay_resume_calls = 0;
++    select_result = result; select_table = kOverlayTable;
++    select_calls = 0; select_pc = 0; select_thumb = -1;
++    g_runtime_resume_pc = 0xFFFFFFFFu;
++    g_runtime_ram_overlay_select = fake_selector;
++}
++
++void test_ram_overlay_select() {
++    // Claimed and found: entered like a static hit, through both dispatchers.
++    reset_overlay(false, 1);
++    runtime_dispatch(0x03000000);
++    check(overlay_entry_calls == 1 && !codegen_test::g_dispatch_called,
++          "selected entry runs without a dispatch miss");
++    check(select_pc == 0x03000000 && select_thumb == 0,
++          "selector receives the aligned PC and the instruction mode");
++    check(g_runtime_resume_pc == 0, "a plain selected entry clears the resume PC");
++    reset_overlay(false, 1);
++    g_runtime_tail_arg = 0x03000010;
++    runtime_dispatch_tail();
++    check(overlay_resume_calls == 1 && !codegen_test::g_dispatch_called,
++          "tail dispatch enters a selected resume alias");
++    check(g_runtime_resume_pc == 0x03000010, "a selected resume alias sets the resume PC");
++    reset_overlay(false, 1);
++    g_runtime_tail_arg = 0x03000000;
++    runtime_dispatch_with_exchange_tail();
++    check(overlay_entry_calls == 1 && !(g_cpu.cpsr & CPSR_T_BIT),
++          "exchange dispatch to an even RAM target enters the selected ARM entry");
++
++    // Claimed, but the selected table has no entry for (pc, mode), or no
++    // image matches (-1), or the selector names no table: an ordinary miss
++    // that never reaches the self-heal tier.
++    for (int result : {1, -1}) {
++        reset_overlay(true, result);
++        g_runtime_tail_arg = 0x03000001;
++        runtime_dispatch_tail();
++        check(codegen_test::g_dispatch_called &&
++                  codegen_test::g_last_dispatch_target == 0x03000001,
++              "claimed PC without a selected entry is a miss with the original target");
++        check(overlay_entry_calls == 0, "a Thumb miss does not enter the ARM entry");
++        check(codegen_test::g_overlay_try_calls == 0,
++              "a claimed miss skips the self-heal dispatch tier");
++    }
++    reset_overlay(false, 1);
++    select_table = nullptr;
++    runtime_dispatch(0x03000000);
++    check(codegen_test::g_dispatch_called && overlay_entry_calls == 0,
++          "a claim without a table is a miss");
++
++    // Not claimed (0): the static table answers as without a selector. The
++    // stub table is empty, so this is a miss that consults the heal tier.
++    reset_overlay(false, 0);
++    runtime_dispatch(0x03000000);
++    check(select_calls == 1 && overlay_entry_calls == 0, "unclaimed PC is not selected");
++    check(codegen_test::g_dispatch_called && codegen_test::g_overlay_try_calls == 1,
++          "unclaimed PC falls through to the static table and heal tier");
++
++    // Only RAM PCs are offered to the selector.
++    for (uint32_t pc : {0x00000100u, 0x01FFFFFCu, 0x04000000u, 0x08000100u}) {
++        reset_overlay(false, 1);
++        runtime_dispatch(pc);
++        check(select_calls == 0 && codegen_test::g_dispatch_called,
++              "non-RAM PC never reaches the selector");
++    }
++    reset_overlay(false, 1);
++    runtime_dispatch(0x02000000);
++    check(select_calls == 1, "EWRAM PC reaches the selector");
++
++    // A RAM hook that handles the transfer comes first; one that declines
++    // leaves the PC to the selector.
++    reset_overlay(false, 1);
++    g_runtime_ram_dispatch_hook = ram_hook;
++    runtime_dispatch(0x03000000);
++    check(select_calls == 0 && overlay_entry_calls == 0, "handled RAM hook wins over the selector");
++    reset_overlay(false, 1);
++    g_runtime_ram_dispatch_hook = declining_ram_hook;
++    runtime_dispatch(0x03000000);
++    check(overlay_entry_calls == 1, "declined RAM hook leaves the PC to the selector");
++    g_runtime_ram_dispatch_hook = nullptr;
++
++    // The bridge's heal-to-static check and the miss handler's heal guard.
++    reset_overlay(false, 1);
++    check(runtime_has_static_entry(0x03000000, 0) == 1, "selected entry counts as static");
++    check(runtime_has_static_entry(0x03000000, 1) == 0, "entry absent in the selected table is not static");
++    check(runtime_ram_overlay_claims(0x03000001, 1) == 1, "a claimed miss is still claimed");
++    check(runtime_ram_overlay_claims(0x08000000, 0) == 0, "ROM PCs are never claimed");
++    reset_overlay(false, -1);
++    check(runtime_has_static_entry(0x03000000, 0) == 0, "no matching image means no static entry");
++    check(runtime_ram_overlay_claims(0x03000000, 0) == 1, "no matching image is claimed");
++    reset_overlay(false, 0);
++    check(runtime_has_static_entry(0x03000000, 0) == 0 &&
++              runtime_ram_overlay_claims(0x03000000, 0) == 0,
++          "unclaimed PC uses the static table");
++    g_runtime_ram_overlay_select = nullptr;
++    check(runtime_ram_overlay_claims(0x03000000, 0) == 0, "no selector claims nothing");
++
++    // Per-guest state in a multiplayer context.
++    reset_overlay(false, 1);
++    gbarecomp::RuntimeArmContext captured;
++    gbarecomp::runtime_capture_arm_context(captured);
++    check(captured.ram_overlay_select == fake_selector, "context captures the selector");
++    gbarecomp::RuntimeArmContext other;
++    gbarecomp::runtime_restore_arm_context(other);
++    check(g_runtime_ram_overlay_select == nullptr, "restoring a context without a selector clears it");
++    gbarecomp::runtime_restore_arm_context(captured);
++    check(g_runtime_ram_overlay_select == fake_selector, "restoring a context reinstates its selector");
++
++    // With a resumable context, the session's RAM boundary runs before the
++    // selector reads memory, and a claimed miss throws instead of bridging.
++    gbarecomp::RuntimeArmContext guest;
++    guest.ram_dispatch_boundary = record_boundary;
++    reset_overlay(false, 1);
++    boundary_calls = selects_before_boundary = 0;
++    gbarecomp::runtime_set_resumable_context(&guest);
++    runtime_dispatch(0x03000000);
++    check(boundary_calls == 1 && selects_before_boundary == 0 && overlay_entry_calls == 1,
++          "multiplayer boundary precedes the selector, then the entry runs");
++    bool threw = false;
++    reset_overlay(true, 1);
++    try { runtime_dispatch(0x03000000); } catch (const std::logic_error&) { threw = true; }
++    check(threw && !codegen_test::g_dispatch_called,
++          "multiplayer claimed miss throws instead of bridging");
++    gbarecomp::runtime_set_resumable_context(nullptr);
++    g_runtime_ram_overlay_select = nullptr;
++}
+ }  // namespace
+ 
+ int main() {
+     test_exchange_and_miss();
+     test_swi();
++    test_ram_overlay_select();
+     if (failures) return 1;
+-    std::puts("tail dispatch: exchange, misses, RAM hooks and SWI parity passed");
++    std::puts("tail dispatch: exchange, misses, RAM hooks, RAM overlay selector and SWI parity passed");
+     return 0;
+ }
+diff --git a/tests/codegen/stubs.cpp b/tests/codegen/stubs.cpp
+index 02a0db8..c5866b6 100644
+--- a/tests/codegen/stubs.cpp
++++ b/tests/codegen/stubs.cpp
+@@ -83,6 +83,7 @@ void bus_reset(uint32_t base, uint32_t size) {
+         g_unimplemented_op = nullptr;
+     }
+     g_unimplemented_pc = 0;
++    g_overlay_try_calls = 0;
+ }
+ 
+ void bus_write_u32_direct(uint32_t addr, uint32_t v) {
+@@ -125,6 +126,7 @@ bool     g_named_sink_called    = false;
+ bool     g_unimplemented_called = false;
+ const char* g_unimplemented_op  = nullptr;
+ uint32_t g_unimplemented_pc     = 0;
++unsigned g_overlay_try_calls    = 0;
+ 
+ }  // namespace codegen_test
+ 
+@@ -243,6 +245,7 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
+ // null stub: no overlay is ever healed under test, every dispatch falls through
+ // to the recorder above.
+ extern "C" int overlay_try_dispatch(uint32_t /*pc*/, int /*thumb*/) {
++    ++codegen_test::g_overlay_try_calls;
+     return 0;
+ }
+ 
+diff --git a/tests/codegen/stubs.h b/tests/codegen/stubs.h
+index de1811d..a6393a7 100644
+--- a/tests/codegen/stubs.h
++++ b/tests/codegen/stubs.h
+@@ -51,5 +51,7 @@ extern bool     g_named_sink_called;
+ extern bool     g_unimplemented_called;
+ extern const char* g_unimplemented_op;
+ extern uint32_t g_unimplemented_pc;
++// Calls to the null overlay_try_dispatch stub (the self-heal dispatch tier).
++extern unsigned g_overlay_try_calls;
+ 
+ }  // namespace codegen_test
