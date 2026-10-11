@@ -198,7 +198,7 @@ The plan suggested matching I/O writes between `writes.tsv` and `GBARECOMP_MMIO_
 - **New task (proposed P2-21): timing patch.** The prefetch reset on every PC write (interpreter, codegen, `runtime_refill_cycles`, and the `Bus`/`GbaBus` method the interpreter needs) and the 2-cycle IRQ entry hidden by a running DMA, with synthetic repro ROMs (no Nintendo data): a ROM loop `cmp; strcc [EWRAM]; bcc` with WAITCNT `0x4317`, timed with a timer (mGBA 22 cycles per iteration, the pin 26), and an IRQ-entry timing check with no DMA running. gbarecomp's `codegen_tests` already compare codegen and interpreter prefetch positions (docs/CPU_TIMING.md in gbarecomp) and should cover the reset; `timing_mgba_differential` needs an mGBA executable and is optional. Acceptance: P2-13's (`boot_to_race` race frames 3290-4400 and `full_race_cross` as in section 4, recompiled build too once P2-10 lands), and comparison 1 unchanged between the interpreter and the recompiled build. Depends on the owner decision of point 1.
 - **If the owner picks option (a):** IRQ and DMA latency patches on top, measured on the cup.
 - **P2-09:** classify the BIOS-reference against plain-interpreter differences of section 7.1, and expect `ram_iwram_stacks` to differ against mGBA wherever IRQ latency differs.
-- **P2-15:** the FIFO A refill DMA lands a few lines apart in the two engines (section 5) while per-frame FIFO bytes are equal.
+- **P2-15:** the FIFO A refill DMA appears to land a few lines apart in the two engines (section 5, **unverified**) while per-frame FIFO bytes are equal.
 - **Upstream candidates** for the owner (nothing filed): U19, gbarecomp's prefetch model never resets on a PC write (repro: the loop above); U20, no cycles for IRQ entry.
 
 ## Reproducing
