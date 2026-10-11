@@ -1,0 +1,38 @@
+# race_gp.txt run to the finish: GP on California, A held from frame 3600,
+# START pauses at 4200 and resumes, then A stays held until the race is over.
+# On a retail-BIOS boot the race display ends at frame 18415
+# (docs/research/phase1-findings.md, section 2). Fresh empty save; frame
+# numbers as in ../../input/boot_to_race.txt. Used by run_ab.sh.
+
+until 2450
+tap START
+wait 60
+tap A                      # English -> main menu
+wait 180
+tap A                      # solo
+wait 120
+tap A                      # single race
+wait 90
+tap DOWN 1                 # cross -> GP
+wait 30
+tap A                      # -> track select
+wait 90
+tap A                      # -> bike select
+wait 90
+tap A                      # -> gearbox
+wait 90
+tap A                      # Auto -> race loads
+until 3600
+hold A
+until 4200
+tap START                  # pause
+wait 30
+tap START                  # resume
+wait 60
+until 18300
+mark race_end_approach
+shot race_end_approach
+until 19500
+mark after_race
+shot after_race
+end

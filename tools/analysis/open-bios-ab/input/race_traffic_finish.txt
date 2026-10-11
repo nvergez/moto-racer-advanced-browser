@@ -1,0 +1,38 @@
+# race_traffic.txt run to the finish: Traffic on Moscow, A held from frame
+# 3600, START pauses at 4200 and resumes, then A stays held until the race is
+# over. On a retail-BIOS boot the race display ends at frame 17909
+# (docs/research/phase1-findings.md, section 2). Fresh empty save; frame
+# numbers as in ../../input/boot_to_race.txt. Used by run_ab.sh.
+
+until 2450
+tap START
+wait 60
+tap A                      # English -> main menu
+wait 180
+tap A                      # solo
+wait 120
+tap A                      # single race
+wait 90
+tap DOWN 2                 # cross -> traffic
+wait 30
+tap A                      # -> track select
+wait 90
+tap A                      # -> bike select
+wait 90
+tap A                      # -> gearbox
+wait 90
+tap A                      # Auto -> race loads
+until 3600
+hold A
+until 4200
+tap START                  # pause
+wait 30
+tap START                  # resume
+wait 60
+until 17800
+mark race_end_approach
+shot race_end_approach
+until 19000
+mark after_race
+shot after_race
+end
