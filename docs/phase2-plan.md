@@ -68,6 +68,11 @@ Numbers are proposals and are assigned when each patch lands. The four investiga
 | 0009 | Per-line OBJ cycle budget, switchable | ppu-diffs prototype | about 75 lines plus the wide compositor | P2-14 | U14 |
 | (0010) | Bridge frame boundary (present, input, quit inside a bridge) | runtime-bugs and web-abort prototypes, two designs | 39-60 lines | P2-16, only if adopted | U3 |
 | (extra) | Input replay at VBlank start | only if P2-02's game-owned approach fails | small | P2-02 | U10 |
+| 0011 | GamePak prefetch reset on a PC write, the runtime's half: the GBA bus's `prefetch_reset`, and the reset in `runtime_refill_cycles` | P2-13's prototypes A and C | about 25 lines plus tests | P2-21 | U19 |
+| arm-recomp-core 0001 | The same, arm-recomp-core's half: `Bus::prefetch_reset`, called by `Interpreter::step`, and the reset after every static branch in generated code | P2-13's prototype C | about 20 lines | P2-21 | U19 |
+| 0012 | IRQ entry cycles: the refill at the vector, hidden by a DMA in the same tick | P2-13's prototype B | about 25 lines | P2-21 | U20 |
+
+P2-21 took 0011 and 0012, after the numbers proposed above for other tasks, and started a second series, `patches/arm-recomp-core/`, for gbarecomp's nested submodule `external/arm-recomp-core`, which `scripts/apply-patches.sh` applies the same way (decision 9; [patches/gbarecomp/README.md](../patches/gbarecomp/README.md), "The nested series"). A patch of that series is named `arm-recomp-core/NNNN` in `--without`.
 
 Most of these touch `patches/gbarecomp/README.md`: merge them one at a time and rebase. Several will stack on nearby code (0007 and 0009 in the same compositor code, 0003 and 0006 in `runtime_arm.cpp`, 0010 next to 0004's quit check; their exact hunks are not known yet). PR #5's `scripts/apply-patches.sh` judges each patch on its own against the fully patched tree (reverse check, then forward check, otherwise it stops, l.47-56), and every build calls it through `ensure_patches` (`scripts/lib/common.sh:230-232`). With two stacked patches whose hunks are within each other's context, the earlier one neither reverse-applies nor applies on the full tree, so every build would stop (reproduced on a toy repository: patch A edits line 10, patch B line 12). P2-00 makes the tooling apply the series as a stack before any new patch lands.
 
@@ -435,7 +440,7 @@ Deliverable: `docs/research/phase2-race-lockstep.md` *(new)* with root cause and
 
 Acceptance: if fixed, layer 1 is exact on `boot_to_race` race frames 3290-4400 and `full_race_cross` gives mGBA's finishing position and time. Otherwise, the document explains the difference with evidence, and the owner has the decision.
 
-Result: [phase2-race-lockstep.md](research/phase2-race-lockstep.md). Two gbarecomp timing differences from mGBA (the prefetch position kept across branches, no cycles for IRQ entry) cause the loss of lockstep; fixed in a scratch build, `full_race_cross` plays as in mGBA and the cup gives mGBA's positions and points, with one lap time of race 3 different. Most of the fix can be ordinary gbarecomp patches, but the prefetch reset in generated code needs a change in the nested arm-recomp-core submodule, which the patch tooling cannot carry yet (owner decision 9), and criterion 3 on the cup needs an owner decision (decision 4; section 8 there). Follow-up: proposed P2-21, the timing patch with synthetic repros, which waits for decision 9. Tooling: `--trace-pc-cycles` in the harness and `tools/difftest/timeline.py`.
+Result: [phase2-race-lockstep.md](research/phase2-race-lockstep.md). Two gbarecomp timing differences from mGBA (the prefetch position kept across branches, no cycles for IRQ entry) cause the loss of lockstep; fixed in a scratch build, `full_race_cross` plays as in mGBA and the cup gives mGBA's positions and points, with one lap time of race 3 different. Most of the fix can be ordinary gbarecomp patches, but the prefetch reset in generated code needs a change in the nested arm-recomp-core submodule, which the patch tooling cannot carry yet (owner decision 9), and criterion 3 on the cup needs an owner decision (decision 4; section 8 there). Follow-up: P2-21, the timing patch with synthetic repros (below). Tooling: `--trace-pc-cycles` in the harness and `tools/difftest/timeline.py`.
 
 ### P2-14. OBJ cycle budget (fidelity switch)
 
@@ -530,7 +535,7 @@ Scope:
 
 ### P2-19. The cup against mGBA, and in the browser
 
-*Depends on:* P2-11, P2-12, P2-13, P2-14, and P2-20 if it was triggered. *Effort:* 2-4.
+*Depends on:* P2-11, P2-12, P2-13, P2-14, P2-21 (without it every race starts a frame late), and P2-20 if it was triggered. *Effort:* 2-4.
 
 This task produces the evidence for exit criteria 3 and 4 on the cup, which no earlier task covers.
 
@@ -553,6 +558,36 @@ Tests: `scripts/replay-test.sh cup --against mgba`, `scripts/replay-test.sh cup 
 *Triggered by* P2-13's recommendation, or by a manifest route that does not follow its checkpoints on gbarecomp even with more slack in its script (P2-09's runner finds this on the interpreter). *Depends on:* P2-09 (P2-04 through it), plus P2-13 when P2-13 triggers it. *Effort:* 1-2.
 
 Scope: the converter (P2-02) splits a route into segments keyed to game events (for example the DISPCNT `0x1741` transition at race start, the same events as P2-04's checkpoints) and replays each segment from its event; the runner (P2-09) aligns frames per segment. Re-run P2-09's acceptance and, if it ran, P2-13's comparison with the new replays. P2-19 then depends on this task, and so does P2-11 for every route that needed it.
+
+### P2-21. Timing patch: GamePak prefetch reset and IRQ entry cycles
+
+*Depends on:* P2-13 (merged), whose prototypes it ports. *Effort:* 1-1.5.
+
+Scope ([phase2-race-lockstep.md](research/phase2-race-lockstep.md) §8, point 1, and its follow-up; decision 9):
+
+- Extend `scripts/apply-patches.sh` and its test so that the repository carries a stacked patch series for gbarecomp's nested submodule `external/arm-recomp-core` (`patches/arm-recomp-core/`), with the same stack semantics, checks, A/B builds (`--without`) and CI coverage as `patches/gbarecomp/`.
+- The GamePak prefetch position reset on every PC write, as mGBA's `GBASetActiveRegion` does: in the interpreter (`Interpreter::step`), after the refill of every static branch in generated code (arm-recomp-core's `arm_codegen.cpp`), and in `runtime_refill_cycles` for the PC writes generated code makes at run time.
+- The cycles of IRQ entry, as mGBA charges them: the pipeline refill at the vector (2 cycles), hidden while a DMA holds the CPU.
+- Each fix as an upstream-ready patch with a header, and a synthetic repro without Nintendo data: a cartridge loop `cmp; strcc [EWRAM]; bcc` with WAITCNT `0x4317`, timed with a timer, and an IRQ-entry timing check with no DMA running.
+- Not in scope: mGBA's IRQ and DMA latency (decision 4).
+
+Acceptance:
+
+- On `full_race_cross` and the cup route, the race image arrives on mGBA's frame (3290 on the routes that start like `boot_to_race`), and the cup's positions and points equal mGBA's, measured with P2-13's tooling.
+- No regression in `scripts/test-engine.sh`, the repro tests or comparison 1.
+
+Tests:
+
+```sh
+tests/tooling/apply-patches-test.sh
+scripts/apply-patches.sh --check && scripts/test-engine.sh
+scripts/repro-test.sh
+scripts/repro-test.sh --without 0011 --without 0012 --without arm-recomp-core/0001 --expect-failure prefetch1 irqentry1
+```
+
+and the captures and timelines of [phase2-timing-fixes.md](research/phase2-timing-fixes.md), "Reproducing".
+
+Result: [phase2-timing-fixes.md](research/phase2-timing-fixes.md). Patches `0011`, `0012` and `arm-recomp-core/0001`; the synthetic repros `prefetch1` and `irqentry1` give mGBA's cycle counts on both gbarecomp backends with them, the pin's without. On the BIOS-interpreting reference the race image arrives at 3290 on `boot_to_race` and `full_race_cross` (stock: 3291), `full_race_cross` gives mGBA's race (display 3303-21788, the same lap times, the random number state equal on all 25,000 frames), and the cup's race images arrive on mGBA's frames and every rider's points equal mGBA's after each race. Race 3 of the cup is still 122 frames shorter and the random number state still diverges in each race (IRQ and DMA latency, decision 4). The recompiled build reaches the race on mGBA's frame too; it cannot run a whole race on `main`'s config until P2-10. Comparison 1: the frame CRCs differ on the same three frames as P2-05's; two single-frame differences in other columns are new and three are gone, all record-timing differences of a few cycles, on frames with interpreter bridges (frame 294 apart, which P2-05 left to P2-09).
 
 ## Order and parallel work
 
@@ -595,9 +630,11 @@ graph TD
   T09 -.-> T20["P2-20 event-anchored replays, if triggered"]
   T13 -.-> T20
   T20 -.-> T11
+  T13 --> T21["P2-21 timing patch"]
   T11 --> T19["P2-19 cup vs mGBA and in browser"]
   T12 --> T19
   T13 --> T19
+  T21 --> T19
   T14 --> T19
   T20 -.-> T19
   T15 --> T18["P2-18 exit gate"]
@@ -615,11 +652,11 @@ Dotted edges apply only if P2-20 is triggered.
 | 3 | P2-05 | P2-13's investigation can start here on P2-02's replay and P2-03's captures |
 | 4 | P2-06, P2-09 | |
 | 5 | P2-08, P2-10, P2-13, P2-15 | P2-13's effort is the most uncertain. P2-20 here if a route does not follow its checkpoints (P2-09) |
-| 6 | P2-11, P2-12, P2-14 | P2-20 here if P2-13 calls for it |
+| 6 | P2-11, P2-12, P2-14, P2-21 | P2-20 here if P2-13 calls for it (it did not). P2-21 changes the CPU timing of every route: P2-10's and P2-11's measurements against mGBA are best taken with it in |
 | 7 | P2-16, P2-19 | |
 | 8 | P2-18 | |
 
-Merge hotspots: `game.toml` (P2-05, P2-06, P2-10, P2-11), `patches/gbarecomp/README.md` (most engine tasks), `scripts/apply-patches.sh` (P2-00), `scripts/regen.sh` and `CMakeLists.txt` (P2-02's trace option, P2-10, P2-12), `web/game-lib/CMakeLists.txt` and `scripts/build-web.sh` (P2-02's traces, P2-12's selector and `fe_` corpus), `src/main.cpp` (P2-02's replay and reference hook, P2-10, P2-12), `tools/difftest/routes.toml` (P2-04, P2-11, P2-19). Merge those in dependency order and rebase.
+Merge hotspots: `game.toml` (P2-05, P2-06, P2-10, P2-11), `patches/gbarecomp/README.md` (most engine tasks), `scripts/apply-patches.sh` (P2-00, P2-21), `scripts/repro-test.sh` and `tests/repro/` (every task with a synthetic repro), `scripts/regen.sh` and `CMakeLists.txt` (P2-02's trace option, P2-10, P2-12), `web/game-lib/CMakeLists.txt` and `scripts/build-web.sh` (P2-02's traces, P2-12's selector and `fe_` corpus), `src/main.cpp` (P2-02's replay and reference hook, P2-10, P2-12), `tools/difftest/routes.toml` (P2-04, P2-11, P2-19). Merge those in dependency order and rebase.
 
 The critical path is PR #5 (merged) → P2-00 → P2-03 → P2-02 → P2-05 → P2-09 → P2-10 → P2-11 → P2-19 → P2-18, about 13-18.5 working days by the estimates above (earlier drafts gave less because they missed dependencies). P2-13 runs beside it and may decide whether criterion 3 can be met as written. If P2-13 runs to its high estimate and calls for P2-20, the path through them is up to a day longer. P2-20 triggered by a route that does not follow runs beside P2-10 and adds nothing unless it overruns.
 
@@ -633,7 +670,7 @@ The critical path is PR #5 (merged) → P2-00 → P2-03 → P2-02 → P2-05 → 
 6. Later, with Phase 4: whether players get the OBJ cycle budget (P2-14).
 7. Optional: a small test ROM on the owner's hardware to settle blend rounding, semi-transparent OBJ brightness and the OBJ budget's edge cases (diagnosis, open question 5).
 8. Before Phase 3, not part of Phase 2: whether any browser bundle is published (ADR 0001 decision 4, "Out of scope").
-9. How to carry a change to gbarecomp's nested submodule `external/arm-recomp-core`, which `scripts/apply-patches.sh` refuses to touch: extend the patch tooling with a series for it, or another way. The proposed P2-21 timing patch needs one such change, the prefetch reset after a static branch in generated code ([phase2-race-lockstep.md](research/phase2-race-lockstep.md) section 8, point 1).
+9. How to carry a change to gbarecomp's nested submodule `external/arm-recomp-core`, which `scripts/apply-patches.sh` refused to touch: extend the patch tooling with a series for it, or another way. The P2-21 timing patch needs one such change, the prefetch reset after a static branch in generated code ([phase2-race-lockstep.md](research/phase2-race-lockstep.md) section 8, point 1). P2-21's scope took the first option: `patches/arm-recomp-core/`, applied by the same script ([patches/gbarecomp/README.md](../patches/gbarecomp/README.md), "The nested series").
 
 ## Out of scope for Phase 2
 
