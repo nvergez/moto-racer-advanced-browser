@@ -288,6 +288,8 @@ Not yet ruled out: the game's random-number source (game-facts question 17), and
 
 This is the main open risk for Phase 2's exit criterion ("a full cup plays identically to mGBA"); [phase2-plan.md](../phase2-plan.md) gives it its own task.
 
+Note added by P2-13 ([phase2-race-lockstep.md](phase2-race-lockstep.md)): the race program starts one frame later because gbarecomp's GamePak prefetch model never resets its position on a branch, as mGBA's does, which makes the race program's start-up loop 18% slower (section 2 there); a second difference, no cycles for IRQ entry in gbarecomp, then lets races drift by a few cycles per frame. With both changed in a scratch build, `full_race_cross` plays as in mGBA. The remaining differences are IRQ and DMA latencies where mGBA's model is partly empirical.
+
 ## 7. Comparison method findings
 
 ### 7.1 What two engines are being compared

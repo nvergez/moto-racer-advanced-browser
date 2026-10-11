@@ -433,6 +433,8 @@ Deliverable: `docs/research/phase2-race-lockstep.md` *(new)* with root cause and
 
 Acceptance: if fixed, layer 1 is exact on `boot_to_race` race frames 3290-4400 and `full_race_cross` gives mGBA's finishing position and time. Otherwise, the document explains the difference with evidence, and the owner has the decision.
 
+Result: [phase2-race-lockstep.md](research/phase2-race-lockstep.md). Two gbarecomp timing differences from mGBA (the prefetch position kept across branches, no cycles for IRQ entry) cause the loss of lockstep; fixed in a scratch build, `full_race_cross` plays as in mGBA and the cup gives mGBA's positions and points, with one lap time of race 3 different. The fix needs a change in the nested arm-recomp-core submodule, which the patch tooling cannot carry yet, and criterion 3 on the cup needs an owner decision (section 8 there). Tooling: `--trace-pc-cycles` in the harness and `tools/difftest/timeline.py`.
+
 ### P2-14. OBJ cycle budget (fidelity switch)
 
 *Depends on:* P2-08 (same code), P2-09. *Effort:* 1-1.5.
