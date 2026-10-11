@@ -10,8 +10,9 @@
 // same offset of each image's ROM source: A's answers 0 (the main table), B's
 // answers 1 with ovl_kDispatchTable, and neither answers -1 (a dispatch miss).
 // It checks only that one word, so it relies on the images differing at every
-// offset, which make_rom.py guarantees. It reads the bus's backing arrays,
-// never bus_read_*, which has side effects.
+// offset they share, which make_rom.py checks whenever it builds the ROM
+// (check_overlay_images). It reads the bus's backing arrays, never
+// bus_read_*, which has side effects.
 //
 // MRA_REPRO_OVERLAY_SELECTOR=0 leaves it uninstalled: the main table then
 // answers for 0x03000000 whichever image is resident, the behavior of a

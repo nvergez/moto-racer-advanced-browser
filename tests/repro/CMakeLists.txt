@@ -37,8 +37,8 @@ endif()
 add_subdirectory("${GBARECOMP_ROOT}" gbarecomp_build EXCLUDE_FROM_ALL)
 
 # Whether this gbarecomp has the RAM overlay selector (patch 0006). An A/B
-# build without the patch still builds overlay1, whose hooks then install
-# nothing (tests/repro/overlay1_hooks.cpp).
+# build without the patch still builds overlay1 and overlay1heal, whose hooks
+# then install nothing (tests/repro/overlay1_hooks.cpp, overlay1heal_hooks.cpp).
 file(STRINGS "${GBARECOMP_ROOT}/src/armv4t/runtime_arm.h" ram_overlay_select_decl
     REGEX "extern RuntimeRamOverlaySelect g_runtime_ram_overlay_select;")
 if(ram_overlay_select_decl)

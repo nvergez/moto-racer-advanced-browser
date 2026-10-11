@@ -15,17 +15,21 @@
 #   --frames N         frames per run (default 2000)
 #   --without NAME     A/B build: leave gbarecomp patch NAME (0003, 0006) out,
 #                      and build under build/without-NAME/repro/
-#                      (patches/gbarecomp/README.md)
+#                      (patches/gbarecomp/README.md). The overlay cases read
+#                      their results through patch 0005's capture: without
+#                      0005 they are skipped, or refused if named
 #   --expect-failure   require every run to end the way its bug makes it end
 #                      without the patch that fixes it, which --without must
 #                      leave out. irqleak1-3, without 0003: SIGABRT (exit code
 #                      134) with "generated call-return stack overflow" at the
 #                      case's leaked return address. overlay1, without 0006:
 #                      exit 0 under GBARECOMP_STRICT_STATIC=1, with image A's
-#                      result logged for image B. Without CASE, runs the cases
-#                      whose patch is left out
-#   CASE               irqleak1, irqleak2, irqleak3 and/or overlay1 (default
-#                      all four)
+#                      result logged for image B; overlay1heal, the same with
+#                      healing on. Without CASE, runs the default cases whose
+#                      patch is left out
+#   CASE               irqleak1, irqleak2, irqleak3, overlay1 (the default:
+#                      these four), or overlay1heal, which runs only when
+#                      named (below)
 #
 # An irqleak run passes when it exits 0 after at least N frames, bridged F
 # (0x08000200, so the leak path ran), interprets at most 10 instructions per
@@ -44,8 +48,19 @@
 # gbarecomp without the patch, the same strict run must log 0xA1 after B,
 # image A's code run for image B with no dispatch miss.
 #
-# Runs are headless, with SDL_AUDIODRIVER=dummy and runtime healing off, each
-# in build/repro/run/RUN/, where its output is out.log.
+# overlay1heal (opt-in, not in the default list, not run in CI) tests 0006's
+# heal-tier guard: overlay1's ROM with no corpus for either image, run with
+# RAM healing on (GBARECOMP_SELFHEAL_RECOMPILE=1, GBARECOMP_RAM_OVERLAY_HEAL=1,
+# the gcc backend: it needs a C++ compiler at run time, `c++` on PATH or
+# GBARECOMP_HEAL_CXX). Image A's first dispatch heals 0x03000000 from A's
+# bytes, and the selector claims image B without a corpus. The run must exit
+# 0 after at least N frames, heal A, and log 0xA1 then 0xB2 like overlay1: B
+# bridged, never run through A's heal. Its control, overlay1heal-noselector,
+# must heal A too and log 0xA1 after B: a PC nobody claims gets A's heal.
+#
+# Runs are headless, with SDL_AUDIODRIVER=dummy and runtime healing off
+# (except overlay1heal's), each in build/repro/run/RUN/, where its output is
+# out.log.
 set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 . "$(dirname "$0")/lib/common.sh"
@@ -64,7 +79,7 @@ while [ $# -gt 0 ]; do
     --without) [ $# -ge 2 ] || die "--without needs a patch name or number"; add_without "$2"; shift ;;
     --without=*) add_without "${1#*=}" ;;
     --expect-failure) EXPECT=failure ;;
-    -h | --help) sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,63p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option: $1" ;;
     *) CASES_ARG="$CASES_ARG${CASES_ARG:+ }$1" ;;
   esac
@@ -80,7 +95,7 @@ select_patch_variant
 case_patch() {
   case "$1" in
     irqleak*) echo 0003 ;;
-    overlay1) echo 0006 ;;
+    overlay1 | overlay1heal) echo 0006 ;;
   esac
 }
 # The numbers of the patches this build leaves out, separated by spaces.
@@ -89,32 +104,41 @@ for name in $(without_patch_names); do left_out="$left_out${name%%-*} "; done
 
 # Validate the cases, and run each one once even if it is named twice (two
 # entries for one case would give CMake two targets with the same name).
-# --expect-failure runs only cases whose patch is left out.
+# --expect-failure runs only cases whose patch is left out. Named cases must
+# all be testable; the default list keeps those that are.
 CASES=""
 for c in ${CASES_ARG:-$ALL_CASES}; do
   case "$c" in
-    irqleak1 | irqleak2 | irqleak3 | overlay1) ;;
-    *) die "unknown case: $c (irqleak1, irqleak2, irqleak3 or overlay1)" ;;
+    irqleak1 | irqleak2 | irqleak3 | overlay1 | overlay1heal) ;;
+    *) die "unknown case: $c (irqleak1, irqleak2, irqleak3, overlay1 or overlay1heal)" ;;
   esac
   if [ "$EXPECT" = failure ]; then
     p=$(case_patch "$c")
     case "$left_out" in
       *" $p "*) ;;
       *)
-        # Named cases must all be testable; the default list keeps those
-        # that are.
         [ -z "$CASES_ARG" ] && continue
         die "$c reproduces the bug that patch $p fixes: --expect-failure needs --without $p"
         ;;
     esac
   fi
+  # The overlay cases read the program's log through patch 0005's capture.
+  case "$c:$left_out" in
+    overlay*:*" 0005 "*)
+      if [ -z "$CASES_ARG" ]; then
+        info "Skipping $c: it reads its results through patch 0005's capture, which --without 0005 leaves out"
+        continue
+      fi
+      die "$c reads its results through patch 0005's capture: it cannot run --without 0005"
+      ;;
+  esac
   case " $CASES " in
     *" $c "*) ;;
     *) CASES="$CASES${CASES:+ }$c" ;;
   esac
 done
 [ -n "$CASES" ] ||
-  die "--expect-failure needs --without with the patch a case tests: 0003 (irqleak1-3) or 0006 (overlay1)"
+  die "no case to run: --expect-failure needs --without 0003 (irqleak1-3) or --without 0006 (overlay1, which also needs 0005)"
 case "$BIOS_DUMP" in
   "" | /*) ;;
   *) BIOS_DUMP="$PWD/$BIOS_DUMP" ;;
@@ -325,83 +349,116 @@ check_irqleak() {
   [ -z "$problems" ] || report_failure "$c" "$problems"
 }
 
-# check_overlay RUN SELECTOR AFTER_B [VAR=VALUE...]: run overlay1 as RUN under
-# GBARECOMP_STRICT_STATIC=1 with the capture on, and require that its hooks
-# report selector=SELECTOR (on, off or unavailable), that it is fully static
-# after at least FRAMES frames, and that every capture record once a cycle
-# has completed logs 0xA1 after image A and AFTER_B after image B.
+# check_overlay RUN CASE SELECTOR AFTER_B [VAR=VALUE...]: run CASE (overlay1
+# or overlay1heal) as RUN with the capture on, and require that its hooks
+# report selector=SELECTOR (on, off or unavailable), that it ran at least
+# FRAMES frames, and that every capture record once a cycle has completed
+# logs 0xA1 after image A and AFTER_B after image B. overlay1 runs under
+# GBARECOMP_STRICT_STATIC=1 and must be fully static. overlay1heal runs with
+# RAM healing on and must heal image A at 0x03000000, so that the heal tier
+# has A's heal to run when image B is dispatched.
 check_overlay() {
-  local name=$1 selector=$2 after_b=$3 frames coverage capture results problems=""
-  local after_a_seen after_b_seen cycles mixed
-  shift 3
-  # A relative GBARECOMP_CAPTURE path is relative to the run directory.
-  capture="$REPRO_DIR/run/$name/capture.tsv"
-  run_case "$name" overlay1 GBARECOMP_STRICT_STATIC=1 GBARECOMP_CAPTURE=capture.tsv \
-    GBARECOMP_CAPTURE_MEM="$OVERLAY_MEM" GBARECOMP_CAPTURE_LINE_STATE=0 "$@"
+  local name=$1 c=$2 selector=$3 after_b=$4 frames coverage capture problems=""
+  local after_a_seen="?" after_b_seen="?" cycles="?" mixed=0 healed=0 heal_failed=0 heal_info
+  shift 4
+  # A relative path in these variables is relative to the run directory.
+  if [ "$c" = overlay1heal ]; then
+    # A heal cache of its own, in the run directory, which run_case empties:
+    # no heal from an earlier run is loaded. Verbose for the HEALED line.
+    run_case "$name" "$c" GBARECOMP_SELFHEAL_RECOMPILE=1 GBARECOMP_RAM_OVERLAY_HEAL=1 \
+      GBARECOMP_HEAL_BACKEND=gcc GBARECOMP_HEAL_CACHE=heal-cache GBARECOMP_SELFHEAL_VERBOSE=1 \
+      GBARECOMP_CAPTURE=capture.tsv GBARECOMP_CAPTURE_MEM="$OVERLAY_MEM" \
+      GBARECOMP_CAPTURE_LINE_STATE=0 "$@"
+    # Not anchored: these go to stderr, the rest of the log to buffered
+    # stdout, so a line may start in the middle of another.
+    healed=$(count 'self_heal: HEALED RAM 0x03000000 \(arm\)' "$log")
+    heal_failed=$(count 'self_heal: sync compile FAILED' "$log")
+  else
+    run_case "$name" "$c" GBARECOMP_STRICT_STATIC=1 \
+      GBARECOMP_CAPTURE=capture.tsv GBARECOMP_CAPTURE_MEM="$OVERLAY_MEM" \
+      GBARECOMP_CAPTURE_LINE_STATE=0 "$@"
+  fi
+  capture="$run_dir/capture.tsv"
   frames=$(sed -nE 's/.*ppu_frames=([0-9]+).*/\1/p' "$log" | tail -n 1)
-  coverage=$(sed -nE 's/.*(self_heal_coverage=[A-Z_]+ dispatch_misses=[0-9]+ interpreted_insns=[0-9]+).*/\1/p' "$log" | tail -n 1)
-  # The last record's log, and whether any record after the first completed
-  # cycle logs anything else.
-  results=$(awk -F '\t' '
-    NR == 1 {
-      for (i = 1; i <= NF; i++) {
-        if ($i == "mem_02000000") a = i
-        if ($i == "mem_02000004") b = i
-        if ($i == "mem_02000008") n = i
+  coverage=$(sed -nE 's/.*(self_heal_coverage=[A-Z_]+ dispatch_misses=[0-9]+ interpreted_insns=[0-9]+( healed_native=[0-9]+ native_calls=[0-9]+)?).*/\1/p' "$log" | tail -n 1)
+  if [ -s "$capture" ]; then
+    # The last record's log, and whether any record after the first
+    # completed cycle logs anything else.
+    read -r after_a_seen after_b_seen cycles mixed <<< "$(awk -F '\t' '
+      NR == 1 {
+        for (i = 1; i <= NF; i++) {
+          if ($i == "mem_02000000") a = i
+          if ($i == "mem_02000004") b = i
+          if ($i == "mem_02000008") n = i
+        }
+        if (!a || !b || !n) { print "? ? ? 0"; exit }
+        next
       }
-      if (!a || !b || !n) { print "? ? ? ?"; exit }
-      next
-    }
-    {
-      if ($n != "00000000") {
-        if (!seen) { fa = $a; fb = $b; seen = 1 }
-        else if ($a != fa || $b != fb) mixed = 1
+      {
+        if ($n != "00000000") {
+          if (!seen) { fa = $a; fb = $b; seen = 1 }
+          else if ($a != fa || $b != fb) mixed = 1
+        }
+        la = $a; lb = $b; ln = $n
       }
-      la = $a; lb = $b; ln = $n
-    }
-    END { if (a) print (la == "" ? "?" : la), (lb == "" ? "?" : lb), (ln == "" ? "?" : ln), mixed + 0 }
-  ' "$capture" 2> /dev/null || echo "? ? ? ?")
-  read -r after_a_seen after_b_seen cycles mixed <<< "$results"
-  case "$cycles" in
-    [0-9A-F]*) cycles=$((16#$cycles)) ;;
-  esac
-  printf '  exit=%s frames=%s %s selector=%s after_A=%s after_B=%s cycles=%s\n' \
+      END { if (a) print (la == "" ? "?" : la), (lb == "" ? "?" : lb), (ln == "" ? "?" : ln), mixed + 0 }
+    ' "$capture" 2> /dev/null || echo "? ? ? 0")"
+    case "$cycles" in
+      [0-9A-F]*) cycles=$((16#$cycles)) ;;
+    esac
+  fi
+  heal_info=""
+  if [ "$c" = overlay1heal ]; then heal_info=" healed_A=$healed"; fi
+  printf '  exit=%s frames=%s %s selector=%s%s after_A=%s after_B=%s cycles=%s\n' \
     "$rc" "${frames:-?}" "${coverage:-no coverage banner}" \
-    "$(sed -nE 's/^overlay1: selector=([a-z]+).*/\1/p' "$log" | head -n 1)" \
-    "$after_a_seen" "$after_b_seen" "$cycles"
+    "$(sed -nE "s/^$c: selector=([a-z]+).*/\\1/p" "$log" | head -n 1)" \
+    "$heal_info" "$after_a_seen" "$after_b_seen" "$cycles"
 
   [ "$rc" = 0 ] || problems="$problems $(describe_exit "$rc");"
-  grep -q "^overlay1: selector=$selector" "$log" ||
+  grep -q "^$c: selector=$selector" "$log" ||
     problems="$problems the hooks did not report selector=$selector;"
-  grep -q '^strict_static=ENABLED' "$log" || problems="$problems not run strict-static;"
   if [ -z "$frames" ] || [ "$frames" -lt "$FRAMES" ]; then
     problems="$problems stopped at frame ${frames:-?};"
   fi
-  case "$coverage" in
-    'self_heal_coverage=FULLY_STATIC dispatch_misses=0 interpreted_insns=0') ;;
-    *) problems="$problems not fully static (${coverage:-no coverage banner});" ;;
-  esac
-  [ "$after_a_seen" = 000000A1 ] || problems="$problems logged $after_a_seen after image A, not 000000A1;"
-  [ "$after_b_seen" = "$after_b" ] || problems="$problems logged $after_b_seen after image B, not $after_b;"
-  [ "$mixed" = 0 ] || problems="$problems the log changed between cycles;"
-  case "$cycles" in
-    '' | *[!0-9]*) problems="$problems no cycle count in the capture;" ;;
-    *) [ "$cycles" -ge $((FRAMES / 2)) ] || problems="$problems only $cycles cycles;" ;;
-  esac
+  if [ "$c" = overlay1heal ]; then
+    [ "$heal_failed" = 0 ] ||
+      problems="$problems the heal compile failed (it needs a C++ compiler: c++ on PATH, or GBARECOMP_HEAL_CXX);"
+    [ "$healed" -gt 0 ] ||
+      problems="$problems image A was never healed at 0x03000000, so the heal tier had nothing to run for B;"
+  else
+    grep -q '^strict_static=ENABLED' "$log" || problems="$problems not run strict-static;"
+    case "$coverage" in
+      'self_heal_coverage=FULLY_STATIC dispatch_misses=0 interpreted_insns=0') ;;
+      *) problems="$problems not fully static (${coverage:-no coverage banner});" ;;
+    esac
+  fi
+  if [ ! -s "$capture" ]; then
+    # Without a capture, the log checks below would only repeat this.
+    problems="$problems no capture file (the overlay cases read their log through patch 0005's capture);"
+  else
+    [ "$after_a_seen" = 000000A1 ] || problems="$problems logged $after_a_seen after image A, not 000000A1;"
+    [ "$after_b_seen" = "$after_b" ] || problems="$problems logged $after_b_seen after image B, not $after_b;"
+    [ "$mixed" = 0 ] || problems="$problems the log changed between cycles;"
+    case "$cycles" in
+      '' | *[!0-9]*) problems="$problems no cycle count in the capture;" ;;
+      *) [ "$cycles" -ge $((FRAMES / 2)) ] || problems="$problems only $cycles cycles;" ;;
+    esac
+  fi
   [ -z "$problems" ] || report_failure "$name" "$problems"
 }
 
 for c in $CASES; do
   case "$c" in
     irqleak*) check_irqleak "$c" ;;
-    overlay1)
+    overlay1 | overlay1heal)
       if [ "$EXPECT" = failure ]; then
-        # Without patch 0006 there is no selector: image A's body runs for B.
-        check_overlay overlay1 unavailable 000000A1
+        # Without patch 0006 there is no selector: image A's body (overlay1)
+        # or heal (overlay1heal) runs for B.
+        check_overlay "$c" "$c" unavailable 000000A1
       else
-        check_overlay overlay1 on 000000B2
+        check_overlay "$c" "$c" on 000000B2
         # The control: the same build with the selector left uninstalled.
-        check_overlay overlay1-noselector off 000000A1 MRA_REPRO_OVERLAY_SELECTOR=0
+        check_overlay "$c-noselector" "$c" off 000000A1 MRA_REPRO_OVERLAY_SELECTOR=0
       fi
       ;;
   esac

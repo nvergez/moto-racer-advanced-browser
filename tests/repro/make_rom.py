@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """Synthetic 4 KiB GBA ROMs that reproduce gbarecomp runtime bugs.
 
-    make_rom.py CASE OUT.gba      CASE is irqleak1, irqleak2, irqleak3 or overlay1
+    make_rom.py CASE OUT.gba      CASE is irqleak1, irqleak2, irqleak3,
+                                  overlay1 or overlay1heal
 
 Prints the SHA-1 of the ROM it wrote. Each case has a gba_recompile config
 next to this script (CASE.toml) whose [identity].sha1 pins these bytes.
 irqleak1-3 reproduce the IRQ call-return leak (patch 0003, below); overlay1
 reproduces the shared-IWRAM code images that patch 0006's RAM overlay
-selector handles (see OVERLAY1).
+selector handles (see OVERLAY1). overlay1heal is the same ROM, byte for byte,
+run with another config and selector (tests/repro/README.md).
 
 No Nintendo code or data is inside: the header logo (0x04-0x9F) is left zero,
 so the runtime must skip the BIOS intro ([bios] skip_intro = true in the
 configs), which never checks the logo. Every instruction is written out below
-as its 32-bit ARM encoding with the assembly in a comment; the encodings were
-checked with the Capstone 5.0.9 disassembler (tests/repro/README.md).
+as its 32-bit ARM encoding with the assembly in a comment. The encodings of
+irqleak1-3 were checked with the Capstone 5.0.9 disassembler, those of
+overlay1 with LLVM's (tests/repro/README.md, "How the encodings were
+checked").
 
 The bug (patches/gbarecomp/0003-irq-call-return-leak.patch): a generated
 function inside an IRQ handler calls a function that has no static entry. The
@@ -72,10 +76,11 @@ def header(rom, title, game_code):
     rom[0xBD] = (-(sum(rom[0xA0:0xBD]) + 0x19)) & 0xFF
 
 
-# Shared start-up code at the header's branch target, 0x080000C0, and its
-# literal pool. It installs the IRQ handler, stores F's address where the tail
-# call reads it, enables the VBlank IRQ and switches to System mode with IRQs
-# enabled. Each case appends its main loop at 0x080000F8.
+# Start-up code of irqleak1-3 at the header's branch target, 0x080000C0, and
+# its literal pool. It installs the IRQ handler, stores F's address where the
+# tail call reads it, enables the VBlank IRQ and switches to System mode with
+# IRQs enabled. Each irqleak case appends its main loop at 0x080000F8.
+# overlay1 has start-up code of its own (OVERLAY1).
 STARTUP = {
     0x080000C0: 0xE59F0038,  # ldr r0, [pc, #0x38]   -> 0x03007FFC (literal at 0x08000100)
     0x080000C4: 0xE59F1038,  # ldr r1, [pc, #0x38]   -> 0x08000180 (handler)
@@ -163,11 +168,14 @@ IRQLEAK2 = {
 #
 # The two images differ at every offset, as Moto Racer Advance's do (none of
 # their 525 overlapping words is equal, docs/research/phase2-diagnosis.md
-# section 3.1). B is one word longer than A, so after A is copied over B, B's
-# last word stays at 0x03000010, as the longer race image's tail stays behind
-# the front-end image in the game.
-OVERLAY_IMAGE_A = 0x08000400        # ROM source of image A, 4 words
-OVERLAY_IMAGE_B = 0x08000500        # ROM source of image B, 5 words
+# section 3.1); check_overlay_images() below checks it whenever the ROM is
+# built. B is one word longer than A, so after A is copied over B, B's last
+# word stays at 0x03000010, as the longer race image's tail stays behind the
+# front-end image in the game.
+OVERLAY_IMAGE_A = 0x08000400        # ROM source of image A
+OVERLAY_SIZE_A = 0x10               # 4 words
+OVERLAY_IMAGE_B = 0x08000500        # ROM source of image B
+OVERLAY_SIZE_B = 0x14               # 5 words
 OVERLAY1 = {
     # Start-up: install the IRQ handler, enable the VBlank IRQ, switch to
     # System mode with IRQs enabled, then run the main loop.
@@ -245,16 +253,39 @@ OVERLAY1 = {
     OVERLAY_IMAGE_B + 0x10: 0xE1A0F00E,  # mov pc, lr
 }
 
+
+
+def check_overlay_images():
+    """Stop unless every word of images A and B is defined and the two images
+    differ at every offset they share. The selectors in
+    tests/repro/overlay1_hooks.cpp and overlay1heal_hooks.cpp tell the images
+    apart by the one word at the dispatch target."""
+    for base, size in ((OVERLAY_IMAGE_A, OVERLAY_SIZE_A),
+                       (OVERLAY_IMAGE_B, OVERLAY_SIZE_B)):
+        for off in range(0, size, 4):
+            if base + off not in OVERLAY1:
+                sys.exit('make_rom.py: overlay1 has no word at 0x%08X' % (base + off))
+    for off in range(0, min(OVERLAY_SIZE_A, OVERLAY_SIZE_B), 4):
+        word = OVERLAY1[OVERLAY_IMAGE_A + off]
+        if word == OVERLAY1[OVERLAY_IMAGE_B + off]:
+            sys.exit('make_rom.py: overlay images A and B have the same word, '
+                     '%08X, at offset 0x%X' % (word, off))
+
+
 CASES = {
     'irqleak1': (b'IRQLEAKTEST', b'ZZZZ', {**STARTUP, **IRQLEAK1}),
     'irqleak2': (b'IRQLEAKTST2', b'ZZZY', {**STARTUP, **IRQLEAK2}),
     'irqleak3': (b'IRQLEAKTST3', b'ZZZX', {**STARTUP, **IRQLEAK1}),
     'overlay1': (b'RAMOVERLAY1', b'ZZZW', OVERLAY1),
+    # overlay1's bytes, with another config (tests/repro/overlay1heal.toml).
+    'overlay1heal': (b'RAMOVERLAY1', b'ZZZW', OVERLAY1),
 }
 
 
 def build(case):
     title, game_code, code = CASES[case]
+    if code is OVERLAY1:
+        check_overlay_images()
     rom = bytearray(ROM_SIZE)
     header(rom, title, game_code)
     for addr, word in code.items():
