@@ -14,7 +14,8 @@ usage: routes.py [--manifest FILE] COMMAND ...
                                start_save, sram, save_sha1); empty if unset
   trace-mem                    the harness --trace-mem list for every memory
                                field (ADDR:SIZE,...)
-  check ROUTE TRACE [--exact]  check the route's checkpoints on a per-frame
+  check ROUTE TRACE [--exact] [--partial]
+                               check the route's checkpoints on a per-frame
                                trace (TSV); exit 1 if the run does not follow
                                the route
 
@@ -39,6 +40,12 @@ and each "before" frame must be a frame where the keys change (the "keys"
 column). Without --exact, frame offsets and "expect" differences are
 reported but do not fail the check: they are results to compare with mGBA,
 not route following.
+
+--partial is for a run that stops before the end of the route
+(scripts/replay-test.sh --frames): an event that does not occur in the trace
+is reported as not reached, not as a failure, when the trace ends before the
+event's deadline, since the run might still have followed the route. Every
+event the trace can decide is checked as usual.
 """
 import argparse
 import os
@@ -394,7 +401,7 @@ def read_trace(path, fields, needed):
     return rows
 
 
-def check(route, rows, exact=False, out=None):
+def check(route, rows, exact=False, out=None, partial=False):
     """Check a route's checkpoints on trace rows. Returns the number of failures."""
     out = out or sys.stdout
     failures = 0
@@ -414,6 +421,11 @@ def check(route, rows, exact=False, out=None):
             i += 1
         label = "%-28s" % cp.event
         if found is None:
+            last = rows[-1]["frame"] if rows else 0
+            if partial and last < deadline - 1:
+                print("--   %s not reached: the trace ends at frame %d, before its deadline %d; "
+                      "later events not checked" % (label, last, deadline), file=out)
+                return failures
             print("FAIL %s never occurs after frame %d (%s)" % (label, start, cp.when_text), file=out)
             return failures + 1  # later events are searched from this one: stop here
         f = found["frame"]
@@ -466,6 +478,7 @@ def main(argv=None):
     p.add_argument("route")
     p.add_argument("trace")
     p.add_argument("--exact", action="store_true")
+    p.add_argument("--partial", action="store_true")
     args = ap.parse_args(argv)
     try:
         m = Manifest(args.manifest)
@@ -487,7 +500,7 @@ def main(argv=None):
             route = m.route(args.route)
             needed = set().union(*(cp.fields_used() for cp in route.checkpoints))
             rows = read_trace(args.trace, m.fields, needed)
-            failures = check(route, rows, exact=args.exact)
+            failures = check(route, rows, exact=args.exact, partial=args.partial)
             print("route %s: %s" % (route.name, "follows" if not failures else "%d checkpoint(s) failed" % failures))
             return 1 if failures else 0
     except ManifestError as e:

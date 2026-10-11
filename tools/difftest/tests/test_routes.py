@@ -108,13 +108,13 @@ class Base(unittest.TestCase):
         text = header + "\n" + "".join("\t".join(str(c) for c in r) + "\n" for r in rows)
         return self.write("trace.tsv", text)
 
-    def run_check(self, rows, route="first", exact=False, text=MANIFEST):
+    def run_check(self, rows, route="first", exact=False, text=MANIFEST, partial=False):
         m = self.manifest(text)
         r = m.route(route)
         needed = set().union(*(cp.fields_used() for cp in r.checkpoints))
         data = routes.read_trace(self.trace(rows), m.fields, needed)
         out = io.StringIO()
-        failures = routes.check(r, data, exact=exact, out=out)
+        failures = routes.check(r, data, exact=exact, out=out, partial=partial)
         return failures, out.getvalue()
 
 
@@ -262,6 +262,20 @@ class CheckTests(Base):
         self.assertIn("display", out)
         self.assertIn("never occurs", out)
         self.assertNotIn("counted", out)
+
+    def test_partial_trace(self):
+        # A run that stops at frame 5: "counted" (deadline: the end of the
+        # route) cannot be decided, so it is not reached, not failed.
+        failures, out = self.run_check(GOOD[:5])
+        self.assertEqual(failures, 1)
+        failures, out = self.run_check(GOOD[:5], partial=True)
+        self.assertEqual(failures, 0, out)
+        self.assertIn("not reached: the trace ends at frame 5", out)
+        # A trace that reaches an event's deadline still fails it.
+        late = [r if r[0] < 3 else (r[0], r[1], "0000", "0000000A", r[4]) for r in GOOD[:7]]
+        failures, out = self.run_check(late, partial=True)
+        self.assertEqual(failures, 1)
+        self.assertIn("FAIL image_b", out)
 
     def test_events_are_ordered(self):
         # "counted" holds on frame 2 only, before "display" (frame 4): it must
