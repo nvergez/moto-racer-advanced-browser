@@ -504,10 +504,11 @@ Confirm whether gbarecomp's HALT exit condition (known issue 5 in [toolchain.md]
 
 Deliverable: `docs/research/open-bios-ab.md` *(new)*. It feeds ADR 0001 decision 4's gates. It is not part of Phase 2's exit.
 
-Status: done on the six routes that exist (PR #9), with two items of the scope still open:
+Status: done (PR #9) on six routes and on the full cup of P2-04's manifest (`cup`; `tools/analysis/open-bios-ab/run_ab.sh --cult-bios <bios.bin>` runs both), with one item of the scope still open:
 
-- The full-cup A/B (open-bios.md §5.3 step 1; the acceptance tier with a retail dump is measured over a full cup, so gate 1 of ADR 0001 decision 4 stays open until it is done): `tools/analysis/open-bios-ab/run_ab.sh --cult-bios <bios.bin> --routes cup` once P2-04's cup route exists, then `ab_report.py` and an update of open-bios-ab.md.
 - emibios's test suite against the Cult-of-GBA image (§5.3 step 3): needs Zig 0.16 and an emulator core (open-bios-ab.md §7).
+
+With the cup measured, gate 1 of ADR 0001 decision 4 waits only for the ADR's tolerance for race results (open-bios-ab.md §10).
 
 ### P2-18. Exit gate and write-up
 

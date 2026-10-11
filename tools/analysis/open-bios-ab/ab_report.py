@@ -2,21 +2,21 @@
 """Compare open-BIOS A/B runs written by run_ab.sh (stdlib only).
 
 usage: ab_report.py OUTDIR [--pair A B ...] [--routes R ...]
-       ab_report.py --result-shot-frame RUNDIR
+       ab_report.py --result-shot-frames RUNDIR
 
 OUTDIR is run_ab.sh's output directory (OUTDIR/VARIANT/ROUTE/...). Prints, per
 route and per variant, the metrics of docs/research/open-bios-ab.md, then for
 each pair (default: retail-skip/cult-skip and retail-boot/cult-boot) where the
-two runs first differ. It prints numbers only: no frames, no RAM contents
-beyond the race-time words and no screenshots, so its output can be quoted in
-the docs.
+two runs first differ. It prints numbers only: no frames, no RAM or save
+contents beyond the race-time words, the cup record and the offsets where two
+saves differ, and no screenshots, so its output can be quoted in the docs.
 
---result-shot-frame RUNDIR prints the harness frame at which run_ab.sh
-screenshots the results overlay of the run in RUNDIR: the last frame of its
-last finished race display, minus RESULT_SHOT_LEAD (60). In retail-equivalent
-frames that is race-display end - 60 + shift. It prints nothing if the run has
-no race display that ends before the trace does (boot_to_race, the front-end
-routes).
+--result-shot-frames RUNDIR prints the harness frames, comma-separated, at
+which run_ab.sh screenshots the results overlay of the run in RUNDIR: for
+every finished race display (below), its last frame minus RESULT_SHOT_LEAD
+(60). In retail-equivalent frames that is race-display end - 60 + shift. It
+prints nothing if no race finished (boot_to_race, the front-end routes, a
+race left from the pause menu).
 
 Frames are reported as "retail-equivalent" frames: the harness frame minus the
 variant's shift (handoff.tsv), so frame numbers line up with the retail-boot
@@ -37,9 +37,11 @@ Metrics:
   biosreads  game loads from 0x0-0x3FFF and the values they returned
   results    race display (DISPCNT 0x1741) stretches and, at the last frame of
              each, the lap words at 0x0201A370-0x0201A37F (lap 1-3, best lap, in
-             frames); "finished" when the stretch ends before the trace does.
-             The position is not in these words: read it from the results
-             overlay screenshot that run_ab.sh takes (ROUTE/result/shots/)
+             frames); "finished" when the stretch ends before the trace does and
+             laps 1-3 are all nonzero (a race left from the pause menu, or cut
+             off by the end of the run, is not). The position is not in these
+             words: read it from the results-overlay screenshots that run_ab.sh
+             takes of every finished race (ROUTE/result/shots/)
   swi cycles cycles from each SWI to its return (swicycles.tsv; IRQs taken during
              the call are included, and VBlankIntrWait is a wait, not a cost), per
              function; in a pair, calls with the same caller and r0-r2 are matched
@@ -48,7 +50,12 @@ Metrics:
              equal multisets of (caller, function, r0, r1, r2), VBlankIntrWait
              aside (r3 is not an argument of the SWIs this game uses, and its
              value differs after CpuFastSet)
-  save       SHA-1 of game.sav (options_save)
+  save       SHA-1 of game.sav (run_ab.sh passes a fresh save to every route);
+             in a pair, whether the two saves are equal and where they differ
+  cup        from game.sav, once a Cross Rookie race is recorded: the cup record
+             at save offsets 0xC50-0xC59 (races completed, final standing,
+             0-based, 8 until the cup is complete; points of the player and of
+             CP1-CP7), as docs/research/phase2-routes.md section 3 describes it
   divergence first frame where trace.tsv differs in a pair, per column group
 """
 import argparse
@@ -214,7 +221,9 @@ def race_stats(run):
 
 def race_displays(rows):
     """[(first_row, last_row, finished)] for each stretch of trace rows with the race
-    DISPCNT; finished is False when the stretch runs to the end of the trace."""
+    DISPCNT. finished: the stretch ends before the trace does and its last row has
+    nonzero lap 1-3 words, so the race was run to the end (an aborted or restarted
+    race, or one cut off by the end of the run, has a zero lap word)."""
     out = []
     stretch = None
     for i, r in enumerate(rows):
@@ -222,7 +231,9 @@ def race_displays(rows):
         if on and stretch is None:
             stretch = i
         if stretch is not None and (not on or i == len(rows) - 1):
-            out.append((rows[stretch], rows[i - 1] if not on else r, not on))
+            last = rows[i - 1] if not on else r
+            laps = [int(last[c], 16) for c in LAP_COLS[:3] if c in last]
+            out.append((rows[stretch], last, not on and len(laps) == 3 and all(laps)))
             stretch = None
     return out
 
@@ -240,10 +251,10 @@ def race_results(run):
     return out
 
 
-def result_shot_frame(rundir):
-    """Harness frame of the results-overlay screenshot for one run, or None."""
-    done = [last for _, last, finished in race_displays(read_tsv(os.path.join(rundir, "trace.tsv"))) if finished]
-    return int(done[-1]["frame"]) - RESULT_SHOT_LEAD if done else None
+def result_shot_frames(rundir):
+    """Harness frames of the results-overlay screenshots for one run: one per finished race."""
+    rows = read_tsv(os.path.join(rundir, "trace.tsv"))
+    return [int(last["frame"]) - RESULT_SHOT_LEAD for _, last, finished in race_displays(rows) if finished]
 
 
 def bios_reads(run):
@@ -284,13 +295,42 @@ def pair_swi_cycles(a, b):
     return out
 
 
-def save_sha1(run):
+def save_bytes(run):
     p = os.path.join(run.dir, "game.sav")
     if not os.path.exists(p):
         return None
     with open(p, "rb") as f:
-        b = f.read()
-    return {"bytes": len(b), "sha1": hashlib.sha1(b).hexdigest(), "nonzero_bytes": sum(1 for x in b if x)}
+        return f.read()
+
+
+def save_sha1(run):
+    b = save_bytes(run)
+    if b is None:
+        return None
+    return {"bytes": len(b), "sha1": hashlib.sha1(b).hexdigest(), "nonzero_bytes": sum(1 for x in b if x),
+            "never_written": all(x == 0xFF for x in b)}
+
+
+CUP_RECORD = 0xC50  # Cross Rookie cup record in the save block (phase2-routes.md, section 3)
+
+
+def cross_rookie_record(run):
+    """The Cross Rookie cup record from the run's save, or None if no race of that cup was recorded."""
+    b = save_bytes(run)
+    if b is None or len(b) < CUP_RECORD + 10 or b[CUP_RECORD] in (0, 0xFF):
+        return None
+    return {"races": b[CUP_RECORD], "final_standing_0based": b[CUP_RECORD + 1],
+            "points_player": b[CUP_RECORD + 2], "points_cp1_cp7": list(b[CUP_RECORD + 3:CUP_RECORD + 10])}
+
+
+def pair_save(a, b):
+    """Whether two runs' saves are equal, and the offsets where they differ."""
+    sa, sb = save_bytes(a), save_bytes(b)
+    if sa is None or sb is None:
+        return None
+    diff = [i for i in range(min(len(sa), len(sb))) if sa[i] != sb[i]]
+    return {"equal": sa == sb, "bytes_differing": len(diff) + abs(len(sa) - len(sb)),
+            "offsets": ["0x%X" % i for i in diff[:16]]}
 
 
 def first_divergence(a, b):
@@ -412,15 +452,16 @@ def main():
     ap.add_argument("--pair", nargs=2, action="append")
     ap.add_argument("--routes", nargs="*")
     ap.add_argument("--range-limit", type=int, default=12, help="differing-frame ranges printed per group")
-    ap.add_argument("--result-shot-frame", metavar="RUNDIR",
-                    help="print the harness frame of RUNDIR's results-overlay screenshot (nothing if no race finished)")
+    ap.add_argument("--result-shot-frames", metavar="RUNDIR",
+                    help="print the harness frames of RUNDIR's results-overlay screenshots, comma-separated "
+                         "(nothing if no race finished)")
     a = ap.parse_args()
-    if a.result_shot_frame:
-        if not os.path.exists(os.path.join(a.result_shot_frame, "trace.tsv")):
-            ap.error(f"no trace.tsv in {a.result_shot_frame}")
-        f = result_shot_frame(a.result_shot_frame)
-        if f is not None:
-            print(f)
+    if a.result_shot_frames:
+        if not os.path.exists(os.path.join(a.result_shot_frames, "trace.tsv")):
+            ap.error(f"no trace.tsv in {a.result_shot_frames}")
+        frames = result_shot_frames(a.result_shot_frames)
+        if frames:
+            print(",".join(str(f) for f in frames))
         return 0
     if not a.outdir:
         ap.error("OUTDIR is required")
@@ -462,6 +503,9 @@ def main():
             sv = save_sha1(r)
             if sv:
                 print("save:", json.dumps(sv))
+            cr = cross_rookie_record(r)
+            if cr:
+                print("cross_rookie_record:", json.dumps(cr))
         for x, y in pairs:
             if runs.get(x) and runs.get(y) and runs[x].ok and runs[y].ok:
                 print(f"### pair {x} vs {y}")
@@ -474,6 +518,9 @@ def main():
                 pr = pair_race(runs[x], runs[y])
                 if pr:
                     print("race_loop_pair:", json.dumps(pr))
+                ps = pair_save(runs[x], runs[y])
+                if ps:
+                    print("save_pair:", json.dumps(ps))
         print()
 
 
