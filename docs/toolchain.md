@@ -60,7 +60,7 @@ Do not clone with `--recurse-submodules`. That would also fetch gbarecomp's netp
 1. Checks the prerequisites and prints their versions.
 2. Checks out the `gbarecomp` submodule at the pinned commit, then only one of its own submodules, `external/arm-recomp-core`, which the build needs. `--with-netplay` adds `external/recomp-net` and `external/rbengine`, needed only for `GBARECOMP_NETPLAY=ON`.
 3. Sets `submodule.platform/android/third_party/SDL.update = none` in gbarecomp's local git config, so a later `git submodule update --init --recursive` skips the Android SDL fork ("Skipping submodule"). It is local config, nothing is committed.
-4. Applies `patches/gbarecomp/` to the submodule's working tree (see [Known issues](#known-issues)). `git status` then shows `gbarecomp (modified content)`. That is expected.
+4. Applies the patch series in `patches/gbarecomp/` to the submodule's working tree (see [Local gbarecomp patches](#local-gbarecomp-patches)). `git status` then shows `gbarecomp (modified content)`. That is expected.
 5. Downloads `toml.hpp` from toml++ at the commit gbarecomp pins, checks its SHA-256, and puts it in `gbarecomp/third_party/tomlpp/`, a path gbarecomp ignores and looks in first. Without it, every new build tree clones toml++ from GitHub (known issue 12). If gbarecomp's pin ever moves to another toml++ commit, the script warns and leaves the fetching to gbarecomp.
 6. Reports whether the ROM and the BIOS are in place (`roms/moto-racer-advance.gba` and `bios/gba_bios.bin`, or the files given with `--rom` and `--bios`).
 
@@ -82,6 +82,22 @@ cmake -S gbarecomp -B build/gbarecomp -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/gbarecomp
 ctest --test-dir build/gbarecomp
 ```
+
+## Local gbarecomp patches
+
+`patches/gbarecomp/` holds a series of patches to gbarecomp (what each fixes: [its README](../patches/gbarecomp/README.md)). `scripts/apply-patches.sh` applies them in name order, each on top of the pin plus the patches before it, and every build script runs it first, so the submodule is always the pin plus the series when something is built.
+
+```sh
+scripts/apply-patches.sh --check    # exit 0 if gbarecomp/ is the pin plus the series
+scripts/apply-patches.sh --reverse  # back to the pin
+scripts/apply-patches.sh --diff     # anything else in gbarecomp/
+```
+
+A hand edit in `gbarecomp/` stops the script, and with it every build script, before anything is written; the message lists the files. `scripts/apply-patches.sh --write-patch patches/gbarecomp/NNNN-name.patch` turns such an edit into the next patch of the series. The script keeps a stamp and scratch git objects in `build/gbarecomp-patches/`; with a matching stamp the check takes about 0.1 s.
+
+**A/B builds.** `--without NAME` on `scripts/build-native.sh`, `build-web.sh`, `regen.sh`, `test-engine.sh` or `smoke-test.sh` (or `MRA_WITHOUT_PATCHES="NAME ..."`) builds with that patch left out, for example to show that a bug comes back without its fix. Everything goes under `build/without-NAME/`, the generated code included, so the normal build is never built from another series; the next normal build restores the full series. Example: `scripts/smoke-test.sh --native-only --without 0001` fails on the `--state-dir` bug that 0001 fixes ([Known issues](#known-issues), 1).
+
+`tests/tooling/apply-patches-test.sh` tests all of this on a toy repository, with no game data; CI runs it.
 
 ## Smoke test, without the ROM or the BIOS
 
@@ -109,7 +125,7 @@ Both files are gitignored and must never be committed or downloaded. See the dum
 | `roms/moto-racer-advance.gba` | Your dump of the Europe cartridge (`AGB-A9MP`) | 4194304 bytes, SHA-1 `b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0` (`[identity].sha1` in `game.toml`) |
 | `bios/gba_bios.bin` | Your dump of the GBA BIOS | 16384 bytes, SHA-1 `300c20df6731a33952ded8c436f7f186d25d3492` (the value gbarecomp expects, `gbarecomp/bios/gba_bios.toml`) |
 
-To use files somewhere else, pass `--rom PATH` and `--bios PATH` to `scripts/regen.sh`, `scripts/build-native.sh` or `scripts/build-web.sh` (and to `scripts/setup.sh`, which only reports whether they exist). Relative paths are taken from the current directory. Every path can also be overridden with environment variables, listed at the top of `scripts/lib/common.sh`: `MRA_ROM`, `MRA_BIOS`, `MRA_GAME_CONFIG`, `MRA_BIOS_CONFIG`, `MRA_BUILD_DIR`, `MRA_GENERATED_DIR`.
+To use files somewhere else, pass `--rom PATH` and `--bios PATH` to `scripts/regen.sh`, `scripts/build-native.sh` or `scripts/build-web.sh` (and to `scripts/setup.sh`, which only reports whether they exist). Relative paths are taken from the current directory. Every path can also be overridden with environment variables, listed at the top of `scripts/lib/common.sh`: `MRA_ROM`, `MRA_BIOS`, `MRA_GAME_CONFIG`, `MRA_BIOS_CONFIG`, `MRA_BUILD_DIR`, `MRA_GENERATED_DIR`, and for A/B builds `MRA_WITHOUT_PATCHES`.
 
 Before anything is built, the scripts check the ROM's SHA-1 and size and the BIOS's SHA-1 and size against `game.toml`, and stop with one message on any mismatch. The USA cartridge (`A9ME`) is a different binary and is refused.
 
@@ -140,6 +156,7 @@ The ROM SHA-1 is also built into the executable: CMake reads `[identity].sha1` a
 scripts/build-native.sh            # regenerate, then build build/native/MotoRacerAdvanceRecomp
 scripts/build-native.sh --no-regen # reuse generated/
 scripts/build-native.sh --lle      # LLE scanline renderer, into build/native-lle
+scripts/build-native.sh --without 0003  # A/B build without patch 0003, into build/without-0003/
 scripts/build-native.sh --rom ~/dumps/mra.gba --bios ~/dumps/gba_bios.bin
 ```
 
@@ -290,7 +307,8 @@ Next steps, for Phase 1: declare the IWRAM images (`[[code_copy]]`), review the 
 
 `.github/workflows/ci.yml` runs on every pull request and on pushes to `main`, with no ROM and no BIOS:
 
-- `shellcheck -x` over `scripts/`.
+- `shellcheck -x` over `scripts/` and `tests/tooling/`.
+- **patch tooling** on `ubuntu-24.04`: `tests/tooling/apply-patches-test.sh`, with the full history checked out so that it can also run PR #5's `apply-patches.sh` (`a7efc60`) on the same case.
 - **native** on `macos-15` (Apple silicon, with SDL2) and `ubuntu-24.04` (GNU ld, no SDL2): `setup.sh`, `fetch-test-roms.sh`, `test-engine.sh` (all of gbarecomp's tests, the two test ROM tests included) and `smoke-test.sh --native-only`. On Ubuntu, gbarecomp's `web_bootstrap_tests` needs `patches/gbarecomp/0002` (known issue 11).
 - **web smoke** on `ubuntu-24.04`: emsdk 6.0.10, cached by version, then `smoke-test.sh --web-only`.
 
@@ -305,9 +323,10 @@ The full gbarecomp build is small (186 build steps), so CI builds all of it and 
 | `game.toml` | Yes | Game config for the Europe ROM (`A9MP`); Phase 1 TODOs as comments |
 | `web/game-lib/` | Yes | The generated game as a library for `build_web.sh` |
 | `tests/smoke/` | Yes | Smoke test project and test ROM configs |
-| `patches/gbarecomp/` | Yes | Local fixes to gbarecomp, applied by `scripts/apply-patches.sh`. They contain excerpts of gbarecomp's source and are distributed under its license, PolyForm Noncommercial 1.0.0 |
+| `tests/tooling/` | Yes | Tests of the scripts that need no game data |
+| `patches/gbarecomp/` | Yes | Local fixes to gbarecomp, applied as a series by `scripts/apply-patches.sh`. They contain excerpts of gbarecomp's source and are distributed under its license, PolyForm Noncommercial 1.0.0 |
 | `scripts/` | Yes | Everything above |
 | `roms/`, `bios/` | No | Private inputs |
 | `generated/` | No | Recompiled BIOS and game |
 | `test-roms/` | No | Downloaded test ROMs |
-| `build/` | No | All build output, logs, `web-PRIVATE/` bundles |
+| `build/` | No | All build output, logs, `web-PRIVATE/` bundles; `gbarecomp-patches/` (the patch stamp) and `without-NAME/` (A/B builds) |
