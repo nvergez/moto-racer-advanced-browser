@@ -346,6 +346,7 @@ Scope (ADR 0001 decision 2):
   - a startup check that none of the 525 overlapping words is equal between the two ROM sources;
   - an optional counter dump behind an environment variable;
   - a refusal to start when `GBARECOMP_RAM_OVERLAY_HEAL` is set.
+- Check the game against the invariants that patch 0006's header lists, with the evidence in `docs/research/`. Among them: no direct branch (B or BL) into the overlap from code outside the resident image, such as EWRAM code or the race image's tail, since `gba_recompile` compiles a direct branch to a function of the same corpus as a call by name, which the selector never sees (**unverified** for the game).
 - The switch slots of the 4 race-image tables (P2-06's script).
 
 Acceptance (on the M4 Pro). The prototype measured these numbers with a diagnostic VBlank-start replay and the extra roots above (diagnosis §3.2). With P2-02's replay the counts may differ, so the gates are the zero counts; the other numbers are for information.

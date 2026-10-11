@@ -1,14 +1,17 @@
 # Synthetic repro ROMs
 
-Small GBA ROMs that reproduce gbarecomp runtime bugs without the game, run by `scripts/repro-test.sh`. They hold no Nintendo code or data, and by default they run on a stand-in BIOS generated here, so they need no BIOS dump either, and CI runs them.
+Small GBA ROMs that reproduce gbarecomp runtime bugs without the game, run by `scripts/repro-test.sh`: the IRQ call-return leak (`irqleak1`-`irqleak3`, patch 0003) and two code images sharing IWRAM (`overlay1`, patch 0006). They hold no Nintendo code or data, and by default they run on a stand-in BIOS generated here, so they need no BIOS dump either, and CI runs them. One more case, `overlay1heal`, tests 0006's heal-tier guard; it runs only when named, because it needs a C++ compiler at run time.
 
 | File | What |
 |---|---|
-| `make_rom.py` | Writes the repro ROMs: `make_rom.py irqleak1 OUT.gba`, and the same for `irqleak2` and `irqleak3`. 4 KiB each, header logo left zero |
+| `make_rom.py` | Writes the repro ROMs: `make_rom.py irqleak1 OUT.gba`, and the same for `irqleak2`, `irqleak3`, `overlay1` and `overlay1heal` (overlay1's bytes). 4 KiB each, header logo left zero |
 | `irqleak1.toml`, `irqleak2.toml`, `irqleak3.toml` | Their configs, for `gba_recompile` and the runtime. `[identity].sha1` pins the bytes `make_rom.py` writes |
 | `irqleak3_hooks.cpp` | A gbarecomp function-entry hook, linked into `repro_irqleak3` only |
+| `overlay1.toml`, `overlay1.ovl.toml` | overlay1's two configs: the main corpus, with image A at `0x03000000`, and image B's corpus, which the script compiles with `gba_recompile --output-prefix ovl_`. Only the first is the runtime's config |
+| `overlay1_hooks.cpp` | The RAM overlay selector (patch 0006), linked into `repro_overlay1` only |
+| `overlay1heal.toml`, `overlay1heal_hooks.cpp` | The opt-in `overlay1heal` case: a config with no corpus for either image, and a selector that claims image B without one, linked into `repro_overlay1heal` only |
 | `make_bios.py`, `bios.toml` | A 16 KiB stand-in BIOS and its `gba_recompile --bios` config. `make_bios.py --compare DUMP` compares it with a BIOS dump |
-| `CMakeLists.txt` | Links each case's recompiled code (and `<case>_hooks.cpp`, if there is one) with gbarecomp's runtime and our `src/main.cpp` into `repro_<case>` |
+| `CMakeLists.txt` | Links each case's recompiled code, all its corpora included (and `<case>_hooks.cpp`, if there is one), with gbarecomp's runtime and our `src/main.cpp` into `repro_<case>` |
 
 ## The IRQ call-return leak (patch 0003)
 
@@ -21,6 +24,36 @@ In all three, a VBlank IRQ handler at `0x08000180` calls (`bl`) a routine that t
 - **irqleak3**: irqleak1's code under another header title and game code, and an executable that registers a function-entry hook at `F` (`irqleak3_hooks.cpp`: `gba_mod_register_function_entry_plugin`, with a callback that sets R15 to LR and returns 1). The bridge checks hooks before it interprets each instruction, and when one handles the call it returns at once; in IRQ-continuation mode it does so without popping the caller's frame (`src/runtime/runtime_arm_default_aborts.cpp:534-541` at the pin). That exit does not reach the heal-to-static check that the first part of 0003 fixes, so the frame still leaks with that part alone. The second part, which drops frames left above the IRQ's entry depth when `runtime_irq()` returns, is what stops it. This case is the test of that second part: without it, both parts are in one patch and `--without` cannot separate them. The hook registry is part of gbarecomp's runtime whether or not its mods are built (`CMakeLists.txt:390` at the pin), and mods are off here (`GBARECOMP_ENABLE_MODS`, default `OFF`, `:371-373`). Only the mod runtime resets hooks (`src/runtime/mod_runtime.cpp:2065`, called from `src/runtime/runtime.cpp:1541` when mods are built), so the hook is installed once, before `main()`.
 
 `make_rom.py`'s docstring and comments give the code, instruction by instruction.
+
+## Two code images in IWRAM (patch 0006)
+
+`overlay1` reproduces what `patches/gbarecomp/0006-ram-overlay-selector.patch` is for: two code images that a program copies to the same IWRAM address at different times. Moto Racer Advance does this with its front end's and its race program's images, both at `0x03000000` ([phase2-diagnosis.md](../../docs/research/phase2-diagnosis.md), §3; [ADR 0001](../../docs/adr/0001-port-via-static-recompilation.md), decision 2). It is also the repro the diagnosis asks for with the upstream candidate U5 (§9). SHA-1 `5b0ac75c53f66d5e0ece14cf390a34b8cbec9289`.
+
+Once per frame, the main loop copies image A (4 words, from ROM `0x08000400`) to `0x03000000` one word at a time and calls it there through `bx r12`, then does the same with image B (5 words, from ROM `0x08000500`). A writes `0xA1` and B `0xB2` to the result word `0x02000010`. The main loop clears that word before each call, logs it after A to `0x02000000` and after B to `0x02000004`, counts completed cycles at `0x02000008`, and waits for the next VBlank (`VBlankIntrWait`). The two images differ at every offset, as the game's do. B's fifth word stays at `0x03000010` after A is copied over B, as the longer race image's tail stays behind the front end's image in the game.
+
+gbarecomp compiles one function per address and instruction set in a corpus. `overlay1.toml` declares image A as a `[[code_copy]]` at `0x03000000`. `overlay1.ovl.toml` declares image B there, and the script compiles it into a second corpus with `gba_recompile --output-prefix ovl_ --no-symbol-map` (`generated/overlay1.ovl/`, table `ovl_kDispatchTable`; a symbol map would register itself as the cartridge's only one). Without a selector, the main table answers for `0x03000000` whatever is resident: after B is copied, A's generated body runs, and the log reads `0xA1`, `0xA1`, with no dispatch miss, even under `GBARECOMP_STRICT_STATIC=1`. That is the silent corruption of the diagnosis's control run (§3.1, option N). `overlay1_hooks.cpp` installs a selector through 0006's `g_runtime_ram_overlay_select`. It compares the live IWRAM word at the dispatch target with the word at the same offset of each image's ROM source, and answers 0 for A (the main table), 1 with `ovl_kDispatchTable` for B, and -1 for neither (a dispatch miss). With it, the log reads `0xA1`, `0xB2`.
+
+The script runs overlay1 twice, both times under `GBARECOMP_STRICT_STATIC=1` with gbarecomp's capture (patch 0005, [tools/capture/README.md](../../tools/capture/README.md)) recording the three log words at every VBlank start:
+
+- `overlay1`, with the selector: fully static, `0xA1` then `0xB2` in every record once a cycle has completed, and at least N/2 cycles in N frames;
+- `overlay1-noselector`, the control (`MRA_REPRO_OVERLAY_SELECTOR=0` leaves the selector uninstalled): fully static too, and `0xA1` then `0xA1`. It shows that the repro tells the two apart.
+
+With `--without 0006 --expect-failure`, gbarecomp has no selector API (`tests/repro/CMakeLists.txt` looks for `g_runtime_ram_overlay_select` in `runtime_arm.h`), the hooks install nothing, and the one run must log `0xA1`, `0xA1`, fully static, as on the gbarecomp pin.
+
+The overlay cases read their results through patch 0005's capture. `--without 0005` therefore skips them, or stops with an error when one is named on the command line; a run that still writes no capture file is reported as such.
+
+### The heal-tier guard (`overlay1heal`, opt-in)
+
+0006 also keeps the PCs the selector claims out of both self-heal tiers, because RAM heals are keyed by PC and mode only (`heal_key`, `src/runtime/overlay_loader.cpp:34-36` at the pin): a heal built from one image would run for the other. gbarecomp's unit tests cover the tier in `dispatch_resolve`, but not the one in `runtime_dispatch_miss`: `tail_dispatch_tests` links the stub `runtime_dispatch_miss` of `tests/codegen/stubs.cpp`. `overlay1heal` covers that one, end to end.
+
+It is overlay1's ROM, byte for byte, with another config and selector. `overlay1heal.toml` has no corpus for either image: no `[[code_copy]]` and no root at `0x03000000`, so every `bx r12` into IWRAM is a dispatch miss. `overlay1heal_hooks.cpp` installs a selector that compares the live word at the target with image A's ROM source, like overlay1's, and answers 0 for A (not claimed) and -1 for anything else (claimed, no compiled image). The script runs it with RAM healing on: `GBARECOMP_SELFHEAL_RECOMPILE=1`, `GBARECOMP_RAM_OVERLAY_HEAL=1`, `GBARECOMP_HEAL_BACKEND=gcc`, a heal cache in the run directory (emptied before each run), and `GBARECOMP_SELFHEAL_VERBOSE=1` for the heal's log line. A's first dispatch is then an ordinary miss, and the heal tier compiles a heal of `0x03000000` from A's bytes, at once (RAM heals compile synchronously). B's dispatch is a claimed miss:
+
+- `overlay1heal`, with the selector: B must be bridged, so the log reads `0xA1`, `0xB2`. The run must also exit 0 after at least N frames, with `self_heal: HEALED RAM 0x03000000 (arm)` in its log (A's heal exists, so the heal tier had something to run for B) and no failed heal compile, and at least N/2 cycles.
+- `overlay1heal-noselector`, the control (`MRA_REPRO_OVERLAY_SELECTOR=0`): nothing is claimed, the heal tier runs A's heal for B, and the log must read `0xA1`, `0xA1`. It shows that the case tells the two apart.
+
+With `--without 0006 --expect-failure overlay1heal`, the one run must log `0xA1`, `0xA1` with A healed, as the control does.
+
+Why it is opt-in: the gcc backend compiles each heal with the host's C++ compiler at run time (`c++` on `PATH`, or `GBARECOMP_HEAL_CXX`, `src/runtime/overlay_compile.cpp:66-75` at the pin), and the plan's test runs keep healing off. It is not in the default list and not run in CI.
 
 ## The stand-in BIOS
 
@@ -50,14 +83,18 @@ A finer check (a scratch script, not committed) found none of the stand-in's 8-b
 
 ```sh
 scripts/repro-test.sh                                   # all cases, stand-in BIOS: they must pass
-scripts/repro-test.sh --without 0003 --expect-failure   # A/B build: all must overflow
+scripts/repro-test.sh --without 0003 --expect-failure   # A/B build: irqleak1-3 must overflow
+scripts/repro-test.sh --without 0006 --expect-failure   # A/B build: overlay1 must run image A for B
+scripts/repro-test.sh --without 0003 --without 0006 --expect-failure   # both, one A/B build
 scripts/repro-test.sh --bios bios/gba_bios.bin          # on a BIOS dump
 scripts/repro-test.sh irqleak2 --frames 600             # one case, another length
+scripts/repro-test.sh overlay1heal                      # opt-in: the heal-tier guard (needs c++ at run time)
+scripts/repro-test.sh --without 0006 --expect-failure overlay1heal   # A/B: image A's heal runs for B
 ```
 
-The script generates the BIOS image and the ROMs into `build/repro/roms/` and checks their SHA-1s against the configs, recompiles them with `gba_recompile`, builds `build/repro/native/repro_<case>`, and runs each case headless (`SDL_AUDIODRIVER=dummy`, `GBARECOMP_SELFHEAL_RECOMPILE=0`, `--bios-skip-intro`, 2,000 frames) in `build/repro/run/<case>/`, whose `out.log` is the run's output. A case named twice runs once.
+The script generates the BIOS image and the ROMs into `build/repro/roms/` and checks their SHA-1s against the configs, recompiles them with `gba_recompile`, builds `build/repro/native/repro_<case>`, and runs each case headless (`SDL_AUDIODRIVER=dummy`, `GBARECOMP_SELFHEAL_RECOMPILE=0` except for overlay1heal, `--bios-skip-intro`, 2,000 frames) in `build/repro/run/<run>/`, whose `out.log` is the run's output: one run per irqleak case, two for overlay1 (`overlay1` and `overlay1-noselector`) and two for overlay1heal (`overlay1heal` and `overlay1heal-noselector`). A case named twice runs once. A case can have more corpora than its main one: each `<case>.<prefix>.toml` is compiled with `--output-prefix <prefix>_` into `generated/<case>.<prefix>/`, and `CMakeLists.txt` links them all.
 
-A run passes when it exits 0 after at least the requested frames, bridged `F` (`bridged 0x08000200` in the runtime's miss report, so the leak path ran: a run where `F` got a static entry fails), interprets at most 10 instructions per frame, and prints none of: `generated call-return stack overflow`, `SELF-HEAL bridge ... exceeded`, `did not iret`. irqleak1 and irqleak2 must also print no `runtime_irq: dropped` line: the first part of 0003 must leave the second part nothing to drop. irqleak3 must print at least one. With `--expect-failure`, every run must instead exit 134 (SIGABRT) with `generated call-return stack overflow at return_pc=` the case's leaked address: `0x08000188` for irqleak1 and irqleak3, `0x08000194` for irqleak2. Each run is limited to 300 s and to 256 MiB per file it writes; a run killed by either is reported as such (exit code 142, SIGALRM, or 153, SIGXFSZ). `--without NAME` builds under `build/without-NAME/repro/` (A/B builds, [patches/gbarecomp/README.md](../../patches/gbarecomp/README.md)). From a warm build tree a run of the script takes under 10 s on an M4 Pro (4-5 s for the three cases on 2026-10-11).
+An irqleak run passes when it exits 0 after at least the requested frames, bridged `F` (`bridged 0x08000200` in the runtime's miss report, so the leak path ran: a run where `F` got a static entry fails), interprets at most 10 instructions per frame, and prints none of: `generated call-return stack overflow`, `SELF-HEAL bridge ... exceeded`, `did not iret`. irqleak1 and irqleak2 must also print no `runtime_irq: dropped` line: the first part of 0003 must leave the second part nothing to drop. irqleak3 must print at least one. overlay1's and overlay1heal's runs must end as "Two code images in IWRAM" above says. `--expect-failure` runs only the cases whose fix `--without` leaves out (0003 for the irqleak cases, 0006 for overlay1 and overlay1heal; a case named on the command line whose patch is in the build is an error), and each run must end the way its bug makes it end: an irqleak run must exit 134 (SIGABRT) with `generated call-return stack overflow at return_pc=` the case's leaked address (`0x08000188` for irqleak1 and irqleak3, `0x08000194` for irqleak2); overlay1 must exit 0, fully static, with image A's result logged for image B; overlay1heal the same, with A healed and not static. Each run is limited to 300 s and to 256 MiB per file it writes; a run killed by either is reported as such (exit code 142, SIGALRM, or 153, SIGXFSZ). `--without NAME` builds under `build/without-NAME/repro/` (A/B builds, [patches/gbarecomp/README.md](../../patches/gbarecomp/README.md)). From a warm build tree a run of the script takes under 10 s on an M4 Pro (4-5 s for the three irqleak cases on 2026-10-11; about 10 s for all five runs with the build of the runtime, the same day).
 
 ## Results
 
@@ -70,8 +107,8 @@ A run passes when it exits 0 after at least the requested frames, bridged `F` (`
 | irqleak3 | 0001-0004 | 0 | 2,000 | 0 (`F` bridged 2,000 times, each time handled by the hook) | `runtime_irq: dropped 1 call-return frame(s) ... (top return_pc=0x08000188, event #N)` for N = 1, 2, 4 ... 1024 |
 | irqleak1, irqleak3 | 0001, 0002, 0004 (`--without 0003`) | 134 | | | `generated call-return stack overflow at return_pc=0x08000188` |
 | irqleak2 | 0001, 0002, 0004 (`--without 0003`) | 134 | | | `generated call-return stack overflow at return_pc=0x08000194` |
-| all | 0001, 0002 (`--without 0003 --without 0004`) | 134 | | | as above |
-| all | 0001-0003 (`--without 0004`) | 0 | 2,000 | as with 0001-0004 | as with 0001-0004 |
+| irqleak1-3 | 0001, 0002 (`--without 0003 --without 0004`) | 134 | | | as above |
+| irqleak1-3 | 0001-0003 (`--without 0004`) | 0 | 2,000 | as with 0001-0004 | as with 0001-0004 |
 | irqleak2, 600 frames | 0001, 0002 | 0 | 601 | 84,293,566 / 84,290,465, nearly all in the bridge for `0x080000FC`, entered once | `did not iret` once |
 | irqleak2, 600 frames | 0001, 0002, 0004 | 134 | | | `generated call-return stack overflow at return_pc=0x08000194` |
 
@@ -79,10 +116,34 @@ The first version of the stand-in BIOS gave the same results, except 84,292,558 
 
 With 0003, 0004 (the end-of-run watchdog) does not change these runs: no bridge is running when they reach their last frame. Without 0003, the 600-frame irqleak2 run shows both 0004's bug and why 0004 must come with 0003. On the pin, the runaway bridge is still running at frame 600, the next IRQ hits the watchdog, and the run stops at frame 601. With 0004 it overflows instead. The likely mechanism is the one the diagnosis traced in the game (§1.3), not traced here: the abandoned handler is interpreted and reaches the leaked stop PC, which ends the bridge; with 0004 the handler runs natively, so the bridge keeps going and frames keep leaking. The game shows the same pattern (0004's header). The 600-frame runs are not part of the script's checks: in its default mode they fail on purpose.
 
+With 0005 and 0006 added (series 0001-0006), the 2,000-frame irqleak rows are unchanged on both BIOS images, and `--without 0003` gives the same overflows on the stand-in BIOS (2026-10-11).
+
+overlay1, 2,000 frames, under `GBARECOMP_STRICT_STATIC=1` (2026-10-11). The first two rows were run on both BIOS images, the last two on the stand-in BIOS. Every run is `self_heal_coverage=FULLY_STATIC dispatch_misses=0 interpreted_insns=0` and ends after 2,001 cycles (one before the first VBlank, then one per frame); "Log" is what every capture record holds:
+
+| Run | Series | Exit | Selector | Log after A, after B |
+|---|---|---|---|---|
+| overlay1 | 0001-0006 | 0 | on | `0xA1`, `0xB2` |
+| overlay1-noselector | 0001-0006 | 0 | off | `0xA1`, `0xA1` |
+| overlay1 | 0001-0005 (`--without 0006`) | 0 | unavailable | `0xA1`, `0xA1` |
+| overlay1 | 0001, 0002, 0004, 0005 (`--without 0003 --without 0006`) | 0 | unavailable | `0xA1`, `0xA1` |
+
+With `--without 0005`, the default run skips overlay1 and the irqleak rows are unchanged; `--without 0005 overlay1` stops before building (2026-10-11).
+
+overlay1heal (opt-in), 2,000 frames, RAM healing on, gcc backend (Apple clang 21 as `c++`), 2026-10-11. The first two rows were run on both BIOS images, with the same results; the last two on the stand-in BIOS. Every run exits 0 after 2,000 frames and 2,001 cycles, with `self_heal_coverage=NOT_STATIC dispatch_misses=1` (both images miss at the same PC) and `healed_native=1` (A's heal of `0x03000000`, compiled on A's first dispatch):
+
+| Run | Series | Selector | Interpreted instructions | Heal calls (`native_calls`) | Log after A, after B |
+|---|---|---|---|---|---|
+| overlay1heal | 0001-0006 | on | 10,005 (B bridged, 5 per cycle) | 2,001 (A) | `0xA1`, `0xB2` |
+| overlay1heal-noselector | 0001-0006 | off | 0 | 4,002 (A, and A's heal for B) | `0xA1`, `0xA1` |
+| overlay1heal | 0001-0006, with the guard in `runtime_dispatch_miss` removed | on | 0 | 4,002 | `0xA1`, `0xA1`: the case fails |
+| overlay1heal | 0001-0005 (`--without 0006`) | unavailable | 0 | 4,002 | `0xA1`, `0xA1` |
+
+The third row is a mutation, made for this check only: the guard's `!runtime_ram_overlay_claims(...)` replaced by `(runtime_ram_overlay_claims(...), 1)` in a local copy of 0006. The script reports `logged 000000A1 after image B, not 000000B2` and fails.
+
 ## How the encodings were checked
 
-Every instruction in `make_rom.py` and `make_bios.py` is written as its 32-bit encoding with the assembly in a comment. The generated images were disassembled with Capstone 5.0.9 (`capstone.Cs(CS_ARCH_ARM, CS_MODE_ARM)`, Python), and every instruction matched its comment; the rewritten stand-in BIOS was checked the same way. Capstone is not needed to run the tests.
+Every instruction in `make_rom.py` and `make_bios.py` is written as its 32-bit encoding with the assembly in a comment. The generated images were disassembled with Capstone 5.0.9 (`capstone.Cs(CS_ARCH_ARM, CS_MODE_ARM)`, Python), and every instruction matched its comment; the rewritten stand-in BIOS was checked the same way. overlay1 was checked with LLVM's disassembler instead (Apple LLVM 21: the ROM wrapped in an ELF object with `.incbin` and `clang -target armv4t-none-eabi -c`, then `objdump -d --triple=armv4t-none-eabi`), with the same result. Neither tool is needed to run the tests.
 
 ## Adding a case
 
-Add a builder to `make_rom.py` (or a new generator), a `<case>.toml` with the ROM's SHA-1 and a `note` on every `[[extra_func]]`, optionally a `<case>_hooks.cpp`, and the case and its pass and failure conditions to `scripts/repro-test.sh`. Keep Nintendo data out: no header logo, and no code taken from a BIOS image or from a listing of one; if the stand-in BIOS changes, run `make_bios.py --compare` on a dump and update the table above.
+Add a builder to `make_rom.py` (or a new generator), a `<case>.toml` with the ROM's SHA-1 and a `note` on every `[[extra_func]]` and `[[code_copy]]`, optionally more corpora (`<case>.<prefix>.toml`) and a `<case>_hooks.cpp`, and the case, the patch whose bug it reproduces (`case_patch`) and its pass and failure conditions to `scripts/repro-test.sh`. Keep Nintendo data out: no header logo, and no code taken from a BIOS image or from a listing of one; if the stand-in BIOS changes, run `make_bios.py --compare` on a dump and update the table above.

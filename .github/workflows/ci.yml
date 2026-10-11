@@ -88,10 +88,11 @@ jobs:
       - name: Synthetic repro ROMs, on the stand-in BIOS
         run: scripts/repro-test.sh
       # The repros must keep failing without the fix they test. Linux only:
-      # it rebuilds gba_recompile and the runtime without patch 0003.
-      - name: Synthetic repro ROMs without patch 0003 (must fail)
+      # it rebuilds gba_recompile and the runtime without patches 0003 and
+      # 0006 (irqleak1-3 test 0003, overlay1 tests 0006).
+      - name: Synthetic repro ROMs without patches 0003 and 0006 (must fail)
         if: runner.os == 'Linux'
-        run: scripts/repro-test.sh --without 0003 --expect-failure
+        run: scripts/repro-test.sh --without 0003 --without 0006 --expect-failure
       - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -102,8 +103,8 @@ jobs:
             build/gbarecomp/Testing/Temporary/
             build/repro/logs/
             build/repro/run/*/out.log
-            build/without-0003/repro/logs/
-            build/without-0003/repro/run/*/out.log
+            build/without-0003-0006/repro/logs/
+            build/without-0003-0006/repro/run/*/out.log
           if-no-files-found: ignore
 
   web:

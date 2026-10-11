@@ -537,16 +537,18 @@ reset_dir() {
   mkdir -p "$dir"
 }
 
-# recompile_rom <rom> <config> <out dir> <log>
+# recompile_rom <rom> <config> <out dir> <log> [gba_recompile option...]
 # gba_recompile with the function cap raised, then check the cap was not
-# reached: past it, gba_recompile drops seeds without a warning.
+# reached: past it, gba_recompile drops seeds without a warning. Further
+# arguments go to gba_recompile (for example --output-prefix P).
 recompile_rom() {
   local rom=$1 config=$2 out=$3 log=$4 total
+  shift 4
   info "Recompiling $(rel "$rom") -> $(rel "$out")"
   reset_dir "$out"
   mkdir -p "$(dirname "$log")"
   "$MRA_TOOLS_BUILD_DIR/gba_recompile" --rom "$rom" --config "$config" \
-    --out "$out" --max-functions "$MRA_MAX_FUNCTIONS" > "$log" 2>&1 ||
+    --out "$out" --max-functions "$MRA_MAX_FUNCTIONS" "$@" > "$log" 2>&1 ||
     die "gba_recompile failed; see $(rel "$log")"
   total=$(sed -nE 's/^[[:space:]]*TOTAL emitted:[[:space:]]+([0-9]+).*/\1/p' "$log" | tail -n1)
   [ -n "$total" ] || die "no discovery summary in $(rel "$log")"
