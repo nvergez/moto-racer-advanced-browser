@@ -2,18 +2,27 @@
 # Build gbarecomp natively (all its targets) and run its test suite. Needs no
 # ROM and no BIOS.
 #
-#   scripts/test-engine.sh [ctest arguments...]
+#   scripts/test-engine.sh [--without NAME]... [ctest arguments...]
 #
 # Build tree: build/gbarecomp (shared with scripts/regen.sh, which only builds
 # the gba_recompile and gba_scan targets there). Run scripts/fetch-test-roms.sh
 # first to add gbarecomp's test_rom_arm and test_rom_thumb tests.
+# --without NAME leaves gbarecomp patch NAME (0003) out and builds into
+# build/without-NAME/gbarecomp (an A/B build, patches/gbarecomp/README.md).
 set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 . "$(dirname "$0")/lib/common.sh"
 
-case "${1:-}" in
-  -h | --help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-esac
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h | --help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --without) [ $# -ge 2 ] || die "--without needs a patch name or number"; add_without "$2"; shift 2 ;;
+    --without=*) add_without "${1#*=}"; shift ;;
+    *) break ;;
+  esac
+done
+select_patch_variant
+lock_checkout
 
 require_submodule
 ensure_patches

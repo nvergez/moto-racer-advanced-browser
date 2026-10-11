@@ -2,7 +2,7 @@
 # End-to-end smoke test of the recompile pipeline on freely licensed test ROMs
 # (jsmolka/gba-tests, MIT). Needs no game ROM and no BIOS.
 #
-#   scripts/smoke-test.sh [--native-only | --web-only]
+#   scripts/smoke-test.sh [--native-only | --web-only] [--without NAME]...
 #
 # 1. Fetch the test ROMs (scripts/fetch-test-roms.sh).
 # 2. Recompile each with gba_recompile and its tests/smoke/*.toml config,
@@ -17,20 +17,28 @@
 #
 # Not covered, because it needs a BIOS: booting through the BIOS, the
 # recompiled BIOS, and running the browser bundle in a page.
+#
+# --without NAME leaves gbarecomp patch NAME (0003) out and builds under
+# build/without-NAME/smoke (an A/B build, patches/gbarecomp/README.md).
 set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 . "$(dirname "$0")/lib/common.sh"
 
 NATIVE=1
 WEB=1
-for arg in "$@"; do
-  case "$arg" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --native-only) WEB=0 ;;
     --web-only) NATIVE=0 ;;
-    -h | --help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) die "unknown option: $arg" ;;
+    --without) [ $# -ge 2 ] || die "--without needs a patch name or number"; add_without "$2"; shift ;;
+    --without=*) add_without "${1#*=}" ;;
+    -h | --help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown option: $1" ;;
   esac
+  shift
 done
+select_patch_variant
+lock_checkout
 
 SMOKE_DIR="$MRA_BUILD_DIR/smoke"
 GEN_ROOT="$SMOKE_DIR/generated"

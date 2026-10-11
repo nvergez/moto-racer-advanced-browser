@@ -2,7 +2,7 @@
 # Build the browser bundle with gbarecomp's packaging/web/build_web.sh.
 #
 #   scripts/build-web.sh [--rom PATH] [--bios PATH] [--no-regen]
-#                        [--embed-private-rom] [--dev]
+#                        [--embed-private-rom] [--dev] [--without NAME]...
 #
 #   --rom PATH           the ROM (default roms/moto-racer-advance.gba)
 #   --bios PATH          the 16 KiB GBA BIOS dump (default bios/gba_bios.bin)
@@ -10,6 +10,8 @@
 #   --embed-private-rom  copy the ROM and the BIOS into the bundle (local
 #                        testing only; the page then needs no file picker)
 #   --dev                let a page served from localhost take ?args=/?env=
+#   --without NAME       A/B build: leave gbarecomp patch NAME (0003) out, into
+#                        build/without-NAME/ (patches/gbarecomp/README.md)
 #
 # Output: build/web-PRIVATE/. Serve it with scripts/serve-web.sh.
 #
@@ -29,11 +31,15 @@ while [ $# -gt 0 ]; do
     --rom=* | --bios=*) set_input "${1%%=*}" "${1#*=}" ;;
     --no-regen) REGEN=0 ;;
     --embed-private-rom | --dev) PASS+=("$1") ;;
-    -h | --help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --without) [ $# -ge 2 ] || die "--without needs a patch name or number"; add_without "$2"; shift ;;
+    --without=*) add_without "${1#*=}" ;;
+    -h | --help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
 done
+select_patch_variant
+lock_checkout
 
 # Fail on missing inputs before spending time on anything else.
 verify_inputs

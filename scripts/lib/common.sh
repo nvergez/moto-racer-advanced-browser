@@ -12,11 +12,21 @@
 #   MRA_BUILD_DIR      all build output          (build)
 #   MRA_GENERATED_DIR  recompiled C++ output     (generated)
 #
+# A/B builds (patches/gbarecomp/README.md): the build scripts take
+# --without NAME, which sets the first variable below. Both directories above
+# then move under $MRA_BUILD_DIR/without-NAME/, so a build with a patch left
+# out never writes the normal build or generated/:
+#   MRA_WITHOUT_PATCHES  patches to leave out, separated by spaces  (none)
+#   MRA_PATCH_STATE_DIR  apply-patches.sh's stamp and scratch objects, and
+#                        the checkout lock (lock_checkout)
+#                        ($MRA_BUILD_DIR/gbarecomp-patches, never per variant)
+#
 # Keep this file compatible with the bash 3.2 that ships with macOS: no
 # associative arrays, no mapfile, and guard empty arrays under `set -u`.
 
 MRA_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GBARECOMP_DIR="$MRA_ROOT/gbarecomp"
+MRA_PATCH_DIR="$MRA_ROOT/patches/gbarecomp"
 
 MRA_ROM=${MRA_ROM:-$MRA_ROOT/roms/moto-racer-advance.gba}
 MRA_BIOS=${MRA_BIOS:-$MRA_ROOT/bios/gba_bios.bin}
@@ -25,10 +35,26 @@ MRA_BIOS_CONFIG=${MRA_BIOS_CONFIG:-$GBARECOMP_DIR/bios/gba_bios.toml}
 MRA_BUILD_DIR=${MRA_BUILD_DIR:-$MRA_ROOT/build}
 MRA_GENERATED_DIR=${MRA_GENERATED_DIR:-$MRA_ROOT/generated}
 
-# Native gbarecomp build: gba_recompile, gba_scan and the engine's unit tests.
-MRA_TOOLS_BUILD_DIR="$MRA_BUILD_DIR/gbarecomp"
-# shellcheck disable=SC2034  # used by the scripts that source this file
-MRA_LOG_DIR="$MRA_BUILD_DIR/logs"
+# One stamp per submodule checkout, whatever variant is being built. A script
+# called by another inherits it, with the variant's directories (below).
+MRA_PATCH_STATE_DIR=${MRA_PATCH_STATE_DIR:-$MRA_BUILD_DIR/gbarecomp-patches}
+export MRA_PATCH_STATE_DIR
+MRA_WITHOUT_PATCHES=${MRA_WITHOUT_PATCHES:-}
+# MRA_PATCH_VARIANT is internal: select_patch_variant exports it, together
+# with the variant's MRA_BUILD_DIR and MRA_GENERATED_DIR, so that a script it
+# runs (build-native.sh runs regen.sh) uses the same directories.
+_mra_variant_inherited=${MRA_PATCH_VARIANT:-}
+MRA_PATCH_VARIANT=${MRA_PATCH_VARIANT:-}
+_mra_base_build_dir=$MRA_BUILD_DIR
+_mra_base_generated_dir=$MRA_GENERATED_DIR
+
+set_build_subdirs() {
+  # Native gbarecomp build: gba_recompile, gba_scan and the engine's unit tests.
+  MRA_TOOLS_BUILD_DIR="$MRA_BUILD_DIR/gbarecomp"
+  # shellcheck disable=SC2034  # used by the scripts that source this file
+  MRA_LOG_DIR="$MRA_BUILD_DIR/logs"
+}
+set_build_subdirs
 
 # The retail BIOS every gbarecomp game expects (gba::GbaBios::kExpectedSha1,
 # gbarecomp/bios/gba_bios.toml [identity]).
@@ -55,6 +81,20 @@ die() {
 }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 info() { printf '==> %s\n' "$*"; }
+
+# at_exit FUNCTION: call FUNCTION when the script exits, whatever the exit
+# status, after the functions registered before it. Scripts that source this
+# file use it instead of `trap ... EXIT`, which would replace the others.
+_mra_exit_hooks=""
+at_exit() {
+  _mra_exit_hooks="$_mra_exit_hooks $1"
+  trap _mra_run_exit_hooks EXIT
+}
+# shellcheck disable=SC2317  # called by the trap
+_mra_run_exit_hooks() {
+  local hook
+  for hook in $_mra_exit_hooks; do "$hook" || true; done
+}
 
 # Path relative to the repository root, for messages.
 rel() {
@@ -226,9 +266,192 @@ verify_inputs() {
   info "BIOS $(rel "$MRA_BIOS")  sha1=$bios_sha1"
 }
 
-# Make sure patches/gbarecomp/ is applied (idempotent; stops on a conflict).
+# Make the submodule's tree the pin plus patches/gbarecomp/ (minus the
+# patches MRA_WITHOUT_PATCHES leaves out). Silent when it already is; stops
+# on a patch that does not apply and on changes no known series explains.
 ensure_patches() {
-  "$MRA_ROOT/scripts/apply-patches.sh" > /dev/null
+  "$MRA_ROOT/scripts/apply-patches.sh" --quiet
+}
+
+# --- One build at a time in a checkout ----------------------------------------
+# gbarecomp/ holds one patch series at a time, and every build reads it, so a
+# build must not run while another script switches the series (an A/B build
+# and a normal one). The build scripts, and apply-patches.sh when it may
+# write, hold this lock for their whole run; another one waits for it. A
+# script run by the holder (build-native.sh runs regen.sh, which runs
+# apply-patches.sh) shares it through MRA_LOCK_TOKEN. A build by hand
+# (cmake --build) takes no lock.
+#
+# The lock is a symbolic link, created atomically, whose target is never
+# followed: it holds the holder's pid, a token, its name and the time.
+checkout_lock() { printf '%s\n' "$MRA_PATCH_STATE_DIR/lock"; }
+
+# pid_alive PID: a process with that pid exists (possibly another user's).
+pid_alive() {
+  kill -0 "$1" 2> /dev/null || ps -p "$1" > /dev/null 2>&1
+}
+
+_mra_lock_owned=0
+lock_checkout() {
+  local lock target pid token name since waited=0 tries=0
+  lock=$(checkout_lock)
+  if [ -n "${MRA_LOCK_TOKEN:-}" ] && target=$(readlink "$lock" 2> /dev/null); then
+    read -r pid token name since <<< "$target"
+    [ "$token" != "$MRA_LOCK_TOKEN" ] || return 0
+  fi
+  mkdir -p "$MRA_PATCH_STATE_DIR"
+  if [ -d "$lock" ] && [ ! -L "$lock" ]; then
+    die "$(rel "$lock") is a directory, not a lock these scripts made. Remove it if no build is running."
+  fi
+  MRA_LOCK_TOKEN="$$-$RANDOM$RANDOM-$(date +%s)"
+  until ln -s "$$ $MRA_LOCK_TOKEN ${0##*/} $(date +%H:%M:%S)" "$lock" 2> /dev/null; do
+    if ! target=$(readlink "$lock" 2> /dev/null); then
+      # Released between the two calls, or the link cannot be made at all.
+      tries=$((tries + 1))
+      [ "$tries" -lt 5 ] || die "could not create the lock $(rel "$lock")"
+      continue
+    fi
+    read -r pid token name since <<< "$target"
+    case "$pid" in
+      '' | *[!0-9]*) die "$(rel "$lock") is not a lock these scripts made. Remove it if no build is running." ;;
+    esac
+    if ! pid_alive "$pid"; then
+      # Only a script killed with SIGKILL leaves one. Two scripts that find
+      # it at the same instant could both go on; that is not guarded against.
+      warn "removing a stale lock: $name (pid $pid), which took it at $since, is no longer running"
+      rm -f "$lock"
+      continue
+    fi
+    if [ "$waited" = 0 ]; then
+      warn "waiting for $name (pid $pid, running since $since) to finish: scripts that build or switch gbarecomp/ run one at a time in a checkout. To build two series at once, use a second git worktree. If no such script is running, remove $(rel "$lock")."
+      waited=1
+    fi
+    sleep 1
+  done
+  export MRA_LOCK_TOKEN
+  _mra_lock_owned=1
+  at_exit unlock_checkout
+  # The holder of an A/B build says, at the end, what it leaves in gbarecomp/.
+  if [ -n "$MRA_PATCH_VARIANT" ]; then at_exit variant_notice; fi
+}
+
+# shellcheck disable=SC2317  # called through at_exit
+unlock_checkout() {
+  local lock target
+  [ "$_mra_lock_owned" = 1 ] || return 0
+  _mra_lock_owned=0
+  lock=$(checkout_lock)
+  target=$(readlink "$lock" 2> /dev/null) || return 0
+  case " $target " in
+    *" $MRA_LOCK_TOKEN "*) rm -f "$lock" ;;
+  esac
+}
+
+# After an A/B build: gbarecomp/ keeps the variant until the next normal run.
+# shellcheck disable=SC2317  # called through at_exit
+variant_notice() {
+  local stamp="$MRA_PATCH_STATE_DIR/stamp" without n list=""
+  [ -f "$stamp" ] || return 0
+  [ "$(sed -n 's/^state=//p' "$stamp" | head -n 1)" = "done" ] || return 0
+  without=$(sed -n 's/^without=//p' "$stamp" | head -n 1)
+  [ -n "$without" ] || return 0
+  for n in $without; do list="$list${list:+, }${n%%-*}"; done
+  info "gbarecomp/ is left without $list. The next normal build script, or scripts/apply-patches.sh, restores the full series; a build by hand before that compiles this variant."
+}
+
+# The file names of the series (patches/gbarecomp/*.patch), in name order,
+# one per line. Names are restricted to letters, digits, '.', '_' and '-' so
+# that callers can split the list on white space.
+patch_series() {
+  local p base list=""
+  for p in "$MRA_PATCH_DIR"/*.patch; do
+    [ -f "$p" ] || continue
+    base=${p##*/}
+    case "$base" in
+      *[!A-Za-z0-9._-]*) die "unsupported patch file name: $(rel "$p") (use letters, digits, '.', '_' and '-')" ;;
+    esac
+    list="$list$base
+"
+  done
+  printf '%s' "$list" | LC_ALL=C sort
+}
+
+# resolve_patch NAME: the file name of the one patch that NAME designates:
+# its number (0003), its file name with or without .patch, or a path to it.
+resolve_patch() {
+  local want=${1##*/} series p base exact="" matches="" count=0
+  want=${want%.patch}
+  [ -n "$want" ] || die "empty patch name"
+  series=$(patch_series) || exit 1
+  for p in $series; do
+    base=${p%.patch}
+    if [ "$base" = "$want" ]; then
+      exact=$base.patch
+    elif [ "${base#"$want"-}" != "$base" ]; then
+      matches="$matches $base.patch"
+      count=$((count + 1))
+    fi
+  done
+  if [ -n "$exact" ]; then
+    printf '%s\n' "$exact"
+  elif [ "$count" = 1 ]; then
+    printf '%s\n' "${matches# }"
+  elif [ "$count" = 0 ]; then
+    die "no patch in $(rel "$MRA_PATCH_DIR") matches '$1'"
+  else
+    die "'$1' matches several patches:$matches"
+  fi
+}
+
+# add_without NAME: handle --without NAME (call select_patch_variant after
+# the options are parsed).
+add_without() {
+  [ -n "$1" ] || die "--without needs a patch name or number"
+  MRA_WITHOUT_PATCHES="${MRA_WITHOUT_PATCHES:+$MRA_WITHOUT_PATCHES }$1"
+}
+
+# The patches MRA_WITHOUT_PATCHES leaves out: file names, sorted, one per
+# line. Stops on a name that does not designate exactly one patch: a typo
+# must not build the full series into an A/B directory.
+without_patch_names() {
+  local name file list=""
+  for name in $MRA_WITHOUT_PATCHES; do
+    file=$(resolve_patch "$name") || exit 1
+    list="$list$file
+"
+  done
+  printf '%s' "$list" | LC_ALL=C sort -u
+}
+
+# Point the build directories at the variant MRA_WITHOUT_PATCHES selects:
+# $MRA_BUILD_DIR/without-0003[-0007...]/, with generated code inside it.
+# Without any patch left out, keep the normal directories.
+select_patch_variant() {
+  local names name suffix=""
+  names=$(without_patch_names) || exit 1
+  for name in $names; do
+    case "$name" in
+      [0-9]*-*) name=${name%%-*} ;;
+      *) name=${name%.patch} ;;
+    esac
+    suffix="$suffix${suffix:+-}$name"
+  done
+  if [ -n "$_mra_variant_inherited" ]; then
+    # Called from a script that already selected the variant.
+    [ "$suffix" = "$_mra_variant_inherited" ] ||
+      die "this script runs inside an A/B build without-$_mra_variant_inherited; it cannot select without-${suffix:-nothing}"
+    return 0
+  fi
+  MRA_PATCH_VARIANT=$suffix
+  if [ -z "$suffix" ]; then
+    MRA_BUILD_DIR=$_mra_base_build_dir
+    MRA_GENERATED_DIR=$_mra_base_generated_dir
+  else
+    MRA_BUILD_DIR="$_mra_base_build_dir/without-$suffix"
+    MRA_GENERATED_DIR="$MRA_BUILD_DIR/generated"
+    export MRA_WITHOUT_PATCHES MRA_PATCH_VARIANT MRA_BUILD_DIR MRA_GENERATED_DIR
+  fi
+  set_build_subdirs
 }
 
 # Configure (once) and build the native gbarecomp tools.
@@ -354,3 +577,10 @@ require_emscripten() {
   fi
   info "emcc $version ($(command -v emcc))"
 }
+
+# An A/B build selected through the environment (MRA_WITHOUT_PATCHES), or
+# inherited from the script that runs this one. Scripts that take --without
+# call select_patch_variant again once their options are parsed.
+if [ -n "$MRA_WITHOUT_PATCHES" ] || [ -n "$_mra_variant_inherited" ]; then
+  select_patch_variant
+fi
