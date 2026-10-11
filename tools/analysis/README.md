@@ -177,7 +177,7 @@ run_harness.sh [--rom FILE] [--bios FILE] [--no-hash-check] --out DIR [options]
   --log-level MASK                         # mGBA log mask to stderr (default 0x7)
 ```
 
-RANGES are inclusive, `A-B` or `A+LEN`, at most 32 per option. Mirrors are canonicalized: EWRAM to 0x02xxxxxx, VRAM 0x06018000+ to 0x06010000+, SRAM 0x0E/0x0F to 0x0E000000 + (address & 0xFFFF). Relative `--out`, `--wav` and `--save` paths resolve under `analysis-out/`, and a path git would track is refused.
+LIST and RANGES entries are inclusive: `A`, `A-B` (A <= B) or `A+LEN` (LEN >= 1), separated by `,`, `;` or spaces, at most 32 per option. Numbers are decimal or `0x` hexadecimal, 32 bits; a leading 0 is decimal, not octal. A malformed entry or an empty list stops the harness with a message. `--capture-mem` can be repeated; its fields add up, as `--trace-mem`'s do. Mirrors are canonicalized: EWRAM to 0x02xxxxxx, VRAM 0x06018000+ to 0x06010000+, SRAM 0x0E/0x0F to 0x0E000000 + (address & 0xFFFF). Relative `--out`, `--wav` and `--save` paths resolve under `analysis-out/`, and a path git would track is refused.
 
 ### Outputs (under `--out DIR`)
 
@@ -206,6 +206,7 @@ The code that produced the Phase 1 evidence is this one minus the changes below.
 - New `--save-type` and `--openbus` options, which reproduce two Phase 1 experiments: a missing or Flash/EEPROM save chip (the game shows "Error while saving"), and replacing the BIOS open-bus value (see the findings, section 6).
 - A script `end` before the `--frames` count used to hang the harness (the loop up to `--frames` never advanced once `end` had stopped the run). `end` now ends the run there. Runs that did not hang are unchanged.
 - New `--capture` options (P2-03). They only add the `capture*` outputs: a `boot_to_race.txt` run with `--trace`, `--trace-mem`, `--dump-at` and `--shot-at` gives the same `trace.tsv`, dumps, screenshots and `summary.json` (wall time aside) with and without `--capture`, and the same as before the options existed.
+- List options are parsed strictly (P2-03 review). A malformed number, a range whose end is before its start, `A+0` or an empty list used to be read as 0 or cut short without an error (`--capture-frames 1;5` captured frame 1 only, `--dump-at xyz` was accepted); they now stop the harness. `;` and spaces separate entries like `,`, and `010` is 10, no longer octal 8. Lists without leading zeros mean what they meant before: a 3,400-frame `boot_to_race.txt` run with `--trace`, `--trace-mem`, `--dump-at`, `--shot-at`, `--trace-lines`, `--watch-write`, `--watch-frames A+LEN`, `--trace-swi` and the capture options writes byte-identical outputs before and after the change.
 
 ### Pitfalls
 

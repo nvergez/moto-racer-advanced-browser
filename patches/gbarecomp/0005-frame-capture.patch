@@ -14,18 +14,26 @@ All of this is observation only, and off unless GBARECOMP_CAPTURE is set:
   latch and before the VBlank-timed DMA, the VBlank input hook and the VBlank
   IRQ, one TSV record per frame: CRC-32 of the 240x160 frame as BGR555,
   CRC-32 of the frame's line records, DISPCNT, configured EWRAM/IWRAM values
-  and region hashes (with masked sub-ranges), the bytes the CPU and DMA wrote
-  to FIFO A and B, the IO-register and HALTCNT writes since the previous
-  record, the master clock, and the instructions the interpreter bridge ran.
-  Before each visible line is rendered: its video registers (with masks for
-  unused bits), palette[0] and CRC-32s of OAM, palette and BG/OBJ VRAM. Full
-  line records, FIFO bytes and raw frames for requested frame ranges. A file
-  sink, or stdout with a "[capture] " prefix for the browser console. Records
-  are numbered frame_count() + 1, the count a VBlank-counting emulator such
-  as mGBA has reached at that VBlank. The header comment lists the variables
-  and the format.
+  and region hashes (with masked sub-ranges), and, during that frame, the
+  bytes the CPU and DMA wrote to FIFO A and B, the IO-register and HALTCNT
+  writes and the instructions the interpreter bridge ran; also the master
+  clock. Before each visible line is rendered: its video registers (with
+  masks for unused bits), palette[0] and CRC-32s of OAM, palette and BG/OBJ
+  VRAM. Full line records, FIFO bytes and raw frames for requested frame
+  ranges. A file sink, or stdout with a "[capture] " prefix for the browser
+  console, where stderr lands too: diagnostics are prefixed "capture: "
+  instead, and region names are capped at 16 characters so that the largest
+  header row fits the page's 2,000-character lines. Records are numbered
+  frame_count() + 1, the count a VBlank-counting emulator such as mGBA has
+  reached at that VBlank. Multiplayer session execution is not captured
+  (like the VBlank input hook, the calls are skipped while it runs). The
+  header comment lists the variables and the format.
 - gba_io: gba_set_io_write_tap(), a tap on the MMIO ring's commit path, and
-  GBARECOMP_MMIO_CAP_RING=<entries> to size the ring.
+  GBARECOMP_MMIO_CAP_RING=<entries> to size the ring. A ring that cannot be
+  allocated (2^28 entries is 6 GiB, more than wasm32 can address) is
+  reported once on stderr instead of being retried on every IO write.
+- runtime_bus_bridge: runtime_session_executing(), so that the IO tap skips
+  writes made during session execution.
 - self_heal: self_heal_bridge_steps(), the bridged-instruction count as the
   bridge runs (self_heal_interpreted_insns() grows only when a bridge
   returns, so a bridge spanning many frames shows in none of them).
@@ -40,7 +48,12 @@ runtime, on a commercial ROM (Moto Racer Advance) with the retail BIOS:
   final line and coverage banner, with byte-identical --dump-png output, as
   the unpatched build, both recompiled and with GBARECOMP_FORCE_INTERP=1.
   Capture on: the same again, and two runs give byte-identical captures.
-- The stdout sink prints the same records as the file sink.
+- The stdout sink prints the same records as the file sink, natively and in
+  headless Chromium (the records of a 600-frame browser run equal a native
+  run's in every column). The largest spec the parser accepts gives a
+  1,866-character header line with the prefix, under the page's 2,000.
+- In the browser, GBARECOMP_MMIO_CAP_RING=268435456 (6 GiB) is reported once
+  as not allocatable, and the run completes.
 - Over 66 frames (2.1 million IO writes), io_writes and halt_writes equal the
   per-frame counts of GBARECOMP_MMIO_DUMP with GBARECOMP_MMIO_CAP_RING=2097152.
 - Against an independent implementation of the same records on mGBA 0.10.5,
@@ -61,7 +74,7 @@ index e992dbd..21ee6c6 100644
      src/runtime/overlay_emit.cpp
      src/runtime/overlay_loader.cpp
 diff --git a/src/gba/gba_io.cpp b/src/gba/gba_io.cpp
-index 28aacc9..f10a49f 100644
+index 28aacc9..ec7eaa2 100644
 --- a/src/gba/gba_io.cpp
 +++ b/src/gba/gba_io.cpp
 @@ -33,6 +33,8 @@ MmioCapEntry* g_mmio_ring  = nullptr;
@@ -73,7 +86,7 @@ index 28aacc9..f10a49f 100644
  bool mmio_cap_enabled() {
      static const bool enabled = [] {
          const char* value = std::getenv("GBARECOMP_MMIO_CAP");
-@@ -43,14 +45,34 @@ bool mmio_cap_enabled() {
+@@ -43,14 +45,44 @@ bool mmio_cap_enabled() {
      return enabled;
  }
  
@@ -83,7 +96,7 @@ index 28aacc9..f10a49f 100644
 +        if (!value || !*value) return kMmioCapRingSize;
 +        char* end = nullptr;
 +        const unsigned long long n = std::strtoull(value, &end, 0);
-+        constexpr unsigned long long kMax = 1ull << 28;  // 6 GiB of entries
++        constexpr unsigned long long kMax = 1ull << 28;  // 6 GiB at 24 bytes each
 +        if (!end || *end || n == 0 || n > kMax) {
 +            std::fprintf(stderr,
 +                         "[mmio-cap] ignoring GBARECOMP_MMIO_CAP_RING=%s "
@@ -100,17 +113,28 @@ index 28aacc9..f10a49f 100644
 +    if (g_io_write_tap) g_io_write_tap(addr, value, size);
      if (!mmio_cap_enabled()) return;
      if (!g_mmio_ring) {
++        static bool alloc_failed = false;  // warn once, never retry
++        if (alloc_failed) return;
          g_mmio_ring = static_cast<MmioCapEntry*>(
 -            std::calloc(kMmioCapRingSize, sizeof(MmioCapEntry)));
+-        if (!g_mmio_ring) return;
 +            std::calloc(mmio_cap_ring_size(), sizeof(MmioCapEntry)));
-         if (!g_mmio_ring) return;
++        if (!g_mmio_ring) {
++            alloc_failed = true;
++            std::fprintf(stderr,
++                         "[mmio-cap] cannot allocate the ring (%zu entries, %llu bytes); "
++                         "no MMIO writes are recorded\n",
++                         mmio_cap_ring_size(),
++                         static_cast<unsigned long long>(mmio_cap_ring_size()) * sizeof(MmioCapEntry));
++            return;
++        }
      }
 -    MmioCapEntry& e = g_mmio_ring[g_mmio_write % kMmioCapRingSize];
 +    MmioCapEntry& e = g_mmio_ring[g_mmio_write % mmio_cap_ring_size()];
      e.cycle = g_runtime_cycles;
      e.addr  = addr;
      e.value = value;
-@@ -60,11 +82,14 @@ inline void mmio_cap_record(uint32_t addr, uint32_t value, uint32_t size) {
+@@ -60,11 +92,14 @@ inline void mmio_cap_record(uint32_t addr, uint32_t value, uint32_t size) {
  }
  }  // namespace
  
@@ -126,7 +150,7 @@ index 28aacc9..f10a49f 100644
  }
  std::size_t gba_mmio_cap_query(uint64_t start, std::size_t count,
                                 MmioCapEntry* out, uint64_t& out_first) {
-@@ -78,7 +103,7 @@ std::size_t gba_mmio_cap_query(uint64_t start, std::size_t count,
+@@ -78,7 +113,7 @@ std::size_t gba_mmio_cap_query(uint64_t start, std::size_t count,
      if (count > avail) count = static_cast<std::size_t>(avail);
      out_first = start;
      for (std::size_t i = 0; i < count; ++i) {
@@ -167,14 +191,15 @@ index a5a3844..67fa51f 100644
  constexpr uint32_t DISPCNT   = 0x000;  // u16
 diff --git a/src/runtime/frame_capture.cpp b/src/runtime/frame_capture.cpp
 new file mode 100644
-index 0000000..b2b8a62
+index 0000000..1eb1ba6
 --- /dev/null
 +++ b/src/runtime/frame_capture.cpp
-@@ -0,0 +1,620 @@
+@@ -0,0 +1,634 @@
 +// frame_capture.cpp — see frame_capture.h.
 +
 +#include "frame_capture.h"
 +
++#include "runtime_bus_bridge.h"
 +#include "self_heal.h"
 +#include "../gba/gba_bus.h"
 +#include "../gba/gba_io.h"
@@ -269,6 +294,10 @@ index 0000000..b2b8a62
 +constexpr std::size_t kNumLineRegs = sizeof(kLineRegs) / sizeof(kLineRegs[0]);
 +
 +constexpr std::size_t kMaxRam = 64, kMaxMasks = 128, kMaxMem = 32;
++// Region names are at most 16 characters, so that the header row of the
++// largest spec (64 regions, 32 memory fields) stays under the browser
++// console's 2,000 characters per line with the "[capture] " prefix.
++constexpr std::size_t kMaxName = 16;
 +constexpr unsigned kWidth = 240, kHeight = 160;
 +
 +struct Range {
@@ -328,7 +357,8 @@ index 0000000..b2b8a62
 +    std::vector<RamRegion> ram;
 +    std::vector<MemField> mem;
 +    std::string header;
-+    // Accumulated since the previous VBlank-start record.
++    // Accumulated during the current frame: reset at every VBlank start,
++    // whether or not that frame gets a record.
 +    uint32_t lines_crc = 0;
 +    uint64_t fifo_n[2] = {0, 0};
 +    uint32_t fifo_crc[2] = {0, 0};
@@ -343,8 +373,11 @@ index 0000000..b2b8a62
 +
 +// ── Parsing ────────────────────────────────────────────────────────────────
 +
++// Diagnostics go to stderr as "capture: ...". Only records carry the
++// "[capture] " prefix: the browser page prints stdout and stderr to the same
++// console, where records are read back by that prefix.
 +bool fail(const char* what, const std::string& detail) {
-+    std::fprintf(stderr, "[capture] %s: %s\n", what, detail.c_str());
++    std::fprintf(stderr, "capture: %s: %s\n", what, detail.c_str());
 +    return false;
 +}
 +
@@ -397,6 +430,7 @@ index 0000000..b2b8a62
 +        if (!parse_range(tok, r)) return fail(var, "bad frame or range '" + tok + "'");
 +        out.ranges.push_back(r);
 +    }
++    if (out.ranges.empty()) return fail(var, std::string("no frame in '") + v + "'");
 +    return true;
 +}
 +
@@ -423,7 +457,7 @@ index 0000000..b2b8a62
 +}
 +
 +bool valid_name(const std::string& n) {
-+    if (n.empty() || n.size() > 32) return false;
++    if (n.empty() || n.size() > kMaxName) return false;
 +    for (char c : n)
 +        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) return false;
 +    return true;
@@ -449,7 +483,8 @@ index 0000000..b2b8a62
 +            s.reg_mask[i] &= static_cast<uint32_t>(mask);
 +        } else if (t[0] == "ram" && t.size() == 3) {
 +            Range r;
-+            if (!valid_name(t[1])) return fail(where, "bad region name '" + t[1] + "'");
++            if (!valid_name(t[1]))
++                return fail(where, "bad region name '" + t[1] + "' (1 to 16 letters, digits or _)");
 +            for (const RamRegion& g : s.ram)
 +                if (g.name == t[1]) return fail(where, "region " + t[1] + " defined twice");
 +            if (!parse_range(t[2], r) || !same_ram(r.first, r.last))
@@ -543,9 +578,12 @@ index 0000000..b2b8a62
 +    }
 +}
 +
++// Every committed IO-register write. Writes made during multiplayer session
++// execution are not counted: line() and vblank() take no records there either
++// (runtime_bus_bridge.cpp), so they would land in the next record's frame.
 +void io_tap(uint32_t addr, uint32_t value, uint32_t size) {
 +    const uint32_t off = addr - 0x04000000u;
-+    if (off >= 0x400u || !S) return;
++    if (off >= 0x400u || !S || runtime_session_executing()) return;
 +    ++S->io_writes;
 +    if (off <= 0x301u && off + size > 0x301u) ++S->halt_writes;
 +    if (off + size <= 0xA0u || off >= 0xA8u) return;
@@ -603,7 +641,7 @@ index 0000000..b2b8a62
 +        s.out = stdout;
 +        if (!s.lines_frames.empty() || !s.fifo_frames.empty() || !s.raw_frames.empty())
 +            std::fprintf(stderr,
-+                         "[capture] full line, FIFO and raw records need a file sink; "
++                         "capture: full line, FIFO and raw records need a file sink; "
 +                         "ignoring GBARECOMP_CAPTURE_LINES/FIFO/RAW\n");
 +    } else {
 +        s.out = std::fopen(path, "w");
@@ -612,7 +650,7 @@ index 0000000..b2b8a62
 +        if (s.stem.size() > 4 && s.stem.compare(s.stem.size() - 4, 4, ".tsv") == 0)
 +            s.stem.resize(s.stem.size() - 4);
 +        if (!s.lines_frames.empty() && !s.line_state)
-+            std::fprintf(stderr, "[capture] GBARECOMP_CAPTURE_LINE_STATE=0: "
++            std::fprintf(stderr, "capture: GBARECOMP_CAPTURE_LINE_STATE=0: "
 +                                 "ignoring GBARECOMP_CAPTURE_LINES\n");
 +        if (!s.lines_frames.empty() && s.line_state) {
 +            const std::string p = s.stem + ".lines.tsv";
@@ -750,7 +788,7 @@ index 0000000..b2b8a62
 +            std::fwrite(s.fb, 1, sizeof(s.fb), o);
 +            std::fclose(o);
 +        } else {
-+            std::fprintf(stderr, "[capture] cannot write %s\n", p.c_str());
++            std::fprintf(stderr, "capture: cannot write %s\n", p.c_str());
 +        }
 +    }
 +    if (s.fifo_out && s.fifo_frames.has(f)) {
@@ -793,10 +831,10 @@ index 0000000..b2b8a62
 +}  // namespace gbarecomp::capture
 diff --git a/src/runtime/frame_capture.h b/src/runtime/frame_capture.h
 new file mode 100644
-index 0000000..dbbe28d
+index 0000000..e91d414
 --- /dev/null
 +++ b/src/runtime/frame_capture.h
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,86 @@
 +// frame_capture.h — GBARECOMP_CAPTURE: env-gated, observation-only records of
 +// the machine state at every VBlank start and at every rendered scanline, for
 +// differential tests against another emulator or another gbarecomp backend.
@@ -808,7 +846,8 @@ index 0000000..dbbe28d
 +//   GBARECOMP_CAPTURE=PATH|-       per-frame records (TSV with a header row)
 +//                                  to PATH, or to standard output with every
 +//                                  line prefixed "[capture] " (for the
-+//                                  browser, where stdout is the console)
++//                                  browser, where stdout is the console;
++//                                  diagnostics go to stderr as "capture: ")
 +//   GBARECOMP_CAPTURE_FRAMES=L     frames that get a record (default: all)
 +//   GBARECOMP_CAPTURE_SPEC=TEXT    capture spec, inline; "@FILE" reads a file
 +//   GBARECOMP_CAPTURE_MEM=L        extra memory fields, ADDR:SIZE (1, 2 or 4)
@@ -831,7 +870,9 @@ index 0000000..dbbe28d
 +// end of the line. Numbers are decimal or 0x hexadecimal.
 +//   reg NAME MASK         AND MASK into register NAME in line records
 +//   ram NAME FIRST-LAST   hash this EWRAM or IWRAM range as column ram_NAME
-+//                         (at most 64 regions)
++//                         (at most 64 regions; NAME is 1 to 16 letters,
++//                         digits or '_', which keeps the largest header row
++//                         under the browser console's 2,000 characters)
 +//   mask NAME FIRST-LAST  zero these bytes of region NAME before hashing
 +//                         (at most 128 masks)
 +//   mem ADDR:SIZE         record this EWRAM/IWRAM value as column mem_ADDR
@@ -841,12 +882,15 @@ index 0000000..dbbe28d
 +// BGR555 words, each channel the top 5 bits of the 8-bit output), lines
 +// (CRC-32 of the frame's line records, as text), DISPCNT, mem_*, ram_*,
 +// fifo_a_n, fifo_a, fifo_b_n, fifo_b (bytes written to FIFO A/B by the CPU
-+// and DMA since the previous record, and their CRC-32), io_writes and
-+// halt_writes (committed IO-register writes, and those covering HALTCNT,
-+// since the previous record), cycles (master clock) and bridge_insns
-+// (instructions the interpreter bridge ran since the previous record).
-+// CRC-32 is zlib's. The format is shared with an mGBA-based harness; change
-+// both together.
++// and DMA, and their CRC-32), io_writes and halt_writes (committed
++// IO-register writes, and those covering HALTCNT), cycles (master clock) and
++// bridge_insns (instructions the interpreter bridge ran). The counts cover
++// frame N alone, from the previous VBlank start to this one, even when
++// GBARECOMP_CAPTURE_FRAMES skips the frames in between. CRC-32 is zlib's.
++// The format is shared with an mGBA-based harness; change both together.
++//
++// Multiplayer session execution (runtime_session_execution) is not captured:
++// no records, no line state, and its IO writes are not counted.
 +
 +#pragma once
 +
@@ -943,7 +987,7 @@ index 4b16bf4..fb56c66 100644
          if (r == armv4t::Interpreter::Result::NotImplemented ||
              r == armv4t::Interpreter::Result::Undefined) {
 diff --git a/src/runtime/runtime_bus_bridge.cpp b/src/runtime/runtime_bus_bridge.cpp
-index 044fc13..857f00c 100644
+index 044fc13..b79bc78 100644
 --- a/src/runtime/runtime_bus_bridge.cpp
 +++ b/src/runtime/runtime_bus_bridge.cpp
 @@ -8,6 +8,7 @@
@@ -974,6 +1018,28 @@ index 044fc13..857f00c 100644
              bus->io().run_timed_dma(1);   // VBlank-timed DMA
              if (!g_session_execution && g_vblank_input_hook) g_vblank_input_hook();
          }
+@@ -1165,6 +1172,7 @@ void runtime_session_execution(bool enabled) {
+     g_session_instruction_started = false;
+     g_session_slice = false;
+ }
++bool runtime_session_executing() { return g_session_execution; }
+ void runtime_session_begin_instruction() {
+     g_session_instruction_started = false; g_session_slice = false;
+ }
+diff --git a/src/runtime/runtime_bus_bridge.h b/src/runtime/runtime_bus_bridge.h
+index 799db1c..7d4272d 100644
+--- a/src/runtime/runtime_bus_bridge.h
++++ b/src/runtime/runtime_bus_bridge.h
+@@ -38,6 +38,9 @@ void runtime_restore_timing_context(const RuntimeTimingContext&);
+ // harness. CPU instructions accrue cycle debt; the session advances devices
+ // for every machine on one timeline. No machine's hardware runs ahead.
+ void runtime_session_execution(bool enabled);
++// True between runtime_session_execution(true) and (false). Observers that
++// record only the legacy single-machine timeline check it (frame_capture.cpp).
++bool runtime_session_executing();
+ void runtime_session_begin_instruction();
+ void runtime_session_begin_slice(std::uint64_t deadline);
+ void runtime_session_ram_dispatch_boundary(std::uint32_t pc);
 diff --git a/src/runtime/self_heal.h b/src/runtime/self_heal.h
 index b64e303..cfec0e7 100644
 --- a/src/runtime/self_heal.h

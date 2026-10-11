@@ -43,6 +43,13 @@ bios.cfg
 rom.cfg
 config.ini
 keybinds.ini
+# Capture files (tools/capture/README.md): derived from the ROM. Keep them under
+# build/ or analysis-out/; these catch a run started at the repository root and
+# the side files of any capture. Not *.tsv everywhere, which would also hide
+# tables written by hand, such as a future allowlist.
+/*.tsv
+*.lines.tsv
+*.fifo.tsv
 
 # --- Free test ROMs, fetched by scripts/fetch-test-roms.sh ---
 test-roms/

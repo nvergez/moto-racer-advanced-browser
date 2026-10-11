@@ -7,11 +7,17 @@ column); the comparator with allowlists and tolerances is P2-09's.
 
 usage: capture.py COMMAND ...
 
-  join A B [--frames LIST] [--columns C,...]
+  join A B [--frames LIST] [--columns C,...] [--allow-missing]
       Join two per-frame capture files (capture.tsv) on the frame column and
       report, per column present in both, how many frames are equal and which
       differ. The engine-specific columns (cycles, bridge_insns) are left out
-      unless --columns names them. Exit 1 if a compared column differs.
+      unless --columns names them. Exit 1 if a compared column differs, if a
+      frame is missing from one file, or if a column is in one file only.
+      The frames checked are those of --frames, or else every frame of
+      either file; a file may lack one frame after its last one when the
+      other file ends there (a --frames N run stops at N or N+1). With
+      --columns, only the named columns must be in both files.
+      --allow-missing reports missing frames and columns without failing.
   lines A B [--frames LIST] [--max N]
       Compare two full line-record files (capture.lines.tsv): per frame, the
       lines and the columns that differ, with the first N lines' values
@@ -19,12 +25,18 @@ usage: capture.py COMMAND ...
   extract LOG
       Print the capture records in a console log, where each line is
       prefixed "[capture] " (GBARECOMP_CAPTURE=-), as the TSV the file sink
-      writes. Exit 1 if a record line is 2,000 characters or longer, the
-      browser console's limit (packaging/web/bootstrap.js).
+      writes: the header row and the records after it. Prefixed lines before
+      the header row are skipped with a note. Exit 1 if a prefixed line is
+      2,000 characters or longer, the browser console's limit
+      (packaging/web/bootstrap.js), or if a record does not have the
+      header's number of columns (it is left out); exit 2 if the log has no
+      header row or two of them.
 
-LIST is "1-3000", "4200" or several of those separated by commas.
+LIST is "1-3000", "4200" or several of those separated by commas or ';'.
 """
 import argparse
+import bisect
+import re
 import sys
 
 PREFIX = "[capture] "
@@ -37,9 +49,9 @@ class CaptureError(Exception):
 
 
 def parse_frames(text):
+    """Sorted, merged (lo, hi) ranges."""
     ranges = []
-    for tok in text.split(","):
-        tok = tok.strip()
+    for tok in re.split(r"[,;\s]+", text):
         if not tok:
             continue
         try:
@@ -55,25 +67,67 @@ def parse_frames(text):
         ranges.append((lo, hi))
     if not ranges:
         raise CaptureError("empty frame list")
-    return ranges
+    return merge(sorted(ranges))
+
+
+def merge(ranges):
+    out = []
+    for lo, hi in ranges:
+        if out and lo <= out[-1][1] + 1:
+            out[-1][1] = max(out[-1][1], hi)
+        else:
+            out.append([lo, hi])
+    return [(lo, hi) for lo, hi in out]
 
 
 def in_frames(ranges, f):
     return ranges is None or any(lo <= f <= hi for lo, hi in ranges)
 
 
-def compress(frames, limit=20):
-    """[1,2,3,7] -> "1-3,7"; at most `limit` ranges, then "... (N more)"."""
+def to_ranges(frames):
+    """Sorted frames -> [(lo, hi)]."""
     out = []
     for f in frames:
         if out and f == out[-1][1] + 1:
             out[-1][1] = f
         else:
             out.append([f, f])
-    text = ",".join(str(a) if a == b else "%d-%d" % (a, b) for a, b in out[:limit])
-    if len(out) > limit:
-        text += ",... (%d more ranges)" % (len(out) - limit)
+    return [(lo, hi) for lo, hi in out]
+
+
+def format_ranges(ranges, limit=20):
+    """[(1, 3), (7, 7)] -> "1-3,7"; at most `limit` ranges, then "... (N more)"."""
+    text = ",".join(str(a) if a == b else "%d-%d" % (a, b) for a, b in ranges[:limit])
+    if len(ranges) > limit:
+        text += ",... (%d more ranges)" % (len(ranges) - limit)
     return text
+
+
+def compress(frames, limit=20):
+    """[1,2,3,7] -> "1-3,7"; at most `limit` ranges, then "... (N more)"."""
+    return format_ranges(to_ranges(frames), limit)
+
+
+def missing_ranges(wanted, have):
+    """The frames of `wanted` (sorted, merged ranges) that are not in `have`
+    (a sorted list), as ranges; linear in the frames of `have`, so a large
+    --frames range costs nothing."""
+    out = []
+    for lo, hi in wanted:
+        i = bisect.bisect_left(have, lo)
+        nxt = lo
+        while i < len(have) and have[i] <= hi:
+            if have[i] > nxt:
+                out.append((nxt, have[i] - 1))
+            nxt = have[i] + 1
+            i += 1
+        if nxt <= hi:
+            out.append((nxt, hi))
+    return out
+
+
+def count(ranges):
+    return sum(hi - lo + 1 for lo, hi in ranges)
 
 
 def read_table(path, keys):
@@ -116,18 +170,39 @@ def cmd_join(args, out):
     common = sorted(k for k in set(a) & set(b) if in_frames(frames, k[0]))
     if not common:
         raise CaptureError("no common frames%s" % (" in " + args.frames if args.frames else ""))
-    if args.columns:
+    if args.columns is not None:
         cols = [c.strip() for c in args.columns.split(",") if c.strip()]
+        if not cols:
+            raise CaptureError("--columns names no column")
         for c in cols:
             if c not in ha or c not in hb:
                 raise CaptureError("column %s is not in both files" % c)
     else:
         cols = [c for c in ha if c != "frame" and c in hb and c not in ENGINE_SPECIFIC]
+        if not cols:
+            raise CaptureError("the two files share no column to compare")
     print("frames: %s, %s, compared %d (%d-%d)" % (
         describe("A", a), describe("B", b), len(common), common[0][0], common[-1][0]), file=out)
-    only = [c for c in ha if c not in hb] + [c for c in hb if c not in ha]
+    incomplete = False
+    # Frames: each file must hold every frame checked, except one frame after
+    # its last one when the other file ends on that frame (N or N+1).
+    fa = sorted(k[0] for k in a)
+    fb = sorted(k[0] for k in b)
+    wanted = frames if frames is not None else to_ranges(sorted(set(fa) | set(fb)))
+    for name, have, other_name, other in (("A", fa, "B", fb), ("B", fb, "A", fa)):
+        miss = missing_ranges(wanted, have)
+        tail = have[-1] + 1
+        if miss and miss[-1] == (tail, tail) and other[-1] == tail:
+            miss.pop()
+            print("frame %d: in %s only, which ends one frame after %s (allowed: a run stops at N or N+1)" % (
+                tail, other_name, name), file=out)
+        if miss:
+            incomplete = True
+            print("frames missing from %s: %d: %s" % (name, count(miss), format_ranges(miss)), file=out)
+    only = [c + " (A)" for c in ha if c not in hb] + [c + " (B)" for c in hb if c not in ha]
     if only:
         print("columns in one file only: %s" % ", ".join(only), file=out)
+        incomplete = incomplete or args.columns is None
     ia = {c: ha.index(c) for c in cols}
     ib = {c: hb.index(c) for c in cols}
     failed = False
@@ -137,6 +212,10 @@ def cmd_join(args, out):
         failed = failed or bool(diff)
         print("%-*s  equal %6d  differ %6d  %s" % (width, c, len(common) - len(diff), len(diff), compress(diff)),
               file=out)
+    if incomplete:
+        print("%s: frames or columns missing from one file%s" % (
+            "note" if args.allow_missing else "FAIL", " (--allow-missing)" if args.allow_missing else ""), file=out)
+        failed = failed or not args.allow_missing
     return 1 if failed else 0
 
 
@@ -168,6 +247,7 @@ def cmd_lines(args, out):
 
 def cmd_extract(args, out):
     status = 0
+    header = None
     try:
         with open(args.log, encoding="utf-8", errors="replace") as f:
             for n, line in enumerate(f, 1):
@@ -178,9 +258,27 @@ def cmd_extract(args, out):
                     print("capture.py: %s:%d: %d characters, the console keeps %d" % (
                         args.log, n, len(record), CONSOLE_LIMIT), file=sys.stderr)
                     status = 1
-                out.write(record[len(PREFIX):] + "\n")
+                body = record[len(PREFIX):]
+                fields = body.split("\t")
+                if fields[0] == "frame":
+                    if header is not None:
+                        raise CaptureError("%s:%d: a second header row: the log holds more than one run" % (
+                            args.log, n))
+                    header = fields
+                elif header is None:
+                    print("capture.py: %s:%d: skipped, before the header row: %.60s" % (args.log, n, body),
+                          file=sys.stderr)
+                    continue
+                elif len(fields) != len(header):
+                    print("capture.py: %s:%d: %d columns, header has %d: left out" % (
+                        args.log, n, len(fields), len(header)), file=sys.stderr)
+                    status = 1
+                    continue
+                out.write(body + "\n")
     except OSError as e:
         raise CaptureError("%s: %s" % (args.log, e.strerror or e)) from None
+    if header is None:
+        raise CaptureError("%s: no header row (a line \"%sframe\\t...\")" % (args.log, PREFIX))
     return status
 
 
@@ -193,6 +291,7 @@ def main(argv=None, out=None):
     j.add_argument("b")
     j.add_argument("--frames")
     j.add_argument("--columns")
+    j.add_argument("--allow-missing", action="store_true")
     li = sub.add_parser("lines")
     li.add_argument("a")
     li.add_argument("b")

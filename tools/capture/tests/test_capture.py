@@ -66,9 +66,66 @@ class JoinTest(Base):
         a = self.write("a.tsv", HEADER + "".join(row(f) for f in range(1, 6)))
         b = self.write("b.tsv", HEADER + "".join(row(f, fb="DDDDDDDD" if f == 5 else "AAAAAAAA")
                                                   for f in range(2, 7)))
+        # Frame 1 is requested and missing from B: a failure, unless allowed.
         status, out, _ = self.run_cmd("join", a, b, "--frames", "1-4")
-        self.assertEqual(status, 0, out)
+        self.assertEqual(status, 1, out)
         self.assertIn("A 5 (1-5), B 5 (2-6), compared 3 (2-4)", out)
+        self.assertIn("frames missing from B: 1: 1\n", out)
+        self.assertNotIn("missing from A", out)
+        self.assertRegex(out, r"fb\s+equal\s+3\s+differ\s+0")
+        status, out, _ = self.run_cmd("join", a, b, "--frames", "1-4", "--allow-missing")
+        self.assertEqual(status, 0, out)
+        self.assertIn("frames missing from B: 1: 1\n", out)
+        status, out, _ = self.run_cmd("join", a, b, "--frames", "2-4")
+        self.assertEqual(status, 0, out)
+        # A requested frame in neither file is missing from both.
+        status, out, _ = self.run_cmd("join", a, b, "--frames", "2-4;7-9")
+        self.assertEqual(status, 1, out)
+        self.assertIn("frames missing from A: 3: 7-9", out)
+        self.assertIn("frames missing from B: 3: 7-9", out)
+
+    def test_truncated_run_fails(self):
+        a = self.write("a.tsv", HEADER + "".join(row(f) for f in range(1, 11)))
+        b = self.write("b.tsv", HEADER + "".join(row(f) for f in range(1, 5)))
+        status, out, _ = self.run_cmd("join", a, b)
+        self.assertEqual(status, 1, out)
+        self.assertIn("frames missing from B: 6: 5-10", out)
+        self.assertIn("FAIL: frames or columns missing from one file", out)
+        status, out, _ = self.run_cmd("join", b, a)
+        self.assertEqual(status, 1, out)
+        self.assertIn("frames missing from A: 6: 5-10", out)
+
+    def test_one_frame_tail_is_allowed(self):
+        # A --frames N run stops at N or N+1 depending on the backend.
+        a = self.write("a.tsv", HEADER + "".join(row(f) for f in range(1, 6)))
+        b = self.write("b.tsv", HEADER + "".join(row(f) for f in range(1, 7)))
+        for x, y, only in ((a, b, "B"), (b, a, "A")):
+            status, out, _ = self.run_cmd("join", x, y)
+            self.assertEqual(status, 0, out)
+            self.assertIn("frame 6: in %s only" % only, out)
+            self.assertNotIn("missing", out)
+        # Two frames more is not a tail.
+        c = self.write("c.tsv", HEADER + "".join(row(f) for f in range(1, 8)))
+        status, out, _ = self.run_cmd("join", a, c)
+        self.assertEqual(status, 1, out)
+        self.assertIn("frames missing from A: 2: 6-7", out)
+        # Nor is a frame missing in the middle.
+        d = self.write("d.tsv", HEADER + "".join(row(f) for f in (1, 2, 4, 5, 6)))
+        status, out, _ = self.run_cmd("join", a, d)
+        self.assertEqual(status, 1, out)
+        self.assertIn("frames missing from B: 1: 3", out)
+
+    def test_sparse_frame_lists(self):
+        # Both engines captured the same sparse list: every frame is in both.
+        a = self.write("a.tsv", HEADER + row(10) + row(20))
+        b = self.write("b.tsv", HEADER + row(10) + row(20))
+        status, out, _ = self.run_cmd("join", a, b)
+        self.assertEqual(status, 0, out)
+        full = self.write("full.tsv", HEADER + "".join(row(f) for f in range(1, 31)))
+        status, out, _ = self.run_cmd("join", a, full)
+        self.assertEqual(status, 1, out)
+        status, out, _ = self.run_cmd("join", a, full, "--frames", "10,20")
+        self.assertEqual(status, 0, out)
 
     def test_named_columns_include_engine_specific_ones(self):
         a = self.write("a.tsv", HEADER + row(1))
@@ -82,8 +139,30 @@ class JoinTest(Base):
         hb = HEADER.replace("\tram_ewram", "\tram_iwram")
         b = self.write("b.tsv", hb + row(1))
         status, out, _ = self.run_cmd("join", a, b)
-        self.assertEqual(status, 0)
-        self.assertIn("columns in one file only: ram_ewram, ram_iwram", out)
+        self.assertEqual(status, 1, out)
+        self.assertIn("columns in one file only: ram_ewram (A), ram_iwram (B)", out)
+        status, out, _ = self.run_cmd("join", a, b, "--allow-missing")
+        self.assertEqual(status, 0, out)
+        # A run without the spec has no ram_* columns at all.
+        hc = HEADER.replace("\tram_ewram", "")
+        c = self.write("c.tsv", hc + "".join(r.replace("\tCCCCCCCC", "") for r in [row(1)]))
+        status, out, _ = self.run_cmd("join", a, c)
+        self.assertEqual(status, 1, out)
+        self.assertIn("columns in one file only: ram_ewram (A)", out)
+        # Columns named with --columns are the only ones that must be in both.
+        status, out, _ = self.run_cmd("join", a, b, "--columns", "fb,DISPCNT")
+        self.assertEqual(status, 0, out)
+        self.assertIn("columns in one file only", out)
+
+    def test_no_columns(self):
+        a = self.write("a.tsv", HEADER + row(1))
+        status, _, err = self.run_cmd("join", a, a, "--columns", ",")
+        self.assertEqual(status, 2)
+        self.assertIn("--columns names no column", err)
+        only = self.write("only.tsv", "frame\tcycles\n1\t5\n")
+        status, _, err = self.run_cmd("join", only, only)
+        self.assertEqual(status, 2)
+        self.assertIn("share no column", err)
 
     def test_bad_input(self):
         a = self.write("a.tsv", HEADER + row(1))
@@ -127,10 +206,37 @@ class ExtractTest(Base):
         self.assertEqual(out, HEADER + row(1))
 
     def test_console_limit(self):
-        log = self.write("console.log", "[capture] " + "x" * 1990 + "\n")
+        log = self.write("console.log", "[capture] " + HEADER + "[capture] " + "x" * 1990 + "\n")
         status, _, err = self.run_cmd("extract", log)
         self.assertEqual(status, 1)
         self.assertIn("2000 characters", err)
+
+    def test_lines_before_the_header_are_skipped(self):
+        # A build whose diagnostics carried the record prefix, with stderr and
+        # stdout in one console (packaging/web/bootstrap.js).
+        log = self.write("console.log", "[capture] full line, FIFO and raw records need a file sink; ignoring\n"
+                         "capture=ENABLED path=\"-\"\n[capture] " + HEADER + "[capture] " + row(1))
+        status, out, err = self.run_cmd("extract", log)
+        self.assertEqual(status, 0, err)
+        self.assertEqual(out, HEADER + row(1))
+        self.assertIn("console.log:1: skipped, before the header row", err)
+
+    def test_bad_records_are_left_out(self):
+        log = self.write("console.log", "[capture] " + HEADER + "[capture] " + row(1) + "[capture] cut\tshort\n"
+                         + "[capture] " + row(2))
+        status, out, err = self.run_cmd("extract", log)
+        self.assertEqual(status, 1)
+        self.assertEqual(out, HEADER + row(1) + row(2))
+        self.assertIn("console.log:3: 2 columns, header has 8", err)
+
+    def test_header_missing_or_twice(self):
+        status, _, err = self.run_cmd("extract", self.write("none.log", "[capture] " + row(1)))
+        self.assertEqual(status, 2)
+        self.assertIn("no header row", err)
+        twice = self.write("twice.log", ("[capture] " + HEADER + "[capture] " + row(1)) * 2)
+        status, _, err = self.run_cmd("extract", twice)
+        self.assertEqual(status, 2)
+        self.assertIn("twice.log:3: a second header row", err)
 
 
 if __name__ == "__main__":

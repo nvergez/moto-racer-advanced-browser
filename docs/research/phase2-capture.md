@@ -17,6 +17,8 @@
 
 "Interpreter" is gbarecomp with `GBARECOMP_FORCE_INTERP=1`; "recompiled" is the same executable without it. Frame numbers are harness frames.
 
+**Review round 1** (PR #12) changed patch 0005 (diagnostics on standard error start with `capture: ` instead of the record prefix; region names are at most 16 characters; an empty frame list is refused; I/O writes made during multiplayer session execution are not counted; a ring allocation failure is reported once) and the harness (strict list options, `--capture-mem` accumulates, the same 16-character limit). The capture-off and capture-on runs of §2, the console-sink checks (native and browser) and the cross-check of §5 were repeated with both: same results. The §3 runs were repeated with the same options: the per-frame, line and FIFO files of both engines are byte-identical to the earlier ones.
+
 ## 1. Sample point
 
 **Verified.** Both engines take the record of frame N at the VBlank-start event that ends frame N, after the frame is latched and before the VBlank-timed DMA, the VBlank IRQ and the next instruction:
@@ -26,7 +28,7 @@
 
 The plan put gbarecomp's record after the VBlank-timed DMA and asked where the harness samples. The harness samples before it, so the capture does too: then the two engines read the same point by construction. For this game the difference does not matter:
 
-- **The game never enables a VBlank-timed DMA** on `full_race_cross`, frames 1-25,000 (harness `--watch-write` on the four DMA control registers, every write that sets the enable bit, by timing): DMA0 HBlank (18,483 enables), DMA1 and DMA2 sound FIFO (24,691 and 40), DMA3 immediate (30,500). So `run_timed_dma(1)` does nothing here, and gbarecomp's record is before and after it at once.
+- **The game never enables a VBlank-timed DMA** on `full_race_cross`, frames 1-25,000 (harness `--watch-write` on the four DMA control registers, every write that sets the enable bit, by timing): DMA0 HBlank (18,483 enables), DMA1 and DMA2 sound FIFO (24,691 and 40), DMA3 immediate (30,500). So `run_timed_dma(1)` does nothing there, and gbarecomp's record is before and after it at once. The cup, options-save and multiplayer routes were not scanned (**unverified** there). The capture does not depend on it: both engines sample before the VBlank-timed DMA.
 - **The DMA3 of race frames comes after the record, in both engines.** On `boot_to_race`, the CPU starts DMA3 at VCOUNT 174 (64 halfwords from ROM `0x083AF1D8` to OBJ VRAM `0x06011600`) and at VCOUNT 196 (128 words from EWRAM `0x02033C48` to BG VRAM `0x0600E180`), during the VBlank that follows frame 4000's record:
   - mGBA: `writes.tsv` (`--watch-frames 4001`) shows `030000A8` writing `0x80000040` and `03000090` writing `0x84000080` to `0x040000DC`, with the DMA3 transfers on the same lines, tagged frame 4001 (writes after the VBlank start of frame 4000). The record of frame 4000 equals the harness dump at frame 4000, which the harness takes at the same point: `ram_ewram` `7EDD7718` and `ram_iwram` `941D6A0C` are the CRC-32s of the dump's `ewram.bin` and `iwram.bin` (unmasked spec; DISPCNT `0x1741`, image word `0xE3A00640`).
   - gbarecomp (interpreter, driven into the race with the stock `GBARECOMP_INPUT_REPLAY` at harness frame - 2, diagnosis §7.3): `GBARECOMP_MMIO_DUMP` shows the same two writes to `0x040000DC` from the same PCs at master-clock 1,123,518,095 and 1,123,544,858, that is 17,871 and 44,634 cycles (lines 174 and 196) after frame 4000's record (clock 1,123,500,224) and before frame 4001's (1,123,781,122).
@@ -47,9 +49,11 @@ Two more checks that the engines sample the same point: on the first 3,000 frame
 
 (`steps` differs between backends; within a backend it is the same in all four runs.)
 
-**Console sink.** `GBARECOMP_CAPTURE=-` printed the same 1,000 records as the file sink, prefix aside (`capture.py extract`, then `cmp`), recompiled, 1,000 frames. The longest line was 273 characters with `spec.txt` and the route fields, and 1,034 with the largest spec the parsers accept (64 regions, 32 memory fields).
+**Console sink.** `GBARECOMP_CAPTURE=-` printed the same 1,000 records as the file sink, prefix aside (`capture.py extract`, then `cmp`), recompiled, 1,000 frames. The longest line was 273 characters with `spec.txt` and the route fields. With the largest spec the parsers accept, 64 regions with 16-character names and 32 four-byte memory fields, the header row is the longest line: 1,866 characters with the prefix. Records were at most 939 characters on 1,000 frames with the line state off, and 942 on 60 frames with it on; `capture.py extract` took all of them (exit 0). Region names were limited to 16 characters in review round 1: with the 32 characters allowed before, the header could reach about 2,890 characters, past the 2,000 the page keeps (the 1,034 measured before was the header row with 3-character names). A 17-character name is refused (`capture: GBARECOMP_CAPTURE_SPEC: bad region name ...`, exit 1).
 
-**In the browser.** A `--dev --embed-private-rom` bundle (under `build/`, never published) in headless Chromium, with `?env=GBARECOMP_CAPTURE=-,GBARECOMP_CAPTURE_LINE_STATE=0,...&args=--window --frames 600`, printed 601 records to the console. They equal the native recompiled run of the same code, with the same variables, in every column, the master clock and the bridge count included.
+**Diagnostics.** gbarecomp's capture messages on standard error start with `capture: `, never with the record prefix, because the page prints standard error to the same console. With `GBARECOMP_CAPTURE=- GBARECOMP_CAPTURE_LINES=1-3`, which warns that line records need a file sink, `capture.py extract` of standard error followed by standard output gives the file sink's 301 records byte for byte (300 frames, recompiled).
+
+**In the browser.** A `--dev --embed-private-rom` bundle (under `build/`, never published) in headless Chromium, with `?env=GBARECOMP_CAPTURE=-,GBARECOMP_CAPTURE_LINE_STATE=0,...&args=--window --frames 600`, printed 601 records to the console. They equal the native recompiled run of the same code, with the same variables, in every column, the master clock and the bridge count included. After review round 1 the run was repeated with `GBARECOMP_CAPTURE_LINES=1-3` added, so that a `capture: ` warning reaches the same console: `capture.py extract` gave the same 601 records, equal to the native run in every column.
 
 ## 3. Both engines, frames 1-3,000 of a boot without input
 
@@ -58,7 +62,7 @@ Two more checks that the engines sample the same point: on the first 3,000 frame
 | Columns | Frames that differ |
 |---|---|
 | `DISPCNT`, all 10 memory fields, `fifo_a_n`, `fifo_a`, `fifo_b_n`, `fifo_b`, `halt_writes` | none |
-| `ram_iwram` (`0x03000000`-`0x03007DFF`) | 607 |
+| `ram_iwram` (`0x03000000`-`0x03007DFF`) | 1: 607 |
 | `ram_ewram` | 16: 294-295, 596-606, 608-609, 2155 |
 | `ram_iwram_stacks` (`0x03007E00`-`0x03007FFF`, `0x03007F9C` masked) | 796, from frame 295 on |
 | `io_writes` | 4: 1393-1394 and 2852-2853, each pair one write moved across the frame boundary |
@@ -89,7 +93,7 @@ The other `lines` frames match the timing-shaped frames of diagnosis §5.4 (607,
 The plan's P2-05 needs the frames where an interpreter bridge ran BIOS IntrWait, which writes HALTCNT and IME thousands of times per frame (diagnosis §1.5), and suggested finding them in `GBARECOMP_MMIO_DUMP`. Its ring holds the last 262,144 IO writes (`kMmioCapRingSize`, `gba_io.h:59`). On PR #5's config, recompiled, 2,700 frames without input:
 
 - `halt_writes` is 0-2 per frame up to frame 1030. It is over 100 on 918 frames, 1031-1390, 1396-1415, 2165-2184 and 2189-2706, about 10,000-12,500 per frame, with `io_writes` around 30,000-37,000; and 0 on 1416-2164, where `io_writes` is 81 per frame. The stale bridge of diagnosis §1.1 starts at VBlank 1029, and from frame 1032 to the end `bridge_insns` is 25,000-147,000 on every frame (mean 132,000), storm or not.
-- At 30,000 IO writes per frame, the default ring holds about 8 frames of the storm, not the 26 that 10,000 writes per frame would give. Patch 0005 adds `GBARECOMP_MMIO_CAP_RING`: with 2,097,152 entries the dump covered frames 2641-2706 (the run stopped at 2706, diagnosis §1.3).
+- At 30,000 IO writes per frame, the default ring holds about 8 frames of the storm, not the 26 that 10,000 writes per frame would give. Patch 0005 adds `GBARECOMP_MMIO_CAP_RING`: with 2,097,152 entries the dump covered frames 2641-2706 (the run stopped at 2706, diagnosis §1.3). In the browser (wasm32), the largest ring the variable accepts, 2^28 entries (6 GiB), cannot be allocated: a 120-frame run printed `[mmio-cap] cannot allocate the ring (268435456 entries, 6442450944 bytes); no MMIO writes are recorded` once, wrote an empty dump and exited 0.
 - Cross-check of the capture's IO tap: on those 66 frames, the dump's IO writes and HALTCNT writes per frame (frame boundaries from the records' clocks; a write at a record's clock comes after the record) equal `io_writes` and `halt_writes` on every frame.
 
 So P2-05 can read the storm from the per-frame records of any length of run (`halt_writes`, and `bridge_insns` for the bridge), and needs the ring only for the individual writes of a short window.

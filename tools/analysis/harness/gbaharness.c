@@ -112,7 +112,8 @@ static struct {
 	Range captureFrames[MAX_RANGES]; /* none = every frame */
 	int nCaptureFrames;
 	const char* captureSpec;
-	const char* captureMem;
+	const char* captureMem[MAX_RANGES]; /* each --capture-mem, in order */
+	int nCaptureMem;
 	Range captureLines[MAX_RANGES];
 	int nCaptureLines;
 	Range captureFifo[MAX_RANGES];
@@ -587,13 +588,19 @@ static void shot(const char* label) {
  * _startHdraw sets earlyExit, so no instruction runs in between). VBlank-timed
  * DMA is scheduled 3 cycles and the IRQ 7 cycles after that event (dma.c
  * GBADMARunVblank, gba.c GBATestIRQ), so they come after the record unless the
- * event itself was handled that late; the game enables no VBlank-timed DMA
- * (docs/research/phase2-capture.md). Line records are taken where mGBA renders
+ * event itself was handled that late. gbarecomp's record is also taken before
+ * its VBlank-timed DMA. (On full_race_cross, frames 1-25,000, the game enables
+ * no VBlank-timed DMA; other routes were not scanned:
+ * docs/research/phase2-capture.md.) Line records are taken where mGBA renders
  * each line (the renderer's drawScanline, at HBlank start). */
 
 #define CAP_MAX_RAM 64
 #define CAP_MAX_MASKS 128
 #define CAP_MAX_MEM 32
+/* Region names are at most 16 characters, so that the header row of the
+ * largest spec (64 regions, 32 memory fields) stays under the browser console's
+ * 2,000 characters per line in gbarecomp's console sink. */
+#define CAP_MAX_NAME 16
 
 static const struct {
 	const char* name;
@@ -613,7 +620,7 @@ static const struct {
 #define CAP_N_LINE_REGS (sizeof(CAP_LINE_REGS) / sizeof(CAP_LINE_REGS[0]))
 
 typedef struct {
-	char name[33];
+	char name[CAP_MAX_NAME + 1];
 	uint32_t first, last;
 	Range masks[CAP_MAX_MASKS]; /* sorted, merged */
 	int nMasks;
@@ -638,7 +645,8 @@ static struct {
 	uint32_t memAddr[CAP_MAX_MEM];
 	int memSize[CAP_MAX_MEM];
 	int nMem;
-	/* accumulated since the previous record */
+	/* accumulated during the current frame: reset at every VBlank start,
+	 * whether or not that frame gets a record */
 	uint32_t linesCrc;
 	uint64_t fifoN[2];
 	uint32_t fifoCrc[2];
@@ -755,9 +763,9 @@ static void capSpecEntry(char* entry, const char* where) {
 	} else if (!strcmp(t[0], "ram") && n == 3) {
 		uint64_t first = 0, last = 0;
 		size_t len = strlen(t[1]);
-		bool okName = len > 0 && len <= 32;
+		bool okName = len > 0 && len <= CAP_MAX_NAME;
 		for (size_t i = 0; i < len; ++i) okName = okName && (isalnum((unsigned char) t[1][i]) || t[1][i] == '_');
-		if (!okName) die("%s: bad region name '%s'", where, t[1]);
+		if (!okName) die("%s: bad region name '%s' (1 to %d letters, digits or _)", where, t[1], CAP_MAX_NAME);
 		for (int i = 0; i < cap.nRam; ++i) {
 			if (!strcmp(cap.ram[i].name, t[1])) die("%s: region %s defined twice", where, t[1]);
 		}
@@ -892,8 +900,8 @@ static void capSetup(void) {
 		text[n] = 0;
 		capParseSpec(text, opt.captureSpec);
 	}
-	if (opt.captureMem) {
-		char* s = strdup(opt.captureMem);
+	for (int m = 0; m < opt.nCaptureMem; ++m) {
+		char* s = strdup(opt.captureMem[m]);
 		char* save = NULL;
 		for (char* tok = strtok_r(s, ",; \t\r\n", &save); tok; tok = strtok_r(NULL, ",; \t\r\n", &save)) {
 			capAddMem(tok, "--capture-mem");
@@ -1627,28 +1635,44 @@ static uint32_t parseNum(const char* s) {
 	return (uint32_t) strtoul(s, NULL, 0);
 }
 
-/* "A-B", "A+LEN" or "A" (single value), comma separated. */
+/* "A-B", "A+LEN" or "A" (single value), separated by ',', ';' or spaces (the
+ * separators of gbarecomp's capture lists). Numbers are decimal or 0x
+ * hexadecimal (capNum: a leading 0 is not octal) and fit in 32 bits; A <= B,
+ * LEN >= 1. Anything else, or a list with no entry, stops the harness. */
 static int parseRanges(const char* s, Range* out, int max) {
 	int n = 0;
 	char buf[4096];
+	if (strlen(s) >= sizeof(buf)) die("list longer than %zu characters: %.40s...", sizeof(buf) - 1, s);
 	snprintf(buf, sizeof(buf), "%s", s);
-	for (char* tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+	char* save = NULL;
+	for (char* tok = strtok_r(buf, ",; \t\r\n", &save); tok; tok = strtok_r(NULL, ",; \t\r\n", &save)) {
 		if (n >= max) die("too many ranges (at most %d per option): %s", MAX_RANGES, s);
-		char* dash = strchr(tok + 1, '-');
-		char* plus = strchr(tok + 1, '+');
-		if (dash) {
+		char entry[128];
+		snprintf(entry, sizeof(entry), "%s", tok);
+		char* dash = strchr(tok, '-');
+		char* plus = strchr(tok, '+');
+		uint64_t lo = 0, hi = 0, len = 0;
+		bool ok = false;
+		if (dash && !plus) {
 			*dash = 0;
-			out[n].lo = parseNum(tok);
-			out[n].hi = parseNum(dash + 1);
-		} else if (plus) {
+			ok = capNum(tok, &lo) && capNum(dash + 1, &hi);
+		} else if (plus && !dash) {
 			*plus = 0;
-			out[n].lo = parseNum(tok);
-			out[n].hi = out[n].lo + parseNum(plus + 1) - 1;
-		} else {
-			out[n].lo = out[n].hi = parseNum(tok);
+			ok = capNum(tok, &lo) && capNum(plus + 1, &len) && len >= 1 && lo <= 0xFFFFFFFFu && len <= 0x100000000u;
+			hi = lo + len - 1;
+		} else if (!dash && !plus) {
+			ok = capNum(tok, &lo);
+			hi = lo;
 		}
+		if (!ok || lo > hi || hi > 0xFFFFFFFFu) {
+			die("bad entry '%s' in list '%s' (want A, A-B with A <= B, or A+LEN with LEN >= 1; "
+			    "decimal or 0x hexadecimal, 32 bits)", entry, s);
+		}
+		out[n].lo = (uint32_t) lo;
+		out[n].hi = (uint32_t) hi;
 		n++;
 	}
+	if (n == 0) die("empty list '%s'", s);
 	return n;
 }
 
@@ -1690,7 +1714,7 @@ static void usage(void) {
 	        "                       -> capture.tsv (tools/capture/README.md)\n"
 	        "  --capture-frames LIST  frames that get a record (default: every frame)\n"
 	        "  --capture-spec FILE  capture spec: line-register masks, RAM regions and their masks, memory fields\n"
-	        "  --capture-mem LIST   extra memory fields ADDR:SIZE,... (size 1/2/4, EWRAM or IWRAM)\n"
+	        "  --capture-mem LIST   extra memory fields ADDR:SIZE,... (size 1/2/4, EWRAM or IWRAM; repeatable)\n"
 	        "  --capture-lines LIST full per-line records for frames -> capture.lines.tsv\n"
 	        "  --capture-fifo LIST  bytes written to FIFO A and B for frames -> capture.fifo.tsv\n"
 	        "  --capture-raw LIST   240x160 BGR555 frames -> capture.raw/fNNNNNN.bgr555\n"
@@ -1777,7 +1801,10 @@ int main(int argc, char** argv) {
 		case 1000: opt.capture = true; break;
 		case 1001: opt.nCaptureFrames += parseRanges(optarg, opt.captureFrames + opt.nCaptureFrames, MAX_RANGES - opt.nCaptureFrames); break;
 		case 1002: opt.captureSpec = optarg; break;
-		case 1003: opt.captureMem = optarg; break;
+		case 1003:
+			if (opt.nCaptureMem >= MAX_RANGES) die("too many --capture-mem options (at most %d)", MAX_RANGES);
+			opt.captureMem[opt.nCaptureMem++] = optarg;
+			break;
 		case 1004: opt.nCaptureLines += parseRanges(optarg, opt.captureLines + opt.nCaptureLines, MAX_RANGES - opt.nCaptureLines); break;
 		case 1005: opt.nCaptureFifo += parseRanges(optarg, opt.captureFifo + opt.nCaptureFifo, MAX_RANGES - opt.nCaptureFifo); break;
 		case 1006: opt.nCaptureRaw += parseRanges(optarg, opt.captureRaw + opt.nCaptureRaw, MAX_RANGES - opt.nCaptureRaw); break;
@@ -1786,7 +1813,7 @@ int main(int argc, char** argv) {
 	}
 	if (!opt.rom || !opt.bios || !opt.out) usage();
 	if (!opt.script && opt.frames < 0) die("need --script and/or --frames");
-	if (!opt.capture && (opt.nCaptureFrames || opt.captureSpec || opt.captureMem || opt.nCaptureLines || opt.nCaptureFifo || opt.nCaptureRaw)) {
+	if (!opt.capture && (opt.nCaptureFrames || opt.captureSpec || opt.nCaptureMem || opt.nCaptureLines || opt.nCaptureFifo || opt.nCaptureRaw)) {
 		die("--capture-* options need --capture");
 	}
 	mkdirs(opt.out);
