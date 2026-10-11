@@ -1,0 +1,68 @@
+# Allowlist of route boot_to_race for comparison 2 (gbarecomp against mGBA),
+# read by tools/difftest/compare.py through scripts/replay-test.sh
+# boot_to_race --against mgba. Format: tools/difftest/README.md. Every entry
+# names the frames, the checks it covers, its cause and where the evidence is;
+# fixed_by names the task expected to make it unnecessary.
+#
+# Frames are harness frames on the pinned ROM (SHA-1
+# b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0) and BIOS (SHA-1
+# 300c20df6731a33952ded8c436f7f186d25d3492), with gbarecomp's interpreter
+# (GBARECOMP_FORCE_INTERP=1) as the gbarecomp side, measured on gbarecomp
+# 5e89943 with patches 0001-0006 (docs/research/phase2-comparator.md,
+# section 3). An entry covers a check on a frame; the first matching entry
+# counts the hit.
+
+schema = 1
+route = "boot_to_race"
+against = "mgba"
+
+[[allow]]
+id = "affine-reset-values"
+frames = "1"
+checks = ["layer1"]
+cause = "Before the BIOS first writes them, BG2PA, BG2PD, BG3PA and BG3PD read 0 in gbarecomp and 0x0100 in mGBA: line 0 of frame 1 only. Which reset value the hardware has is unverified."
+ref = "docs/research/phase2-diagnosis.md section 7.2; docs/research/phase2-comparator.md section 3.1"
+
+[[allow]]
+id = "obj-1st-target"
+frames = "222-269, 2453-2481, 3258-3289"
+checks = ["layer2"]
+cause = "gbarecomp applies a color effect to an OBJ pixel only when the OBJ is semi-transparent and ignores BLDCNT bit 4 (OBJ 1st target), so normal OBJs stay unfaded: the BIOS logo (BLDCNT 0x3FBF, BLDY 2 to 16) and the game's fades from the title and from the last menu (BLDCNT 0x00FF). The line state is equal on these frames. Frames 220-221 (BLDY 1) differ by one step at most and pass."
+ref = "docs/research/phase2-diagnosis.md section 5.1; docs/research/phase2-replay.md section 3"
+fixed_by = "P2-08"
+
+[[allow]]
+id = "obj-priority-over-affine-bg"
+frames = "2968-2973"
+checks = ["layer2"]
+cause = "Only where OBJ 0 (priority 2) and OBJ 6 (priority 0, transparent at those pixels) overlap BG2 (affine, priority 1): mGBA draws OBJ 0 in front of BG2, gbarecomp behind it. The line state is equal on these frames (but line 25 of 2972, see mid-frame-write-timing). Which engine matches hardware is unverified."
+ref = "docs/research/phase2-replay.md section 3; docs/research/phase2-comparator.md section 3.1"
+
+[[allow]]
+id = "mid-frame-write-timing"
+frames = "294, 296, 607, 610, 1031, 1393-1395, 1864, 1873, 2149, 2157, 2165, 2188, 2482-2483, 2490, 2498, 2506, 2514, 2522, 2524, 2733, 2965, 2967, 2972, 2997, 3002, 3010-3011, 3014, 3018, 3027-3029, 3031, 3033, 3037, 3039, 3041-3045, 3052-3053, 3154, 3183, 3188, 3196, 3225, 3232, 3236, 3240, 3254"
+checks = ["layer1", "layer2"]
+cause = "A write to a video register, the palette, OAM or VRAM lands on another line than in mGBA: the per-line state differs on a band of lines and is equal again later in the frame (2188: from the next frame on, its DMA3 spans the VBlank start). CPU, DMA or IRQ timing, the same profile on every gbarecomp backend; pixels differ beyond one step only on 610, 1031, 2188, 2482 and 2498."
+ref = "docs/research/phase2-diagnosis.md section 5.4; docs/research/phase2-comparator.md section 3.1"
+
+[[allow]]
+id = "ram-snapshot-timing"
+frames = "294-295, 596-609, 2155, 2482"
+checks = ["ram:ewram", "ram:iwram"]
+cause = "A CPU copy or decompression into RAM runs across the VBlank start, where the record is taken, at a slightly different point in the two engines: on each frame one 4 KiB block of EWRAM differs (1 KiB of IWRAM, 0x03001C00-0x03001FFF, on 607), a different block every frame, and the RAM is equal again the next frame."
+ref = "docs/research/phase2-comparator.md section 3.2"
+
+[[allow]]
+id = "irq-frames-on-stacks"
+frames = "1-3289"
+checks = ["ram:iwram_stacks"]
+cause = "The stack words that differ are those an interrupt entry pushes: the BIOS IRQ handler's frames at 0x03007F70-0x03007F9F (r0-r3, r12 and lr of the interrupted code, a nested IRQ's below them) and 0x03007E60-0x03007E7F on 11 frames, below the main thread's stack. Which instruction an IRQ interrupts follows the engines' IRQ timing, which differs (gbarecomp charges no IRQ entry cycles and has no IRQ delay); the rest of RAM is equal on these frames."
+ref = "docs/research/phase2-race-lockstep.md sections 3 and 5; docs/research/phase2-comparator.md section 3.2"
+
+[[allow]]
+id = "race-starts-one-frame-late"
+frames = "3286-4400"
+checks = ["layer1", "layer2", "ram:*"]
+cause = "gbarecomp's GamePak prefetch model never resets on a branch, so the race program's start-up loop is 18% slower: EWRAM differs from 3286 while it clears .bss, the race image arrives at 3291 instead of 3290, and with the inputs on the same frames the race leaves lockstep with mGBA (no IRQ entry cycles in gbarecomp also moves VCOUNT-fed random draws). No frame map realigns it: with a +1 map EWRAM still differs from 3293."
+ref = "docs/research/phase2-race-lockstep.md sections 2-4; docs/research/phase2-comparator.md section 3.3"
+fixed_by = "P2-21"
