@@ -176,11 +176,14 @@ run_harness.sh [--rom FILE] [--bios FILE] [--no-hash-check] --out DIR [options]
   --trace-ram                              # IWRAM and EWRAM CRC32 columns in trace.tsv
   --swi-cycles                             # cycles from each SWI to its return -> swicycles.tsv (stepping)
   --wav FILE                               # stereo s16, 32768 Hz
+  --capture [--capture-frames LIST] [--capture-spec FILE] [--capture-mem ADDR:SIZE,...]
+            [--capture-lines LIST] [--capture-fifo LIST] [--capture-raw LIST]
+                                           # per-frame records as gbarecomp's GBARECOMP_CAPTURE writes them
   --idle ignore|remove|detect              # mGBA idle-loop optimization (default ignore)
   --log-level MASK                         # mGBA log mask to stderr (default 0x7)
 ```
 
-RANGES are inclusive, `A-B` or `A+LEN`, at most 32 per option. Mirrors are canonicalized: EWRAM to 0x02xxxxxx, VRAM 0x06018000+ to 0x06010000+, SRAM 0x0E/0x0F to 0x0E000000 + (address & 0xFFFF). Relative `--out`, `--wav` and `--save` paths resolve under `analysis-out/`, and a path git would track is refused.
+LIST and RANGES entries are inclusive: `A`, `A-B` (A <= B) or `A+LEN` (LEN >= 1), separated by `,`, `;` or spaces, at most 32 per option. Numbers are decimal or `0x` hexadecimal, 32 bits; a leading 0 is decimal, not octal. A malformed entry or an empty list stops the harness with a message. `--capture-mem` can be repeated; its fields add up, as `--trace-mem`'s do. Mirrors are canonicalized: EWRAM to 0x02xxxxxx, VRAM 0x06018000+ to 0x06010000+, SRAM 0x0E/0x0F to 0x0E000000 + (address & 0xFFFF). Relative `--out`, `--wav` and `--save` paths resolve under `analysis-out/`, and a path git would track is refused.
 
 ### Outputs (under `--out DIR`)
 
@@ -198,6 +201,7 @@ RANGES are inclusive, `A-B` or `A+LEN`, at most 32 per option. Mirrors are canon
 | `swi.tsv` | frame, vcount, SWI address, mode, BIOS function and name, r0-r3, lr |
 | `swicycles.tsv` | one row per SWI that returned to its caller in a stepped frame: frame, vcount, SWI address, mode, function and name, r0-r3 at the call, cycles from the SWI instruction to the caller's next instruction (IRQs taken in between included) |
 | `biosreads.tsv` | frame, vcount, pc, mode, lr, most recent SWI and its call site, address, size, and the value game code got from the BIOS region (the open-bus latch of the loaded image, or the `--openbus` value). DMA reads are not logged; an LDM is one row with value `-`. Capped by `--watch-max` |
+| `capture.tsv`, `capture.lines.tsv`, `capture.fifo.tsv`, `capture.raw/` | with `--capture`: per frame, at VBlank start, CRCs of the frame (BGR555) and of the frame's line records, DISPCNT, memory fields, RAM region hashes, FIFO A/B bytes, I/O and HALTCNT writes, the clock; full line records, FIFO bytes and raw frames for the requested frames. The format, shared with gbarecomp, is in [tools/capture/README.md](../capture/README.md) |
 
 Performance: boot to frame 4400 with dumps takes about 1.5 s; with per-instruction stepping on every frame about 2.5 s.
 
@@ -210,6 +214,8 @@ The code that produced the Phase 1 evidence is this one minus the changes below.
 - New `--save-type` and `--openbus` options, which reproduce two Phase 1 experiments: a missing or Flash/EEPROM save chip (the game shows "Error while saving"), and replacing the BIOS open-bus value (see the findings, section 6).
 - A script `end` before the `--frames` count used to hang the harness (the loop up to `--frames` never advanced once `end` had stopped the run). `end` now ends the run there. Runs that did not hang are unchanged.
 - For the open-BIOS A/B (P2-17): `--skip-bios`, `--dump-at-pc`, `--log-bios-reads`, `--trace-ram` and `--swi-cycles`. Without them the outputs are unchanged: a `boot_to_race.txt` run with `--trace 3290-4400 --trace-swi --watch-write` and one with `--coverage --trace-pc` over a few stepped frames gave byte-identical files to the previous build (`summary.json` apart from `wall_seconds`, `index.tsv` apart from the run directory). With `--swi-cycles` (every frame stepped), `trace.tsv` was byte-identical to a run without it.
+- New `--capture` options (P2-03). They only add the `capture*` outputs: a `boot_to_race.txt` run with `--trace`, `--trace-mem`, `--dump-at` and `--shot-at` gives the same `trace.tsv`, dumps, screenshots and `summary.json` (wall time aside) with and without `--capture`, and the same as before the options existed.
+- List options are parsed strictly (P2-03 review). A malformed number, a range whose end is before its start, `A+0` or an empty list used to be read as 0 or cut short without an error (`--capture-frames 1;5` captured frame 1 only, `--dump-at xyz` was accepted); they now stop the harness. `;` and spaces separate entries like `,`, and `010` is 10, no longer octal 8. Lists without leading zeros mean what they meant before: a 3,400-frame `boot_to_race.txt` run with `--trace`, `--trace-mem`, `--dump-at`, `--shot-at`, `--trace-lines`, `--watch-write`, `--watch-frames A+LEN`, `--trace-swi` and the capture options writes byte-identical outputs before and after the change.
 
 ### Pitfalls
 

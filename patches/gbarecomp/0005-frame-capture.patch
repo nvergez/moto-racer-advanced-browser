@@ -1,0 +1,1058 @@
+Add GBARECOMP_CAPTURE: per-frame and per-line records for differential tests.
+
+Comparing gbarecomp with another emulator, or two gbarecomp backends, needs
+the machine state at one well-defined point of every frame. Headless runs
+have no per-frame record (GBARECOMP_FRAMEDUMP_DIR works only in the windowed
+loop, runtime.cpp:4217), nothing samples the state each scanline is rendered
+with, and the MMIO write ring is fixed at 262,144 entries (gba_io.h:59): about
+2,500 frames of a typical game, and 8 frames when an interpreter bridge spins
+in BIOS IntrWait (about 30,000 IO writes per frame).
+
+All of this is observation only, and off unless GBARECOMP_CAPTURE is set:
+
+- src/runtime/frame_capture.{h,cpp}. At VBlank start, after the framebuffer
+  latch and before the VBlank-timed DMA, the VBlank input hook and the VBlank
+  IRQ, one TSV record per frame: CRC-32 of the 240x160 frame as BGR555,
+  CRC-32 of the frame's line records, DISPCNT, configured EWRAM/IWRAM values
+  and region hashes (with masked sub-ranges), and, during that frame, the
+  bytes the CPU and DMA wrote to FIFO A and B, the IO-register and HALTCNT
+  writes and the instructions the interpreter bridge ran; also the master
+  clock. Before each visible line is rendered: its video registers (with
+  masks for unused bits), palette[0] and CRC-32s of OAM, palette and BG/OBJ
+  VRAM. Full line records, FIFO bytes and raw frames for requested frame
+  ranges. A file sink, or stdout with a "[capture] " prefix for the browser
+  console, where stderr lands too: diagnostics are prefixed "capture: "
+  instead, and region names are capped at 16 characters so that the largest
+  header row fits the page's 2,000-character lines. Records are numbered
+  frame_count() + 1, the count a VBlank-counting emulator such as mGBA has
+  reached at that VBlank. Multiplayer session execution is not captured
+  (like the VBlank input hook, the calls are skipped while it runs). The
+  header comment lists the variables and the format.
+- gba_io: gba_set_io_write_tap(), a tap on the MMIO ring's commit path, and
+  GBARECOMP_MMIO_CAP_RING=<entries> to size the ring. A ring that cannot be
+  allocated (2^28 entries is 6 GiB, more than wasm32 can address) is
+  reported once on stderr instead of being retried on every IO write.
+- runtime_bus_bridge: runtime_session_executing(), so that the IO tap skips
+  writes made during session execution.
+- self_heal: self_heal_bridge_steps(), the bridged-instruction count as the
+  bridge runs (self_heal_interpreted_insns() grows only when a bridge
+  returns, so a bridge spanning many frames shows in none of them).
+
+With the capture off, the cost is a predictable branch per scanline, per
+VBlank and per IO write.
+
+Tested on macOS arm64 (Apple clang), plus an Emscripten 6.0.10 build of the
+runtime, on a commercial ROM (Moto Racer Advance) with the retail BIOS:
+- gbarecomp's 52 tests pass.
+- Capture unset: runs of 240, 300, 320, 600 and 1,000 frames end on the same
+  final line and coverage banner, with byte-identical --dump-png output, as
+  the unpatched build, both recompiled and with GBARECOMP_FORCE_INTERP=1.
+  Capture on: the same again, and two runs give byte-identical captures.
+- The stdout sink prints the same records as the file sink, natively and in
+  headless Chromium (the records of a 600-frame browser run equal a native
+  run's in every column). The largest spec the parser accepts gives a
+  1,866-character header line with the prefix, under the page's 2,000.
+- In the browser, GBARECOMP_MMIO_CAP_RING=268435456 (6 GiB) is reported once
+  as not allocatable, and the run completes.
+- Over 66 frames (2.1 million IO writes), io_writes and halt_writes equal the
+  per-frame counts of GBARECOMP_MMIO_DUMP with GBARECOMP_MMIO_CAP_RING=2097152.
+- Against an independent implementation of the same records on mGBA 0.10.5,
+  over a 3,000-frame boot: memory fields and FIFO bytes are equal on every
+  frame, and line state on all but 18 frames, each a known difference of
+  register-write timing or of an uninitialized register.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e992dbd..21ee6c6 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -381,6 +381,7 @@ add_library(gbarecomp_runtime STATIC
+     src/runtime/bios_hle.cpp
+     src/runtime/generated_dispatch.cpp
+     src/runtime/runtime_bus_bridge.cpp
++    src/runtime/frame_capture.cpp
+     src/runtime/arm_cpu_bridge.cpp
+     src/runtime/overlay_emit.cpp
+     src/runtime/overlay_loader.cpp
+diff --git a/src/gba/gba_io.cpp b/src/gba/gba_io.cpp
+index 28aacc9..ec7eaa2 100644
+--- a/src/gba/gba_io.cpp
++++ b/src/gba/gba_io.cpp
+@@ -33,6 +33,8 @@ MmioCapEntry* g_mmio_ring  = nullptr;
+ uint64_t      g_mmio_write = 0;      // total committed writes (monotonic)
+ bool          g_mmio_split = false;  // suppress nested write16 from write32
+ 
++GbaIoWriteTap g_io_write_tap = nullptr;
++
+ bool mmio_cap_enabled() {
+     static const bool enabled = [] {
+         const char* value = std::getenv("GBARECOMP_MMIO_CAP");
+@@ -43,14 +45,44 @@ bool mmio_cap_enabled() {
+     return enabled;
+ }
+ 
++std::size_t mmio_cap_ring_size() {
++    static const std::size_t size = [] {
++        const char* value = std::getenv("GBARECOMP_MMIO_CAP_RING");
++        if (!value || !*value) return kMmioCapRingSize;
++        char* end = nullptr;
++        const unsigned long long n = std::strtoull(value, &end, 0);
++        constexpr unsigned long long kMax = 1ull << 28;  // 6 GiB at 24 bytes each
++        if (!end || *end || n == 0 || n > kMax) {
++            std::fprintf(stderr,
++                         "[mmio-cap] ignoring GBARECOMP_MMIO_CAP_RING=%s "
++                         "(want 1..%llu entries); using %zu\n",
++                         value, kMax, kMmioCapRingSize);
++            return kMmioCapRingSize;
++        }
++        return static_cast<std::size_t>(n);
++    }();
++    return size;
++}
++
+ inline void mmio_cap_record(uint32_t addr, uint32_t value, uint32_t size) {
++    if (g_io_write_tap) g_io_write_tap(addr, value, size);
+     if (!mmio_cap_enabled()) return;
+     if (!g_mmio_ring) {
++        static bool alloc_failed = false;  // warn once, never retry
++        if (alloc_failed) return;
+         g_mmio_ring = static_cast<MmioCapEntry*>(
+-            std::calloc(kMmioCapRingSize, sizeof(MmioCapEntry)));
+-        if (!g_mmio_ring) return;
++            std::calloc(mmio_cap_ring_size(), sizeof(MmioCapEntry)));
++        if (!g_mmio_ring) {
++            alloc_failed = true;
++            std::fprintf(stderr,
++                         "[mmio-cap] cannot allocate the ring (%zu entries, %llu bytes); "
++                         "no MMIO writes are recorded\n",
++                         mmio_cap_ring_size(),
++                         static_cast<unsigned long long>(mmio_cap_ring_size()) * sizeof(MmioCapEntry));
++            return;
++        }
+     }
+-    MmioCapEntry& e = g_mmio_ring[g_mmio_write % kMmioCapRingSize];
++    MmioCapEntry& e = g_mmio_ring[g_mmio_write % mmio_cap_ring_size()];
+     e.cycle = g_runtime_cycles;
+     e.addr  = addr;
+     e.value = value;
+@@ -60,11 +92,14 @@ inline void mmio_cap_record(uint32_t addr, uint32_t value, uint32_t size) {
+ }
+ }  // namespace
+ 
++std::size_t gba_mmio_cap_ring_size() { return mmio_cap_ring_size(); }
++void gba_set_io_write_tap(GbaIoWriteTap tap) { g_io_write_tap = tap; }
+ bool gba_mmio_cap_enabled() { return mmio_cap_enabled(); }
+ uint64_t gba_mmio_cap_total()  { return g_mmio_write; }
+ uint64_t gba_mmio_cap_oldest() {
+     if (!mmio_cap_enabled()) return 0;
+-    return g_mmio_write > kMmioCapRingSize ? g_mmio_write - kMmioCapRingSize : 0;
++    const uint64_t ring = mmio_cap_ring_size();
++    return g_mmio_write > ring ? g_mmio_write - ring : 0;
+ }
+ std::size_t gba_mmio_cap_query(uint64_t start, std::size_t count,
+                                MmioCapEntry* out, uint64_t& out_first) {
+@@ -78,7 +113,7 @@ std::size_t gba_mmio_cap_query(uint64_t start, std::size_t count,
+     if (count > avail) count = static_cast<std::size_t>(avail);
+     out_first = start;
+     for (std::size_t i = 0; i < count; ++i) {
+-        out[i] = g_mmio_ring[(start + i) % kMmioCapRingSize];
++        out[i] = g_mmio_ring[(start + i) % mmio_cap_ring_size()];
+     }
+     return count;
+ }
+diff --git a/src/gba/gba_io.h b/src/gba/gba_io.h
+index a5a3844..67fa51f 100644
+--- a/src/gba/gba_io.h
++++ b/src/gba/gba_io.h
+@@ -56,13 +56,24 @@ struct MmioCapEntry {
+     uint32_t size;   // 1, 2, or 4 bytes
+     uint32_t pc;
+ };
+-constexpr std::size_t kMmioCapRingSize = 1u << 18;  // 262144 writes
++// Default ring capacity: 262144 writes (6 MiB). GBARECOMP_MMIO_CAP_RING=<N>
++// replaces it with N entries (24 bytes each), so a dump can cover a longer
++// window than a few seconds of a write-heavy game.
++constexpr std::size_t kMmioCapRingSize = 1u << 18;
++std::size_t gba_mmio_cap_ring_size();  // entries; read once from the environment
+ bool        gba_mmio_cap_enabled();  // true when MMIO capture is armed
+ uint64_t    gba_mmio_cap_total();    // total writes ever recorded (monotonic)
+ uint64_t    gba_mmio_cap_oldest();   // earliest absolute index still retained
+ std::size_t gba_mmio_cap_query(uint64_t start, std::size_t count,
+                                MmioCapEntry* out, uint64_t& out_first);
+ 
++// Observation tap on the same commit path: when set, called once per committed
++// IO-register write (CPU or DMA), with the access as the ring records it (a
++// 32-bit write is one call of size 4), whether or not the ring is armed. It
++// must not write guest state. nullptr (the default) removes it.
++using GbaIoWriteTap = void (*)(uint32_t addr, uint32_t value, uint32_t size);
++void gba_set_io_write_tap(GbaIoWriteTap tap);
++
+ // Documented IO register addresses (all relative to 0x04000000).
+ namespace IoReg {
+ constexpr uint32_t DISPCNT   = 0x000;  // u16
+diff --git a/src/runtime/frame_capture.cpp b/src/runtime/frame_capture.cpp
+new file mode 100644
+index 0000000..1eb1ba6
+--- /dev/null
++++ b/src/runtime/frame_capture.cpp
+@@ -0,0 +1,634 @@
++// frame_capture.cpp — see frame_capture.h.
++
++#include "frame_capture.h"
++
++#include "runtime_bus_bridge.h"
++#include "self_heal.h"
++#include "../gba/gba_bus.h"
++#include "../gba/gba_io.h"
++#include "../gba/gba_ppu.h"
++
++#include <cctype>
++#include <cerrno>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <sstream>
++#include <string>
++#include <utility>
++#include <vector>
++
++extern "C" unsigned long long g_runtime_cycles;
++
++namespace gbarecomp::capture {
++
++bool g_on = false;
++
++namespace {
++
++// ── CRC-32 (zlib's: reflected 0xEDB88320, crc32(crc, buf, len) semantics),
++// slice-by-8 so hashing 288 KiB of RAM per frame stays cheap.
++struct CrcTables {
++    uint32_t t[8][256];
++    constexpr CrcTables() : t{} {
++        for (uint32_t i = 0; i < 256; ++i) {
++            uint32_t c = i;
++            for (int k = 0; k < 8; ++k) c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
++            t[0][i] = c;
++        }
++        for (uint32_t i = 0; i < 256; ++i)
++            for (int s = 1; s < 8; ++s)
++                t[s][i] = (t[s - 1][i] >> 8) ^ t[0][t[s - 1][i] & 0xFFu];
++    }
++};
++constexpr CrcTables kCrc{};
++
++uint32_t crc32(uint32_t crc, const void* data, std::size_t n) {
++    const uint8_t* p = static_cast<const uint8_t*>(data);
++    uint32_t c = ~crc;
++    while (n >= 8) {
++        const uint32_t a = c ^ (uint32_t(p[0]) | uint32_t(p[1]) << 8 |
++                                uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24);
++        const uint32_t b = uint32_t(p[4]) | uint32_t(p[5]) << 8 |
++                           uint32_t(p[6]) << 16 | uint32_t(p[7]) << 24;
++        c = kCrc.t[7][a & 0xFFu] ^ kCrc.t[6][(a >> 8) & 0xFFu] ^
++            kCrc.t[5][(a >> 16) & 0xFFu] ^ kCrc.t[4][a >> 24] ^
++            kCrc.t[3][b & 0xFFu] ^ kCrc.t[2][(b >> 8) & 0xFFu] ^
++            kCrc.t[1][(b >> 16) & 0xFFu] ^ kCrc.t[0][b >> 24];
++        p += 8;
++        n -= 8;
++    }
++    while (n--) c = kCrc.t[0][(c ^ *p++) & 0xFFu] ^ (c >> 8);
++    return ~c;
++}
++
++uint32_t crc32_zeros(uint32_t crc, std::size_t n) {
++    static const uint8_t zeros[256] = {};
++    while (n) {
++        const std::size_t k = n < sizeof(zeros) ? n : sizeof(zeros);
++        crc = crc32(crc, zeros, k);
++        n -= k;
++    }
++    return crc;
++}
++
++// ── The registers of a line record, in column order (offsets from 0x04000000).
++struct LineReg {
++    const char* name;
++    uint16_t off;
++    uint8_t size;
++};
++constexpr LineReg kLineRegs[] = {
++    {"DISPCNT", 0x000, 2}, {"BG0CNT", 0x008, 2},  {"BG1CNT", 0x00A, 2},
++    {"BG2CNT", 0x00C, 2},  {"BG3CNT", 0x00E, 2},  {"BG0HOFS", 0x010, 2},
++    {"BG0VOFS", 0x012, 2}, {"BG1HOFS", 0x014, 2}, {"BG1VOFS", 0x016, 2},
++    {"BG2HOFS", 0x018, 2}, {"BG2VOFS", 0x01A, 2}, {"BG3HOFS", 0x01C, 2},
++    {"BG3VOFS", 0x01E, 2}, {"BG2PA", 0x020, 2},   {"BG2PB", 0x022, 2},
++    {"BG2PC", 0x024, 2},   {"BG2PD", 0x026, 2},   {"BG2X", 0x028, 4},
++    {"BG2Y", 0x02C, 4},    {"BG3PA", 0x030, 2},   {"BG3PB", 0x032, 2},
++    {"BG3PC", 0x034, 2},   {"BG3PD", 0x036, 2},   {"BG3X", 0x038, 4},
++    {"BG3Y", 0x03C, 4},    {"WIN0H", 0x040, 2},   {"WIN0V", 0x044, 2},
++    {"WIN1H", 0x042, 2},   {"WIN1V", 0x046, 2},   {"WININ", 0x048, 2},
++    {"WINOUT", 0x04A, 2},  {"BLDCNT", 0x050, 2},  {"BLDALPHA", 0x052, 2},
++    {"BLDY", 0x054, 2},    {"MOSAIC", 0x04C, 2},
++};
++constexpr std::size_t kNumLineRegs = sizeof(kLineRegs) / sizeof(kLineRegs[0]);
++
++constexpr std::size_t kMaxRam = 64, kMaxMasks = 128, kMaxMem = 32;
++// Region names are at most 16 characters, so that the header row of the
++// largest spec (64 regions, 32 memory fields) stays under the browser
++// console's 2,000 characters per line with the "[capture] " prefix.
++constexpr std::size_t kMaxName = 16;
++constexpr unsigned kWidth = 240, kHeight = 160;
++
++struct Range {
++    uint64_t first, last;
++};
++
++// A frame list: "1-3000;4200". all = no list given where the default is all.
++struct FrameList {
++    bool all = false;
++    std::vector<Range> ranges;
++    bool has(uint64_t f) const {
++        if (all) return true;
++        for (const Range& r : ranges)
++            if (f >= r.first && f <= r.last) return true;
++        return false;
++    }
++    bool empty() const { return !all && ranges.empty(); }
++};
++
++struct RamRegion {
++    std::string name;
++    uint32_t first = 0, last = 0;
++    std::vector<Range> masks;  // sorted, inside [first, last]
++};
++
++struct MemField {
++    uint32_t addr = 0;
++    unsigned size = 0;
++};
++
++// CRC of a memory block, recomputed only when its bytes differ from the copy
++// taken at the last computation (memcmp is much cheaper than CRC, and video
++// memory changes on few lines per frame).
++struct CachedCrc {
++    std::vector<uint8_t> shadow;
++    uint32_t crc = 0;
++    bool valid = false;
++    uint32_t get(const uint8_t* p, std::size_t n) {
++        if (valid && shadow.size() == n && std::memcmp(shadow.data(), p, n) == 0) return crc;
++        shadow.assign(p, p + n);
++        crc = crc32(0, p, n);
++        valid = true;
++        return crc;
++    }
++};
++
++struct State {
++    std::FILE* out = nullptr;
++    bool to_stdout = false;
++    std::string stem;
++    std::FILE* lines_out = nullptr;
++    std::FILE* fifo_out = nullptr;
++    std::string raw_dir;
++    FrameList frames, lines_frames, fifo_frames, raw_frames;
++    bool line_state = true;
++    uint32_t reg_mask[kNumLineRegs];
++    std::vector<RamRegion> ram;
++    std::vector<MemField> mem;
++    std::string header;
++    // Accumulated during the current frame: reset at every VBlank start,
++    // whether or not that frame gets a record.
++    uint32_t lines_crc = 0;
++    uint64_t fifo_n[2] = {0, 0};
++    uint32_t fifo_crc[2] = {0, 0};
++    std::vector<uint8_t> fifo_bytes[2];
++    uint64_t io_writes = 0, halt_writes = 0;
++    uint64_t bridge_prev = 0;
++    CachedCrc oam, pal, vram_bg, vram_obj;
++    uint16_t fb[kWidth * kHeight];
++    std::string rec;
++};
++State* S = nullptr;
++
++// ── Parsing ────────────────────────────────────────────────────────────────
++
++// Diagnostics go to stderr as "capture: ...". Only records carry the
++// "[capture] " prefix: the browser page prints stdout and stderr to the same
++// console, where records are read back by that prefix.
++bool fail(const char* what, const std::string& detail) {
++    std::fprintf(stderr, "capture: %s: %s\n", what, detail.c_str());
++    return false;
++}
++
++// Decimal, or hexadecimal with 0x (never octal), and nothing after it.
++bool parse_u64(const std::string& s, uint64_t& out) {
++    if (s.empty() || !std::isdigit(static_cast<unsigned char>(s[0]))) return false;
++    const bool hex = s.size() > 1 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X');
++    char* end = nullptr;
++    errno = 0;
++    const unsigned long long v = std::strtoull(s.c_str(), &end, hex ? 16 : 10);
++    if (errno || !end || *end) return false;
++    out = v;
++    return true;
++}
++
++bool parse_range(const std::string& s, Range& r) {
++    const std::size_t dash = s.find('-');
++    if (dash == std::string::npos) {
++        if (!parse_u64(s, r.first)) return false;
++        r.last = r.first;
++        return true;
++    }
++    return parse_u64(s.substr(0, dash), r.first) &&
++           parse_u64(s.substr(dash + 1), r.last) && r.first <= r.last;
++}
++
++std::vector<std::string> split(const std::string& s, const char* seps) {
++    std::vector<std::string> out;
++    std::string cur;
++    for (char c : s) {
++        if (std::strchr(seps, c)) {
++            if (!cur.empty()) out.push_back(cur);
++            cur.clear();
++        } else {
++            cur.push_back(c);
++        }
++    }
++    if (!cur.empty()) out.push_back(cur);
++    return out;
++}
++
++bool parse_frames(const char* var, bool default_all, FrameList& out) {
++    const char* v = std::getenv(var);
++    if (!v || !*v) {
++        out.all = default_all;
++        return true;
++    }
++    for (const std::string& tok : split(v, ",; \t\r\n")) {
++        Range r;
++        if (!parse_range(tok, r)) return fail(var, "bad frame or range '" + tok + "'");
++        out.ranges.push_back(r);
++    }
++    if (out.ranges.empty()) return fail(var, std::string("no frame in '") + v + "'");
++    return true;
++}
++
++bool in_ram(uint64_t a) {
++    return (a >= 0x02000000u && a <= 0x0203FFFFu) || (a >= 0x03000000u && a <= 0x03007FFFu);
++}
++bool same_ram(uint64_t a, uint64_t b) { return in_ram(a) && in_ram(b) && (a >> 24) == (b >> 24); }
++
++bool add_mem(const std::string& tok, State& s, const char* where) {
++    const std::size_t colon = tok.find(':');
++    uint64_t addr = 0, size = 0;
++    if (colon == std::string::npos || !parse_u64(tok.substr(0, colon), addr) ||
++        !parse_u64(tok.substr(colon + 1), size) || (size != 1 && size != 2 && size != 4) ||
++        !same_ram(addr, addr + size - 1))
++        return fail(where, "bad memory field '" + tok + "' (want ADDR:SIZE, size 1, 2 or 4, in EWRAM or IWRAM)");
++    for (const MemField& m : s.mem) {
++        if (m.addr != addr) continue;
++        if (m.size != size) return fail(where, "memory field " + tok + " given twice with different sizes");
++        return true;  // the same field twice: one column
++    }
++    if (s.mem.size() >= kMaxMem) return fail(where, "more than 32 memory fields");
++    s.mem.push_back({static_cast<uint32_t>(addr), static_cast<unsigned>(size)});
++    return true;
++}
++
++bool valid_name(const std::string& n) {
++    if (n.empty() || n.size() > kMaxName) return false;
++    for (char c : n)
++        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) return false;
++    return true;
++}
++
++bool parse_spec(const std::string& text, State& s) {
++    const char* where = "GBARECOMP_CAPTURE_SPEC";
++    std::vector<std::string> entries;
++    for (std::string line : split(text, "\n")) {
++        const std::size_t hash = line.find('#');  // a comment runs to the end of the line
++        if (hash != std::string::npos) line.resize(hash);
++        for (const std::string& e : split(line, ";")) entries.push_back(e);
++    }
++    for (const std::string& entry : entries) {
++        const std::vector<std::string> t = split(entry, " \t\r");
++        if (t.empty()) continue;
++        if (t[0] == "reg" && t.size() == 3) {
++            std::size_t i = 0;
++            while (i < kNumLineRegs && t[1] != kLineRegs[i].name) ++i;
++            uint64_t mask = 0;
++            if (i == kNumLineRegs) return fail(where, "unknown line register '" + t[1] + "'");
++            if (!parse_u64(t[2], mask) || mask > 0xFFFFFFFFu) return fail(where, "bad mask '" + t[2] + "'");
++            s.reg_mask[i] &= static_cast<uint32_t>(mask);
++        } else if (t[0] == "ram" && t.size() == 3) {
++            Range r;
++            if (!valid_name(t[1]))
++                return fail(where, "bad region name '" + t[1] + "' (1 to 16 letters, digits or _)");
++            for (const RamRegion& g : s.ram)
++                if (g.name == t[1]) return fail(where, "region " + t[1] + " defined twice");
++            if (!parse_range(t[2], r) || !same_ram(r.first, r.last))
++                return fail(where, "bad range '" + t[2] + "' (one range inside EWRAM or IWRAM)");
++            if (s.ram.size() >= kMaxRam) return fail(where, "more than 64 ram regions");
++            RamRegion g;
++            g.name = t[1];
++            g.first = static_cast<uint32_t>(r.first);
++            g.last = static_cast<uint32_t>(r.last);
++            s.ram.push_back(g);
++        } else if (t[0] == "mask" && t.size() == 3) {
++            RamRegion* g = nullptr;
++            for (RamRegion& x : s.ram)
++                if (x.name == t[1]) g = &x;
++            Range r;
++            if (!g) return fail(where, "mask for unknown region '" + t[1] + "' (define it first)");
++            if (!parse_range(t[2], r) || r.first < g->first || r.last > g->last)
++                return fail(where, "mask '" + t[2] + "' is not inside region " + t[1]);
++            std::size_t total = 0;
++            for (const RamRegion& x : s.ram) total += x.masks.size();
++            if (total >= kMaxMasks) return fail(where, "more than 128 masks");
++            g->masks.push_back(r);
++        } else if (t[0] == "mem" && t.size() == 2) {
++            if (!add_mem(t[1], s, where)) return false;
++        } else {
++            return fail(where, "cannot parse '" + entry + "'");
++        }
++    }
++    for (RamRegion& g : s.ram) {
++        // Sort and merge, so hashing walks each region once.
++        std::vector<Range>& m = g.masks;
++        for (std::size_t i = 1; i < m.size(); ++i)
++            for (std::size_t j = i; j > 0 && m[j].first < m[j - 1].first; --j) std::swap(m[j], m[j - 1]);
++        std::vector<Range> merged;
++        for (const Range& r : m) {
++            if (!merged.empty() && r.first <= merged.back().last + 1) {
++                if (r.last > merged.back().last) merged.back().last = r.last;
++            } else {
++                merged.push_back(r);
++            }
++        }
++        m = merged;
++    }
++    return true;
++}
++
++// ── Formatting ─────────────────────────────────────────────────────────────
++
++void put_hex(std::string& s, uint32_t v, int digits) {
++    static const char kHex[] = "0123456789ABCDEF";
++    for (int i = digits - 1; i >= 0; --i) s.push_back(kHex[(v >> (4 * i)) & 0xFu]);
++}
++void put_dec(std::string& s, unsigned long long v) {
++    char b[24];
++    std::snprintf(b, sizeof(b), "%llu", v);
++    s += b;
++}
++
++void emit(std::FILE* f, bool prefixed, const std::string& line) {
++    if (prefixed) std::fputs("[capture] ", f);
++    std::fwrite(line.data(), 1, line.size(), f);
++}
++
++const uint8_t* ram_ptr(const gba::GbaBus& bus, uint32_t addr) {
++    if (addr >> 24 == 0x02) return bus.ewram_ptr() + (addr & 0x3FFFFu);
++    return bus.iwram_ptr() + (addr & 0x7FFFu);
++}
++
++uint32_t region_crc(const gba::GbaBus& bus, const RamRegion& g) {
++    uint32_t crc = 0, at = g.first;
++    for (const Range& m : g.masks) {
++        if (m.first > at) crc = crc32(crc, ram_ptr(bus, at), m.first - at);
++        crc = crc32_zeros(crc, m.last - m.first + 1);
++        at = static_cast<uint32_t>(m.last + 1);
++    }
++    if (at <= g.last) crc = crc32(crc, ram_ptr(bus, at), g.last - at + 1);
++    return crc;
++}
++
++void build_fb(const gba::GbaPpu& ppu) {
++    const uint8_t* fb = ppu.latched_framebuffer();
++    const std::size_t stride = static_cast<std::size_t>(ppu.render_width()) * 3;
++    const uint8_t* origin = fb + ppu.view_extra_top() * stride + ppu.view_extra_left() * 3;
++    for (unsigned y = 0; y < kHeight; ++y) {
++        const uint8_t* row = origin + y * stride;
++        for (unsigned x = 0; x < kWidth; ++x) {
++            const uint8_t* px = row + x * 3;
++            S->fb[y * kWidth + x] = static_cast<uint16_t>((px[0] >> 3) | ((px[1] >> 3) << 5) |
++                                                          ((px[2] >> 3) << 10));
++        }
++    }
++}
++
++// Every committed IO-register write. Writes made during multiplayer session
++// execution are not counted: line() and vblank() take no records there either
++// (runtime_bus_bridge.cpp), so they would land in the next record's frame.
++void io_tap(uint32_t addr, uint32_t value, uint32_t size) {
++    const uint32_t off = addr - 0x04000000u;
++    if (off >= 0x400u || !S || runtime_session_executing()) return;
++    ++S->io_writes;
++    if (off <= 0x301u && off + size > 0x301u) ++S->halt_writes;
++    if (off + size <= 0xA0u || off >= 0xA8u) return;
++    for (uint32_t i = 0; i < size; ++i) {
++        const uint32_t o = off + i;
++        if (o < 0xA0u || o >= 0xA8u) continue;
++        const int ch = o >= 0xA4u ? 1 : 0;
++        const uint8_t b = static_cast<uint8_t>(value >> (8 * i));
++        ++S->fifo_n[ch];
++        S->fifo_crc[ch] = crc32(S->fifo_crc[ch], &b, 1);
++        if (S->fifo_out) S->fifo_bytes[ch].push_back(b);
++    }
++}
++
++std::string read_spec_text(const char* v, bool& ok) {
++    ok = true;
++    if (!v) return "";
++    if (v[0] != '@') return v;
++    std::ifstream in(v + 1, std::ios::binary);
++    if (!in) {
++        ok = fail("GBARECOMP_CAPTURE_SPEC", std::string("cannot read ") + (v + 1));
++        return "";
++    }
++    std::ostringstream ss;
++    ss << in.rdbuf();
++    return ss.str();
++}
++
++}  // namespace
++
++bool init() {
++    if (S) return true;
++    const char* path = std::getenv("GBARECOMP_CAPTURE");
++    if (!path || !*path) return true;
++    S = new State();
++    State& s = *S;
++    for (uint32_t& m : s.reg_mask) m = 0xFFFFFFFFu;
++    bool ok = true;
++    const std::string spec = read_spec_text(std::getenv("GBARECOMP_CAPTURE_SPEC"), ok);
++    if (!ok || !parse_spec(spec, s)) return false;
++    if (const char* extra = std::getenv("GBARECOMP_CAPTURE_MEM")) {
++        for (const std::string& tok : split(extra, ",; \t\r\n"))
++            if (!add_mem(tok, s, "GBARECOMP_CAPTURE_MEM")) return false;
++    }
++    if (!parse_frames("GBARECOMP_CAPTURE_FRAMES", true, s.frames) ||
++        !parse_frames("GBARECOMP_CAPTURE_LINES", false, s.lines_frames) ||
++        !parse_frames("GBARECOMP_CAPTURE_FIFO", false, s.fifo_frames) ||
++        !parse_frames("GBARECOMP_CAPTURE_RAW", false, s.raw_frames))
++        return false;
++    if (const char* ls = std::getenv("GBARECOMP_CAPTURE_LINE_STATE"))
++        s.line_state = !(ls[0] == '0' && ls[1] == '\0');
++
++    s.to_stdout = std::strcmp(path, "-") == 0;
++    if (s.to_stdout) {
++        s.out = stdout;
++        if (!s.lines_frames.empty() || !s.fifo_frames.empty() || !s.raw_frames.empty())
++            std::fprintf(stderr,
++                         "capture: full line, FIFO and raw records need a file sink; "
++                         "ignoring GBARECOMP_CAPTURE_LINES/FIFO/RAW\n");
++    } else {
++        s.out = std::fopen(path, "w");
++        if (!s.out) return fail("GBARECOMP_CAPTURE", std::string("cannot write ") + path);
++        s.stem = path;
++        if (s.stem.size() > 4 && s.stem.compare(s.stem.size() - 4, 4, ".tsv") == 0)
++            s.stem.resize(s.stem.size() - 4);
++        if (!s.lines_frames.empty() && !s.line_state)
++            std::fprintf(stderr, "capture: GBARECOMP_CAPTURE_LINE_STATE=0: "
++                                 "ignoring GBARECOMP_CAPTURE_LINES\n");
++        if (!s.lines_frames.empty() && s.line_state) {
++            const std::string p = s.stem + ".lines.tsv";
++            s.lines_out = std::fopen(p.c_str(), "w");
++            if (!s.lines_out) return fail("GBARECOMP_CAPTURE_LINES", "cannot write " + p);
++        }
++        if (!s.fifo_frames.empty()) {
++            const std::string p = s.stem + ".fifo.tsv";
++            s.fifo_out = std::fopen(p.c_str(), "w");
++            if (!s.fifo_out) return fail("GBARECOMP_CAPTURE_FIFO", "cannot write " + p);
++            std::fputs("frame\tchannel\tn\tbytes\n", s.fifo_out);
++        }
++        if (!s.raw_frames.empty()) {
++            s.raw_dir = s.stem + ".raw";
++            std::error_code ec;
++            std::filesystem::create_directories(s.raw_dir, ec);
++            if (ec) return fail("GBARECOMP_CAPTURE_RAW", "cannot create " + s.raw_dir);
++        }
++    }
++
++    std::string& h = s.header;
++    h = "frame\tfb\tlines\tDISPCNT";
++    for (const MemField& m : s.mem) {
++        h += "\tmem_";
++        put_hex(h, m.addr, 8);
++    }
++    for (const RamRegion& g : s.ram) h += "\tram_" + g.name;
++    h += "\tfifo_a_n\tfifo_a\tfifo_b_n\tfifo_b\tio_writes\thalt_writes\tcycles\tbridge_insns\n";
++    emit(s.out, s.to_stdout, h);
++    if (s.lines_out) {
++        std::string lh = "frame\tline";
++        for (const LineReg& r : kLineRegs) lh += std::string("\t") + r.name;
++        lh += "\tPAL0\tOAM\tPAL\tVRAM_BG\tVRAM_OBJ\n";
++        std::fputs(lh.c_str(), s.lines_out);
++    }
++    s.bridge_prev = self_heal_bridge_steps();
++    gba::gba_set_io_write_tap(io_tap);
++    g_on = true;
++    std::printf("capture=ENABLED path=\"%s\" ram_regions=%zu mem_fields=%zu line_state=%s\n",
++                path, s.ram.size(), s.mem.size(), s.line_state ? "on" : "off");
++    std::fflush(stdout);
++    return true;
++}
++
++void line(const gba::GbaPpu& ppu, const gba::GbaBus& bus) {
++    State& s = *S;
++    if (!s.line_state) return;
++    const uint64_t f = ppu.frame_count() + 1;
++    const bool full = s.lines_out && s.lines_frames.has(f);
++    if (!full && !s.frames.has(f)) return;
++    const uint8_t* io = bus.io().raw();
++    std::string& r = s.rec;
++    r.clear();
++    put_dec(r, f);
++    r.push_back('\t');
++    put_dec(r, ppu.vcount());
++    for (std::size_t i = 0; i < kNumLineRegs; ++i) {
++        const LineReg& g = kLineRegs[i];
++        uint32_t v = uint32_t(io[g.off]) | uint32_t(io[g.off + 1]) << 8;
++        if (g.size == 4) v |= (uint32_t(io[g.off + 2]) | uint32_t(io[g.off + 3]) << 8) << 16;
++        r.push_back('\t');
++        put_hex(r, v & s.reg_mask[i], g.size * 2);
++    }
++    const uint8_t* pal = bus.pal_ptr();
++    const uint8_t* vram = bus.vram_ptr();
++    r.push_back('\t');
++    put_hex(r, uint32_t(pal[0]) | uint32_t(pal[1]) << 8, 4);
++    r.push_back('\t');
++    put_hex(r, s.oam.get(bus.oam_ptr(), 1024), 8);
++    r.push_back('\t');
++    put_hex(r, s.pal.get(pal, 1024), 8);
++    r.push_back('\t');
++    put_hex(r, s.vram_bg.get(vram, 0x10000), 8);
++    r.push_back('\t');
++    put_hex(r, s.vram_obj.get(vram + 0x10000, 0x8000), 8);
++    r.push_back('\n');
++    s.lines_crc = crc32(s.lines_crc, r.data(), r.size());
++    if (full) std::fwrite(r.data(), 1, r.size(), s.lines_out);
++}
++
++void vblank(const gba::GbaPpu& ppu, const gba::GbaBus& bus) {
++    State& s = *S;
++    const uint64_t f = ppu.frame_count() + 1;
++    const bool record = s.frames.has(f);
++    const bool raw = !s.raw_dir.empty() && s.raw_frames.has(f);
++    uint64_t steps = self_heal_bridge_steps();
++    if (steps < s.bridge_prev) s.bridge_prev = 0;  // self_heal_reset() ran
++    if (record || raw) build_fb(ppu);
++    if (record) {
++        std::string& r = s.rec;
++        r.clear();
++        put_dec(r, f);
++        r.push_back('\t');
++        put_hex(r, crc32(0, s.fb, sizeof(s.fb)), 8);
++        r.push_back('\t');
++        if (s.line_state) put_hex(r, s.lines_crc, 8);
++        else r.push_back('-');
++        const uint8_t* io = bus.io().raw();
++        r.push_back('\t');
++        put_hex(r, uint32_t(io[0]) | uint32_t(io[1]) << 8, 4);
++        for (const MemField& m : s.mem) {
++            const uint8_t* p = ram_ptr(bus, m.addr);
++            uint32_t v = 0;
++            for (unsigned i = 0; i < m.size; ++i) v |= uint32_t(p[i]) << (8 * i);
++            r.push_back('\t');
++            put_hex(r, v, static_cast<int>(m.size * 2));
++        }
++        for (const RamRegion& g : s.ram) {
++            r.push_back('\t');
++            put_hex(r, region_crc(bus, g), 8);
++        }
++        for (int ch = 0; ch < 2; ++ch) {
++            r.push_back('\t');
++            put_dec(r, s.fifo_n[ch]);
++            r.push_back('\t');
++            put_hex(r, s.fifo_crc[ch], 8);
++        }
++        r.push_back('\t');
++        put_dec(r, s.io_writes);
++        r.push_back('\t');
++        put_dec(r, s.halt_writes);
++        r.push_back('\t');
++        put_dec(r, g_runtime_cycles);
++        r.push_back('\t');
++        put_dec(r, steps - s.bridge_prev);
++        r.push_back('\n');
++        emit(s.out, s.to_stdout, r);
++        std::fflush(s.out);
++    }
++    if (raw) {
++        char name[32];
++        std::snprintf(name, sizeof(name), "/f%06llu.bgr555", static_cast<unsigned long long>(f));
++        const std::string p = s.raw_dir + name;
++        if (std::FILE* o = std::fopen(p.c_str(), "wb")) {
++            std::fwrite(s.fb, 1, sizeof(s.fb), o);
++            std::fclose(o);
++        } else {
++            std::fprintf(stderr, "capture: cannot write %s\n", p.c_str());
++        }
++    }
++    if (s.fifo_out && s.fifo_frames.has(f)) {
++        for (int ch = 0; ch < 2; ++ch) {
++            std::string& r = s.rec;
++            r.clear();
++            put_dec(r, f);
++            r += ch ? "\tB\t" : "\tA\t";
++            put_dec(r, s.fifo_bytes[ch].size());
++            r.push_back('\t');
++            for (uint8_t b : s.fifo_bytes[ch]) put_hex(r, b, 2);
++            if (s.fifo_bytes[ch].empty()) r.push_back('-');
++            r.push_back('\n');
++            std::fwrite(r.data(), 1, r.size(), s.fifo_out);
++        }
++        std::fflush(s.fifo_out);
++    }
++    if (s.lines_out) std::fflush(s.lines_out);
++    s.lines_crc = 0;
++    for (int ch = 0; ch < 2; ++ch) {
++        s.fifo_n[ch] = 0;
++        s.fifo_crc[ch] = 0;
++        s.fifo_bytes[ch].clear();
++    }
++    s.io_writes = s.halt_writes = 0;
++    s.bridge_prev = steps;
++}
++
++void finish() {
++    if (!S) return;
++    gba::gba_set_io_write_tap(nullptr);
++    g_on = false;
++    if (S->out && !S->to_stdout) std::fclose(S->out);
++    else if (S->out) std::fflush(S->out);
++    if (S->lines_out) std::fclose(S->lines_out);
++    if (S->fifo_out) std::fclose(S->fifo_out);
++    S->out = S->lines_out = S->fifo_out = nullptr;
++}
++
++}  // namespace gbarecomp::capture
+diff --git a/src/runtime/frame_capture.h b/src/runtime/frame_capture.h
+new file mode 100644
+index 0000000..e91d414
+--- /dev/null
++++ b/src/runtime/frame_capture.h
+@@ -0,0 +1,86 @@
++// frame_capture.h — GBARECOMP_CAPTURE: env-gated, observation-only records of
++// the machine state at every VBlank start and at every rendered scanline, for
++// differential tests against another emulator or another gbarecomp backend.
++//
++// Off unless GBARECOMP_CAPTURE is set. When on, it reads guest memory, IO and
++// the latched framebuffer and writes files; it never writes guest state and
++// never changes timing. The variables, read once by init():
++//
++//   GBARECOMP_CAPTURE=PATH|-       per-frame records (TSV with a header row)
++//                                  to PATH, or to standard output with every
++//                                  line prefixed "[capture] " (for the
++//                                  browser, where stdout is the console;
++//                                  diagnostics go to stderr as "capture: ")
++//   GBARECOMP_CAPTURE_FRAMES=L     frames that get a record (default: all)
++//   GBARECOMP_CAPTURE_SPEC=TEXT    capture spec, inline; "@FILE" reads a file
++//   GBARECOMP_CAPTURE_MEM=L        extra memory fields, ADDR:SIZE (1, 2 or 4)
++//   GBARECOMP_CAPTURE_LINES=L      frames whose full line records are written
++//   GBARECOMP_CAPTURE_FIFO=L       frames whose FIFO A/B bytes are written
++//   GBARECOMP_CAPTURE_RAW=L        frames whose framebuffer is dumped raw
++//   GBARECOMP_CAPTURE_LINE_STATE=0 skip the per-line state ("lines" is "-")
++//
++// A list L holds frames and ranges ("1-3000;4200"), separated by ';', ',' or
++// spaces (the browser's ?env= splits on ',', so use ';' there). Full records
++// are file-sink only and go next to PATH, with a trailing ".tsv" removed:
++// STEM.lines.tsv, STEM.fifo.tsv and STEM.raw/fNNNNNN.bgr555.
++//
++// Frame numbering: a record is taken at VBlank start while the PPU's
++// frame_count() is k and is numbered k+1, the value a VBlank-counting
++// emulator (mGBA) has just reached. Line records of frame k+1 are the visible
++// lines rendered before that VBlank.
++//
++// Spec: one entry per line or per ';'; '#' starts a comment that runs to the
++// end of the line. Numbers are decimal or 0x hexadecimal.
++//   reg NAME MASK         AND MASK into register NAME in line records
++//   ram NAME FIRST-LAST   hash this EWRAM or IWRAM range as column ram_NAME
++//                         (at most 64 regions; NAME is 1 to 16 letters,
++//                         digits or '_', which keeps the largest header row
++//                         under the browser console's 2,000 characters)
++//   mask NAME FIRST-LAST  zero these bytes of region NAME before hashing
++//                         (at most 128 masks)
++//   mem ADDR:SIZE         record this EWRAM/IWRAM value as column mem_ADDR
++//                         (at most 32 fields, with GBARECOMP_CAPTURE_MEM)
++//
++// Per-frame columns: frame, fb (CRC-32 of the 240x160 frame as little-endian
++// BGR555 words, each channel the top 5 bits of the 8-bit output), lines
++// (CRC-32 of the frame's line records, as text), DISPCNT, mem_*, ram_*,
++// fifo_a_n, fifo_a, fifo_b_n, fifo_b (bytes written to FIFO A/B by the CPU
++// and DMA, and their CRC-32), io_writes and halt_writes (committed
++// IO-register writes, and those covering HALTCNT), cycles (master clock) and
++// bridge_insns (instructions the interpreter bridge ran). The counts cover
++// frame N alone, from the previous VBlank start to this one, even when
++// GBARECOMP_CAPTURE_FRAMES skips the frames in between. CRC-32 is zlib's.
++// The format is shared with an mGBA-based harness; change both together.
++//
++// Multiplayer session execution (runtime_session_execution) is not captured:
++// no records, no line state, and its IO writes are not counted.
++
++#pragma once
++
++#include <cstdint>
++
++namespace gba { class GbaBus; class GbaPpu; }
++
++namespace gbarecomp::capture {
++
++extern bool g_on;  // true once init() armed the capture
++
++// Read the variables above and open the sinks. Call once before the guest
++// runs. Does nothing and returns true when GBARECOMP_CAPTURE is unset;
++// returns false, after printing why, when a variable is malformed.
++bool init();
++
++inline bool on() { return g_on; }
++
++// Called right before the PPU renders visible line ppu.vcount().
++void line(const gba::GbaPpu& ppu, const gba::GbaBus& bus);
++
++// Called at VBlank start, after the framebuffer latch and before the
++// VBlank-timed DMA, the VBlank input hook and the VBlank IRQ.
++void vblank(const gba::GbaPpu& ppu, const gba::GbaBus& bus);
++
++// Flush and close the sinks. Records are flushed after every frame too, so a
++// run that aborts keeps the frames it captured.
++void finish();
++
++}  // namespace gbarecomp::capture
+diff --git a/src/runtime/runtime.cpp b/src/runtime/runtime.cpp
+index b0e5952..52f263e 100644
+--- a/src/runtime/runtime.cpp
++++ b/src/runtime/runtime.cpp
+@@ -34,6 +34,7 @@
+ #include "touch_input.h"
+ #include "runtime_arm.h"
+ #include "runtime_bus_bridge.h"
++#include "frame_capture.h"
+ #include "save_config.h"
+ #include "self_heal.h"
+ #include "overlay_loader.h"
+@@ -3295,6 +3296,15 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+     } else if (!args.quiet) {
+         std::printf("input_replay=DISABLED\n");
+     }
++    // GBARECOMP_CAPTURE (frame_capture.h): armed before the guest runs, so the
++    // first frame's IO-write counts are complete. Nothing happens when unset.
++    if (!gbarecomp::capture::init()) {
++        runtime_shutdown();
++        return 1;
++    }
++    struct FinishCapture {
++        ~FinishCapture() { gbarecomp::capture::finish(); }
++    } finish_capture;
+ 
+     auto apply_input_replay = [&]() {
+         if (!input_replay_requested) return;
+diff --git a/src/runtime/runtime_arm_default_aborts.cpp b/src/runtime/runtime_arm_default_aborts.cpp
+index 4b16bf4..fb56c66 100644
+--- a/src/runtime/runtime_arm_default_aborts.cpp
++++ b/src/runtime/runtime_arm_default_aborts.cpp
+@@ -66,6 +66,7 @@ struct MissRec {
+ 
+ std::map<std::uint32_t, MissRec> g_misses;        // keyed by PC & ~1
+ std::uint64_t                    g_interp_insns = 0;
++std::uint64_t                    g_bridge_steps = 0;  // live; see self_heal.h
+ bool                             g_miss_notice_logged = false;
+ 
+ bool self_heal_verbose() {
+@@ -92,6 +93,7 @@ namespace gbarecomp {
+ void self_heal_reset() {
+     g_misses.clear();
+     g_interp_insns = 0;
++    g_bridge_steps = 0;
+ }
+ 
+ void self_heal_set_program_identity(const char* title, const char* code,
+@@ -109,6 +111,8 @@ std::uint32_t self_heal_distinct_misses() {
+ 
+ std::uint64_t self_heal_interpreted_insns() { return g_interp_insns; }
+ 
++std::uint64_t self_heal_bridge_steps() { return g_bridge_steps; }
++
+ void self_heal_write_report(const char* frag_path) {
+     // Stage-2: a warm-cache run can heal PCs to native with ZERO misses this
+     // session (the overlay tier catches them before the bridge). Healed-from-
+@@ -555,6 +559,7 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
+         armv4t::Interpreter::Result r =
+             armv4t::Interpreter::step(cpu, *bus, insn, &cyc);
+         ++bridged_insns;
++        ++g_bridge_steps;
+ 
+         if (r == armv4t::Interpreter::Result::NotImplemented ||
+             r == armv4t::Interpreter::Result::Undefined) {
+diff --git a/src/runtime/runtime_bus_bridge.cpp b/src/runtime/runtime_bus_bridge.cpp
+index 044fc13..b79bc78 100644
+--- a/src/runtime/runtime_bus_bridge.cpp
++++ b/src/runtime/runtime_bus_bridge.cpp
+@@ -8,6 +8,7 @@
+ #include "../armv4t/runtime_arm.h"
+ #include "../armv4t/runtime_context.h"
+ #include "runtime_bus_bridge.h"
++#include "frame_capture.h"
+ #include "multiplayer_slice.h"
+ #include "../armv4t/arm_ir.h"
+ #include "../armv4t/symbol_lookup.h"
+@@ -574,6 +575,8 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
+             ppu->vcount() < gba::GbaPpu::kLinesVisible) {
+             std::chrono::steady_clock::time_point _prof_t0;
+             if (g_phase_prof) _prof_t0 = std::chrono::steady_clock::now();
++            if (gbarecomp::capture::on() && !g_session_execution)
++                gbarecomp::capture::line(*ppu, *bus);
+             ppu->render_scanline(ppu->vcount(),
+                                  bus->io().read16(0x000),
+                                  bus->io().raw(),
+@@ -597,6 +600,10 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
+         if (events.vblank_started) {
+             ppu->mark_framebuffer_latched();
+             ++g_runtime_vblank_starts;
++            // Observation only (GBARECOMP_CAPTURE): sampled before the
++            // VBlank-timed DMA and the IRQ, where mGBA's frame loop returns.
++            if (gbarecomp::capture::on() && !g_session_execution)
++                gbarecomp::capture::vblank(*ppu, *bus);
+             bus->io().run_timed_dma(1);   // VBlank-timed DMA
+             if (!g_session_execution && g_vblank_input_hook) g_vblank_input_hook();
+         }
+@@ -1165,6 +1172,7 @@ void runtime_session_execution(bool enabled) {
+     g_session_instruction_started = false;
+     g_session_slice = false;
+ }
++bool runtime_session_executing() { return g_session_execution; }
+ void runtime_session_begin_instruction() {
+     g_session_instruction_started = false; g_session_slice = false;
+ }
+diff --git a/src/runtime/runtime_bus_bridge.h b/src/runtime/runtime_bus_bridge.h
+index 799db1c..7d4272d 100644
+--- a/src/runtime/runtime_bus_bridge.h
++++ b/src/runtime/runtime_bus_bridge.h
+@@ -38,6 +38,9 @@ void runtime_restore_timing_context(const RuntimeTimingContext&);
+ // harness. CPU instructions accrue cycle debt; the session advances devices
+ // for every machine on one timeline. No machine's hardware runs ahead.
+ void runtime_session_execution(bool enabled);
++// True between runtime_session_execution(true) and (false). Observers that
++// record only the legacy single-machine timeline check it (frame_capture.cpp).
++bool runtime_session_executing();
+ void runtime_session_begin_instruction();
+ void runtime_session_begin_slice(std::uint64_t deadline);
+ void runtime_session_ram_dispatch_boundary(std::uint32_t pc);
+diff --git a/src/runtime/self_heal.h b/src/runtime/self_heal.h
+index b64e303..cfec0e7 100644
+--- a/src/runtime/self_heal.h
++++ b/src/runtime/self_heal.h
+@@ -38,6 +38,11 @@ std::uint32_t self_heal_distinct_misses();
+ // Total guest instructions executed in the interpreter bridge this session.
+ std::uint64_t self_heal_interpreted_insns();
+ 
++// The same count, advanced as each bridged instruction runs rather than when
++// its bridge returns, so an observer can see a bridge that spans many frames
++// (frame_capture.cpp). Observation only.
++std::uint64_t self_heal_bridge_steps();
++
+ // Emit the coverage-honesty banner to stdout and, if any misses occurred and
+ // frag_path is non-null, write the reviewed proposal fragment to frag_path:
+ // [[extra_func]] entries, plus a [[jump_table]]-candidate comment over any
