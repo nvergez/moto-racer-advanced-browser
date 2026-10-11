@@ -267,6 +267,8 @@ Acceptance:
 
 Tests: `python3 -I tools/seeds/find_switch_tables.py roms/moto-racer-advance.gba`, `scripts/regen.sh`, native boot runs as in P2-05.
 
+As implemented: the scanner finds the 20 dispatchers, 16 tables in ROM code with 239 slots (13 in the front end, 3 in the race program's ROM code) and 4 in the race image, and `--check-config` checks `game.toml` against it. Discovery goes from 2,278 to 2,747 (+469), the ten ROM misses P2-05 left are gone, and over `boot_to_race` 1-3,290 and a 12,000-frame boot the captures are equal on every column, `cycles` included, except the count of interpreted instructions. Results: [phase2-switch-slots.md](research/phase2-switch-slots.md).
+
 ### P2-07. RAM overlay selector patch
 
 *Depends on:* P2-01 (`scripts/repro-test.sh`; P2-00's tooling through it) and P2-03 (captures for the "unchanged when unset" check). *Effort:* 1.
