@@ -22,6 +22,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 select_patch_variant
+lock_checkout
 
 require_submodule
 ensure_patches

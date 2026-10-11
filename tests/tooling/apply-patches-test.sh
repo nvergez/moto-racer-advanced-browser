@@ -10,7 +10,10 @@
 # line 10 of f.txt, 0002 edits line 12 and adds sub/new.txt. 0002 was written
 # on top of 0001, so line 10 is in its context. PR #5's apply-patches.sh
 # (a7efc60) is run on the same case first; that part needs this repository's
-# history and is skipped in a shallow clone.
+# history and is skipped in a shallow clone. Later sections add 0003 (lines 5
+# and 6), refresh 0001 under 0002, leave out 0001 that 0002 needs, hold the
+# build lock from another process, record the toy's pin as a gitlink and give
+# the toy a nested repository.
 # The checks below pass helper functions to check(), which shellcheck cannot
 # see being called.
 # shellcheck disable=SC2317
@@ -72,6 +75,7 @@ check() {
   if "$@"; then pass "$desc"; else fail "$desc" show; fi
 }
 said() { grep -q -- "$1" "$out"; }
+not_said() { ! said "$1"; }
 said_all() {
   local pattern
   for pattern in "$@"; do said "$pattern" || return 1; done
@@ -224,6 +228,9 @@ if command -v cmake > /dev/null 2>&1; then
   check "the A/B build is in build/without-0002/gbarecomp, built without 0002" ab_without_b
   check "the normal build directory was not touched" normal_untouched
   check "the stamp stays in build/, not in the A/B directory" one_stamp
+  check "the A/B build says, at the end, what it leaves in gbarecomp/" \
+    said "gbarecomp/ is left without 0002"
+  check "... and releases the lock it held" test ! -L "$root/build/gbarecomp-patches/lock"
   run_ok "the next normal build" "$engine"
   check "... restores the full series" has_ab
   check "... and rebuilds build/gbarecomp from it" has_line "$root/build/gbarecomp/f.txt" "line 12 B"
@@ -232,12 +239,24 @@ if command -v cmake > /dev/null 2>&1; then
     env MRA_WITHOUT_PATCHES=0002 "$engine"
   check "... (no nested without-0002/without-0002)" test ! -e "$ab/without-0002"
   run_ok "and the normal build again" "$engine"
+  check "... which says nothing about a variant" not_said "is left without"
 else
   skip "A/B build with 0002 left out" "cmake not found"
 fi
+run_fails "serve-web.sh --without 0002 serves the A/B bundle" "$root/scripts/serve-web.sh" --without 0002 9999
+check "... from build/without-0002/web-PRIVATE (none was built here)" \
+  said "no bundle in build/without-0002/web-PRIVATE"
 
 # --- Hand edits ---------------------------------------------------------------
 
+# Discarding them the way the refusal message says. (`git checkout -- f.txt`
+# would also drop what 0001 and 0002 change in f.txt.)
+set_line "$g/f.txt" 11 "line 11 by hand"
+echo "notes" > "$g/notes.txt"
+discard() { "$apply" --diff | git -C "$g" apply -R; }
+run_ok "the refusal message's way to discard hand edits" discard
+clean_series() { [ ! -e "$g/notes.txt" ] && has_ab && "$apply" --check > /dev/null 2>&1; }
+check "... leaves exactly the series" clean_series
 set_line "$g/f.txt" 5 "line 5 by hand"
 cp "$g/f.txt" "$work/edited"
 run_fails "a hand edit stops the script" "$apply"
@@ -261,7 +280,7 @@ run_ok "--diff" "$apply" --diff
 only_hand_edit() { said "^+line 5 by hand" && ! said "line 12 B"; }
 check "--diff shows only the hand edit" only_hand_edit
 run_ok "--write-patch saves it as 0003" "$apply" --write-patch "$root/patches/gbarecomp/0003-c.patch"
-check "... and says the tree is now the series" said "is now the pin plus the series"
+check "... and says the tree is now the series" said "is now the pin plus 0001, 0002, 0003"
 run_ok "the series with 0003 is in place" "$apply" --check
 { printf 'Toy patch C: line 5 (header).\n\n'; cat "$root/patches/gbarecomp/0003-c.patch"; } > "$work/c"
 mv "$work/c" "$root/patches/gbarecomp/0003-c.patch"
@@ -270,9 +289,89 @@ set_line "$g/f.txt" 6 "line 6 by hand"
 run_ok "--write-patch refreshes 0003 (path relative to the current directory)" \
   in_dir "$root" "$apply" --write-patch patches/gbarecomp/0003-c.patch
 check "... keeps its header" has_line "$root/patches/gbarecomp/0003-c.patch" "Toy patch C: line 5 (header)."
+blank_under_header() {
+  [ -z "$(sed -n 2p "$root/patches/gbarecomp/0003-c.patch")" ] &&
+    sed -n 3p "$root/patches/gbarecomp/0003-c.patch" | grep -q '^diff --git '
+}
+check "... with the blank line under it" blank_under_header
 check "... and holds both edits" \
   file_matches "$root/patches/gbarecomp/0003-c.patch" "^+line 5 by hand" "^+line 6 by hand"
 run_ok "the refreshed series is in place" "$apply" --check
+
+# --- Refreshing a patch that a later one stacks on ---------------------------
+
+# The series is 0001 (line 10), 0002 (line 12 and sub/new.txt, on top of
+# 0001) and 0003 (lines 5 and 6).
+p=$root/patches/gbarecomp
+for n in 0001-a 0002-b 0003-c; do cp "$p/$n.patch" "$work/$n.orig"; done
+same_patch() { cmp -s "$p/$1.patch" "$work/$1.orig"; }
+run_ok "--write-patch 0003 with nothing changed" "$apply" --write-patch "$p/0003-c.patch"
+check "... leaves it byte for byte, the blank line under its header included" same_patch 0003-c
+run_ok "--write-patch 0001, which 0002 stacks on, with nothing changed" \
+  "$apply" --write-patch "$p/0001-a.patch"
+check "... leaves it byte for byte" same_patch 0001-a
+set_line "$g/f.txt" 18 "line 18 by hand"
+run_ok "--write-patch 0001 with an edit away from 0002's lines" "$apply" --write-patch "$p/0001-a.patch"
+check "... takes the later patches out of the tree first" said "(0002, 0003 taken out of the tree first)"
+check "... puts the edit in 0001" file_matches "$p/0001-a.patch" "^+line 10 A" "^+line 18 by hand"
+later_unchanged() { same_patch 0002-b && same_patch 0003-c; }
+check "... leaves 0002 and 0003 as they were" later_unchanged
+run_ok "... and the series gives the tree" "$apply" --check
+set_line "$g/f.txt" 18 "line 18"
+run_ok "--write-patch 0001 with the edit undone" "$apply" --write-patch "$p/0001-a.patch"
+check "... gives back the original 0001" same_patch 0001-a
+
+set_line "$g/f.txt" 11 "line 11 by hand"
+cp "$g/f.txt" "$work/edited"
+run_fails "--write-patch 0001 with an edit among 0002's context lines stops" \
+  "$apply" --write-patch "$p/0001-a.patch"
+check "... naming both patches" said_all "overlap 0002-b.patch" "comes after 0001-a.patch"
+unchanged_0001() { same_patch 0001-a && cmp -s "$g/f.txt" "$work/edited"; }
+check "... with 0001 and the tree as they were" unchanged_0001
+# The way patches/gbarecomp/README.md describes: leave 0002 out, edit, save
+# 0001, then redo 0002 on top of it.
+set_line "$g/f.txt" 11 "line 11"
+run_ok "the README's way: --without 0002" "$apply" --without 0002
+set_line "$g/f.txt" 11 "line 11 by hand"
+run_ok "... the edit, then --write-patch 0001 --without 0002" \
+  "$apply" --write-patch "$p/0001-a.patch" --without 0002
+check "... puts the edit in 0001" file_matches "$p/0001-a.patch" "^+line 10 A" "^+line 11 by hand"
+run_fails "... after which 0002 no longer applies" "$apply"
+check "... which the script says" said "0002-b.patch does not apply on top of"
+run_fails "... git apply --reject puts back the parts of 0002 that still apply" \
+  git -C "$g" apply --reject "$p/0002-b.patch"
+check "... (sub/new.txt)" test -f "$g/sub/new.txt"
+set_line "$g/f.txt" 12 "line 12 B"
+rm -f "$g/f.txt.rej"
+run_ok "... the rest by hand, then --write-patch 0002" "$apply" --write-patch "$p/0002-b.patch"
+check "... which takes 0003 out of the tree first" said "(0003 taken out of the tree first)"
+run_ok "... and the refreshed series is in place" "$apply"
+check "... as it is" said "(already in place)"
+for n in 0001-a 0002-b 0003-c; do cp "$work/$n.orig" "$p/$n.patch"; done
+run_ok "back to the original patches" "$apply"
+check "... from the tree the script last wrote" said "as this script last wrote it"
+has_abc() { has_ab && has_line "$g/f.txt" "line 5 by hand" && has_line "$g/f.txt" "line 11"; }
+check "... which has 0001, 0002 and 0003 again" has_abc
+
+# --- Leaving out a patch that a later one stacks on --------------------------
+
+run_fails "--without 0001 stops, since 0002 stacks on it" "$apply" --without 0001
+check "... naming both, and what to do" \
+  said_all "0002-b.patch does not apply without 0001, which it stacks on" "(--without 0002)"
+check "... before writing anything" has_abc
+run_ok "--without 0001 --without 0002" "$apply" --without 0001 --without 0002
+c_only() { lacks_line "$g/f.txt" "line 10 A" && lacks_b && has_line "$g/f.txt" "line 5 by hand"; }
+check "... leaves 0003 only" c_only
+check "... and says the tree stays like this" said "stays like this until the next normal"
+rm -rf "$root/build"
+run_fails "with two patches left out and the stamp deleted, the tree is not recognized" "$apply"
+check "... and the message says to run the same --without again" \
+  said_all "with the same --without options instead" "which would save a patch that undoes them"
+check "... before writing anything" c_only
+run_ok "the same --without options again" "$apply" --without 0001 --without 0002
+check "... find the tree in place" said "(already in place)"
+run_ok "after which a normal run restores the series" "$apply"
+check "... all of it" has_abc
 
 # --- A patch that does not apply ---------------------------------------------
 
@@ -300,6 +399,37 @@ if [ "$(id -u)" != 0 ]; then
 else
   skip "interrupted run" "running as root, so permissions cannot make a write fail"
 fi
+
+# --- One build or switch at a time --------------------------------------------
+
+lock=$root/build/gbarecomp-patches/lock
+check "no run leaves the lock behind" test ! -L "$lock"
+# Another script that holds the lock for two seconds.
+# shellcheck disable=SC2016  # expanded by the inner bash
+bash -c '. "$1/scripts/lib/common.sh"; lock_checkout; : > "$2"; sleep 2' holder "$root" "$work/held" &
+holder=$!
+i=0
+while [ ! -e "$work/held" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+run_ok "a switch while another script holds the lock" "$apply" --without 0002
+wait "$holder" || true
+check "... waits for it, and says so" said "waiting for holder (pid $holder"
+check "... then switches" a_only
+check "... and releases the lock" test ! -L "$lock"
+true &
+dead=$!
+wait "$dead"
+mkdir -p "$(dirname "$lock")"
+ln -s "$dead 0-0-0 build-native.sh 00:00:00" "$lock"
+run_ok "a lock left by a process that is gone" "$apply"
+check "... is removed, with a warning" said "removing a stale lock: build-native.sh (pid $dead"
+check "... and the switch happens" has_ab
+ln -s "$$ 0-0-0 test 00:00:00" "$lock"
+run_ok "--check does not wait for the lock (held by this test)" "$apply" --check
+rm -f "$lock"
+mkdir "$lock"
+run_fails "a directory in the lock's place stops a switch" "$apply"
+check "... with a message" said "is a directory, not a lock these scripts made"
+rmdir "$lock"
 
 # --- An A/B build whose stamp is gone ----------------------------------------
 
@@ -336,6 +466,45 @@ check "... which it says" said "was the series of commit"
 run_ok "... and Y's series is in place" "$apply" --check
 d_not_c() { has_line "$g/f.txt" "line 15 D" && lacks_line "$g/f.txt" "line 5 by hand"; }
 check "... with 0003-d and not 0003-c" d_not_c
+
+# --- The commit this repository records for gbarecomp -------------------------
+
+# The root records the toy's pin as a submodule would (a gitlink in its
+# index), then another commit.
+git -C "$root" update-index --add --cacheinfo "160000,$(git -C "$g" rev-parse HEAD),gbarecomp"
+run_ok "--check passes when gbarecomp is at the recorded commit" "$apply" --check
+git -C "$root" update-index --cacheinfo "160000,$(git -C "$root" rev-parse HEAD),gbarecomp"
+run_fails "--check fails when it is not" "$apply" --check
+check "... and says why" said "but this repository records"
+run_ok "a normal run goes on" "$apply"
+check "... with a warning" said "warning: gbarecomp has .* checked out, but this repository records"
+git -C "$root" update-index --force-remove gbarecomp
+run_ok "without the gitlink, --check passes again" "$apply" --check
+
+# --- A nested submodule off its commit ---------------------------------------
+
+# The toy gets a nested repository, recorded at its second commit.
+run_ok "--reverse, to add a commit to the toy" "$apply" --reverse
+nest=$g/ext
+git -C "$g" -c init.defaultBranch=main init -q ext
+echo one > "$nest/n.txt"
+git -C "$nest" add n.txt
+git -C "$nest" commit -q -m one
+echo two > "$nest/n.txt"
+git -C "$nest" commit -q -a -m two
+git -C "$g" add ext 2> /dev/null # (a warning about the embedded repository)
+git -C "$g" commit -q -m "nested repository"
+run_ok "the series applies on the new pin" "$apply"
+git -C "$nest" checkout -q HEAD~1
+run_fails "--write-patch stops when a nested submodule is off its commit" \
+  "$apply" --write-patch "$work/nested.patch"
+check "... with a message" said "nested submodules of gbarecomp are not at their pinned commit"
+check "... and writes nothing" test ! -e "$work/nested.patch"
+run_fails "--diff stops too" "$apply" --diff
+check "... with the same message" said "nested submodules of gbarecomp are not at their pinned commit"
+run_fails "and so does a normal run" "$apply"
+git -C "$nest" checkout -q main
+run_ok "with it back, the series is in place" "$apply" --check
 
 echo "1..$count"
 if [ "$failures" != 0 ]; then

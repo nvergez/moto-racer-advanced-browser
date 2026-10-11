@@ -28,6 +28,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 select_patch_variant
+lock_checkout
 
 verify_inputs
 build_tools

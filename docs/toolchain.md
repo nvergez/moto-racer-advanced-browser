@@ -78,10 +78,13 @@ With the test ROMs fetched first, the build prints about 520 compiler warnings (
 By hand, without the scripts:
 
 ```sh
+scripts/apply-patches.sh   # the pin plus the full series, e.g. after an A/B build
 cmake -S gbarecomp -B build/gbarecomp -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/gbarecomp
 ctest --test-dir build/gbarecomp
 ```
+
+These commands take no lock and compile whatever `gbarecomp/` holds, so do not run them while a build script runs in the same checkout (see [Local gbarecomp patches](#local-gbarecomp-patches)).
 
 ## Local gbarecomp patches
 
@@ -93,9 +96,11 @@ scripts/apply-patches.sh --reverse  # back to the pin
 scripts/apply-patches.sh --diff     # anything else in gbarecomp/
 ```
 
-A hand edit in `gbarecomp/` stops the script, and with it every build script, before anything is written; the message lists the files. `scripts/apply-patches.sh --write-patch patches/gbarecomp/NNNN-name.patch` turns such an edit into the next patch of the series. The script keeps a stamp and scratch git objects in `build/gbarecomp-patches/`; with a matching stamp the check takes about 0.1 s.
+A hand edit in `gbarecomp/` stops the script, and with it every build script, before anything is written; the message lists the files. `scripts/apply-patches.sh --write-patch patches/gbarecomp/NNNN-name.patch` turns such an edit into the next patch of the series, or refreshes an existing one. The script keeps a stamp, scratch git objects and the build lock in `build/gbarecomp-patches/`; with a matching stamp the check takes about 0.1 s. `--check` also fails when `gbarecomp/` is not at the commit this repository records.
 
-**A/B builds.** `--without NAME` on `scripts/build-native.sh`, `build-web.sh`, `regen.sh`, `test-engine.sh` or `smoke-test.sh` (or `MRA_WITHOUT_PATCHES="NAME ..."`) builds with that patch left out, for example to show that a bug comes back without its fix. Everything goes under `build/without-NAME/`, the generated code included, so the normal build is never built from another series; the next normal build restores the full series. Example: `scripts/smoke-test.sh --native-only --without 0001` fails on the `--state-dir` bug that 0001 fixes ([Known issues](#known-issues), 1).
+**A/B builds.** `--without NAME` on `scripts/build-native.sh`, `build-web.sh`, `regen.sh`, `test-engine.sh` or `smoke-test.sh` (or `MRA_WITHOUT_PATCHES="NAME ..."`) builds with that patch left out, for example to show that a bug comes back without its fix. Everything goes under `build/without-NAME/`, the generated code included, so the normal build directories are never written from another series. `scripts/serve-web.sh --without NAME` serves the A/B bundle. Example: `scripts/smoke-test.sh --native-only --without 0001` fails on the `--state-dir` bug that 0001 fixes ([Known issues](#known-issues), 1).
+
+The A/B build switches `gbarecomp/` itself, and the tree keeps the variant until the next normal build script or `scripts/apply-patches.sh` run; the build says so at the end. So builds in one checkout run one at a time: the build scripts hold a lock for their whole run, and one started meanwhile waits. To build two series at once, use a second git worktree.
 
 `tests/tooling/apply-patches-test.sh` tests all of this on a toy repository, with no game data; CI runs it.
 
@@ -184,6 +189,7 @@ Run from `build/native` so the runtime's working-directory files (`recomp_cache/
 scripts/build-web.sh               # regenerate, then build build/web-PRIVATE/
 scripts/build-web.sh --no-regen --embed-private-rom --dev
 scripts/serve-web.sh [port]        # http://127.0.0.1:8080/ by default
+scripts/serve-web.sh --without 0001 [port]   # the A/B bundle of build-web.sh --without 0001
 ```
 
 `scripts/build-web.sh` runs gbarecomp's `packaging/web/build_web.sh` with `web/game-lib` as the project, so the browser compiles the same `generated/game` as the native build. It keeps every build product under `build/` (`build/web/runtime`, `build/web/game`) and writes the bundle to `build/web-PRIVATE/`. `--embed-private-rom` copies the ROM and the BIOS into the bundle so the page needs no file picker; `--dev` lets a page on localhost take `?args=` and `?env=`. `scripts/serve-web.sh` uses gbarecomp's `serve.py`, which listens on 127.0.0.1 only and sends the COOP/COEP headers that pthreads need.
@@ -329,4 +335,4 @@ The full gbarecomp build is small (186 build steps), so CI builds all of it and 
 | `roms/`, `bios/` | No | Private inputs |
 | `generated/` | No | Recompiled BIOS and game |
 | `test-roms/` | No | Downloaded test ROMs |
-| `build/` | No | All build output, logs, `web-PRIVATE/` bundles; `gbarecomp-patches/` (the patch stamp) and `without-NAME/` (A/B builds) |
+| `build/` | No | All build output, logs, `web-PRIVATE/` bundles; `gbarecomp-patches/` (the patch stamp and the build lock) and `without-NAME/` (A/B builds) |

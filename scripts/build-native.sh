@@ -37,6 +37,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 select_patch_variant
+lock_checkout
 
 if [ "$REGEN" = 1 ]; then
   "$MRA_ROOT/scripts/regen.sh"

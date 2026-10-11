@@ -17,7 +17,8 @@
 # then move under $MRA_BUILD_DIR/without-NAME/, so a build with a patch left
 # out never writes the normal build or generated/:
 #   MRA_WITHOUT_PATCHES  patches to leave out, separated by spaces  (none)
-#   MRA_PATCH_STATE_DIR  apply-patches.sh's stamp and scratch objects
+#   MRA_PATCH_STATE_DIR  apply-patches.sh's stamp and scratch objects, and
+#                        the checkout lock (lock_checkout)
 #                        ($MRA_BUILD_DIR/gbarecomp-patches, never per variant)
 #
 # Keep this file compatible with the bash 3.2 that ships with macOS: no
@@ -80,6 +81,20 @@ die() {
 }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 info() { printf '==> %s\n' "$*"; }
+
+# at_exit FUNCTION: call FUNCTION when the script exits, whatever the exit
+# status, after the functions registered before it. Scripts that source this
+# file use it instead of `trap ... EXIT`, which would replace the others.
+_mra_exit_hooks=""
+at_exit() {
+  _mra_exit_hooks="$_mra_exit_hooks $1"
+  trap _mra_run_exit_hooks EXIT
+}
+# shellcheck disable=SC2317  # called by the trap
+_mra_run_exit_hooks() {
+  local hook
+  for hook in $_mra_exit_hooks; do "$hook" || true; done
+}
 
 # Path relative to the repository root, for messages.
 rel() {
@@ -256,6 +271,92 @@ verify_inputs() {
 # on a patch that does not apply and on changes no known series explains.
 ensure_patches() {
   "$MRA_ROOT/scripts/apply-patches.sh" --quiet
+}
+
+# --- One build at a time in a checkout ----------------------------------------
+# gbarecomp/ holds one patch series at a time, and every build reads it, so a
+# build must not run while another script switches the series (an A/B build
+# and a normal one). The build scripts, and apply-patches.sh when it may
+# write, hold this lock for their whole run; another one waits for it. A
+# script run by the holder (build-native.sh runs regen.sh, which runs
+# apply-patches.sh) shares it through MRA_LOCK_TOKEN. A build by hand
+# (cmake --build) takes no lock.
+#
+# The lock is a symbolic link, created atomically, whose target is never
+# followed: it holds the holder's pid, a token, its name and the time.
+checkout_lock() { printf '%s\n' "$MRA_PATCH_STATE_DIR/lock"; }
+
+# pid_alive PID: a process with that pid exists (possibly another user's).
+pid_alive() {
+  kill -0 "$1" 2> /dev/null || ps -p "$1" > /dev/null 2>&1
+}
+
+_mra_lock_owned=0
+lock_checkout() {
+  local lock target pid token name since waited=0 tries=0
+  lock=$(checkout_lock)
+  if [ -n "${MRA_LOCK_TOKEN:-}" ] && target=$(readlink "$lock" 2> /dev/null); then
+    read -r pid token name since <<< "$target"
+    [ "$token" != "$MRA_LOCK_TOKEN" ] || return 0
+  fi
+  mkdir -p "$MRA_PATCH_STATE_DIR"
+  if [ -d "$lock" ] && [ ! -L "$lock" ]; then
+    die "$(rel "$lock") is a directory, not a lock these scripts made. Remove it if no build is running."
+  fi
+  MRA_LOCK_TOKEN="$$-$RANDOM$RANDOM-$(date +%s)"
+  until ln -s "$$ $MRA_LOCK_TOKEN ${0##*/} $(date +%H:%M:%S)" "$lock" 2> /dev/null; do
+    if ! target=$(readlink "$lock" 2> /dev/null); then
+      # Released between the two calls, or the link cannot be made at all.
+      tries=$((tries + 1))
+      [ "$tries" -lt 5 ] || die "could not create the lock $(rel "$lock")"
+      continue
+    fi
+    read -r pid token name since <<< "$target"
+    case "$pid" in
+      '' | *[!0-9]*) die "$(rel "$lock") is not a lock these scripts made. Remove it if no build is running." ;;
+    esac
+    if ! pid_alive "$pid"; then
+      # Only a script killed with SIGKILL leaves one. Two scripts that find
+      # it at the same instant could both go on; that is not guarded against.
+      warn "removing a stale lock: $name (pid $pid), which took it at $since, is no longer running"
+      rm -f "$lock"
+      continue
+    fi
+    if [ "$waited" = 0 ]; then
+      warn "waiting for $name (pid $pid, running since $since) to finish: scripts that build or switch gbarecomp/ run one at a time in a checkout. To build two series at once, use a second git worktree. If no such script is running, remove $(rel "$lock")."
+      waited=1
+    fi
+    sleep 1
+  done
+  export MRA_LOCK_TOKEN
+  _mra_lock_owned=1
+  at_exit unlock_checkout
+  # The holder of an A/B build says, at the end, what it leaves in gbarecomp/.
+  if [ -n "$MRA_PATCH_VARIANT" ]; then at_exit variant_notice; fi
+}
+
+# shellcheck disable=SC2317  # called through at_exit
+unlock_checkout() {
+  local lock target
+  [ "$_mra_lock_owned" = 1 ] || return 0
+  _mra_lock_owned=0
+  lock=$(checkout_lock)
+  target=$(readlink "$lock" 2> /dev/null) || return 0
+  case " $target " in
+    *" $MRA_LOCK_TOKEN "*) rm -f "$lock" ;;
+  esac
+}
+
+# After an A/B build: gbarecomp/ keeps the variant until the next normal run.
+# shellcheck disable=SC2317  # called through at_exit
+variant_notice() {
+  local stamp="$MRA_PATCH_STATE_DIR/stamp" without n list=""
+  [ -f "$stamp" ] || return 0
+  [ "$(sed -n 's/^state=//p' "$stamp" | head -n 1)" = "done" ] || return 0
+  without=$(sed -n 's/^without=//p' "$stamp" | head -n 1)
+  [ -n "$without" ] || return 0
+  for n in $without; do list="$list${list:+, }${n%%-*}"; done
+  info "gbarecomp/ is left without $list. The next normal build script, or scripts/apply-patches.sh, restores the full series; a build by hand before that compiles this variant."
 }
 
 # The file names of the series (patches/gbarecomp/*.patch), in name order,

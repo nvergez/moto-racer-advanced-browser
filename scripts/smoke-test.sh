@@ -38,6 +38,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 select_patch_variant
+lock_checkout
 
 SMOKE_DIR="$MRA_BUILD_DIR/smoke"
 GEN_ROOT="$SMOKE_DIR/generated"

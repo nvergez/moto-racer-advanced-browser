@@ -39,6 +39,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 select_patch_variant
+lock_checkout
 
 # Fail on missing inputs before spending time on anything else.
 verify_inputs
