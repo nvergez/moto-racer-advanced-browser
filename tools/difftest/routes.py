@@ -7,7 +7,9 @@ usage: routes.py [--manifest FILE] COMMAND ...
   plan [ROUTE...]              the routes to run for ROUTE... (default: all),
                                with the routes whose saves they start from,
                                in manifest order
-  validate                     check the manifest; exit 1 on the first error
+  validate                     check the manifest, that its scripts exist and
+                               that its ROM and BIOS pins equal those of
+                               tools/analysis/lib.sh; exit 1 on the first error
   get ROUTE KEY                print one route setting (script, frames,
                                start_save, sram, save_sha1); empty if unset
   trace-mem                    the harness --trace-mem list for every memory
@@ -50,6 +52,8 @@ except ModuleNotFoundError:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_MANIFEST = os.path.join(HERE, "routes.toml")
+REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
+LIB_SH = os.path.join(REPO_ROOT, "tools", "analysis", "lib.sh")
 
 OPS = {
     "==": lambda a, b: a == b,
@@ -60,6 +64,7 @@ OPS = {
     "<": lambda a, b: a < b,
 }
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 INT_RE = re.compile(r"^(0[xX][0-9A-Fa-f]+|[0-9]+)$")
 CLAUSE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(==|!=|>=|<=|>|<)\s*(\S+)\s*$")
 ROUTE_KEYS = {"script", "frames", "start_save", "sram", "save_sha1", "note", "checkpoints"}
@@ -68,31 +73,62 @@ FIELD_KEYS = {"io", "addr", "size", "note"}
 
 
 class ManifestError(Exception):
-    pass
+    """A bad manifest or trace: reported as "routes.py: ..." without a traceback."""
+
+
+def is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def need_name(kind, name):
+    # mgba-routes.sh splits route names on whitespace, and field and value
+    # names must parse in a "when" predicate.
+    if not NAME_RE.match(name):
+        raise ManifestError("%s name %r: use letters, digits and _, not starting with a digit"
+                            % (kind, name))
+
+
+def need_table(where, value):
+    if not isinstance(value, dict):
+        raise ManifestError("%s: must be a table" % where)
+    return value
+
+
+def need_str(where, key, value):
+    if not isinstance(value, str):
+        raise ManifestError("%s: %s must be a string" % (where, key))
+    return value
 
 
 class Field:
     def __init__(self, name, spec):
+        need_name("field", name)
+        where = "field %s" % name
+        need_table(where, spec)
         unknown = set(spec) - FIELD_KEYS
         if unknown:
-            raise ManifestError("field %s: unknown keys %s" % (name, sorted(unknown)))
-        if not spec.get("note"):
-            raise ManifestError("field %s: a note with its evidence is required" % name)
+            raise ManifestError("%s: unknown keys %s" % (where, sorted(unknown)))
+        if not need_str(where, "note", spec.get("note", "")).strip():
+            raise ManifestError("%s: a note with its evidence is required" % where)
         self.name = name
         if "io" in spec:
-            if "addr" in spec:
-                raise ManifestError("field %s: set io or addr, not both" % name)
-            self.column = spec["io"]
+            if "addr" in spec or "size" in spec:
+                raise ManifestError("%s: set io, or addr and size, not both" % where)
+            self.column = need_str(where, "io", spec["io"])
+            if not NAME_RE.match(self.column) or self.column in ("frame", "keys"):
+                raise ManifestError("%s: io must name a register column of trace.tsv" % where)
             self.addr = None
             self.size = None
         elif "addr" in spec:
             self.addr = spec["addr"]
+            if not is_int(self.addr) or not 0 <= self.addr <= 0xFFFFFFFF:
+                raise ManifestError("%s: addr must be a 32-bit address (an integer)" % where)
             self.size = spec.get("size", 4)
-            if self.size not in (1, 2, 4):
-                raise ManifestError("field %s: size must be 1, 2 or 4" % name)
+            if not is_int(self.size) or self.size not in (1, 2, 4):
+                raise ManifestError("%s: size must be 1, 2 or 4" % where)
             self.column = "mem_%08X" % self.addr
         else:
-            raise ManifestError("field %s: io or addr is required" % name)
+            raise ManifestError("%s: io or addr is required" % where)
 
 
 class Clause:
@@ -104,6 +140,8 @@ class Clause:
 
 
 def parse_int(text, values, where):
+    if not isinstance(text, str):
+        raise ManifestError("%s: %r is neither a number nor a name in [values]" % (where, text))
     if INT_RE.match(text):
         return int(text, 0)
     if NAME_RE.match(text) and text in values:
@@ -129,16 +167,20 @@ def parse_when(text, fields, values, where):
 class Checkpoint:
     def __init__(self, route, index, spec, fields, values):
         where = "route %s, checkpoint %d" % (route, index + 1)
+        need_table(where, spec)
         unknown = set(spec) - CHECKPOINT_KEYS
         if unknown:
             raise ManifestError("%s: unknown keys %s" % (where, sorted(unknown)))
         for key in ("event", "when", "frame"):
             if key not in spec:
                 raise ManifestError("%s: %s is required" % (where, key))
-        self.event = spec["event"]
+        self.event = need_str(where, "event", spec["event"])
+        if not self.event.strip():
+            raise ManifestError("%s: event must not be empty" % where)
         self.where = "%s (%s)" % (where, self.event)
-        self.when_text = spec["when"]
-        self.when = parse_when(spec["when"], fields, values, self.where)
+        need_str(self.where, "note", spec.get("note", ""))
+        self.when_text = need_str(self.where, "when", spec["when"])
+        self.when = parse_when(self.when_text, fields, values, self.where)
         self.frame = spec["frame"]
         self.before = spec.get("before")
         for key in ("frame", "before"):
@@ -146,10 +188,10 @@ class Checkpoint:
             if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 1):
                 raise ManifestError("%s: %s must be a frame number" % (self.where, key))
         self.expect = {}
-        for name, value in spec.get("expect", {}).items():
+        for name, value in need_table(self.where + ": expect", spec.get("expect", {})).items():
             if name not in fields:
                 raise ManifestError("%s: expect names unknown field %r" % (self.where, name))
-            self.expect[name] = value if isinstance(value, int) else parse_int(value, values, self.where)
+            self.expect[name] = value if is_int(value) else parse_int(value, values, self.where)
         if self.before is not None and self.before <= self.frame:
             raise ManifestError("%s: before (%d) must be after frame (%d)" % (self.where, self.before, self.frame))
 
@@ -162,6 +204,9 @@ class Checkpoint:
 
 class Route:
     def __init__(self, name, spec, fields, values, route_names):
+        need_name("route", name)
+        where = "route %s" % name
+        need_table(where, spec)
         unknown = set(spec) - ROUTE_KEYS
         if unknown:
             raise ManifestError("route %s: unknown keys %s" % (name, sorted(unknown)))
@@ -169,23 +214,29 @@ class Route:
             if key not in spec:
                 raise ManifestError("route %s: %s is required" % (name, key))
         self.name = name
-        self.script = spec["script"]
+        self.script = need_str(where, "script", spec["script"])
+        if not self.script:
+            raise ManifestError("route %s: script must not be empty" % name)
         self.frames = spec["frames"]
-        if not isinstance(self.frames, int) or isinstance(self.frames, bool) or self.frames < 1:
+        if not is_int(self.frames) or self.frames < 1:
             raise ManifestError("route %s: frames must be a frame count" % name)
-        self.start_save = spec.get("start_save", "")
-        self.sram = spec.get("sram", "")
-        self.save_sha1 = spec.get("save_sha1", "")
+        self.start_save = need_str(where, "start_save", spec.get("start_save", ""))
+        self.sram = need_str(where, "sram", spec.get("sram", ""))
+        self.save_sha1 = need_str(where, "save_sha1", spec.get("save_sha1", ""))
+        need_str(where, "note", spec.get("note", ""))
         if self.start_save and self.start_save not in route_names:
             raise ManifestError("route %s: start_save names unknown route %r" % (name, self.start_save))
         if self.start_save == name:
             raise ManifestError("route %s: start_save cannot name the route itself" % name)
         if self.sram not in ("", "none", "written"):
             raise ManifestError("route %s: sram must be 'none' or 'written'" % name)
-        if self.save_sha1 and not re.match(r"^[0-9a-f]{40}$", self.save_sha1):
+        if self.save_sha1 and not SHA1_RE.match(self.save_sha1):
             raise ManifestError("route %s: save_sha1 must be 40 lower-case hex digits" % name)
+        checkpoints = spec.get("checkpoints", [])
+        if not isinstance(checkpoints, list):
+            raise ManifestError("route %s: checkpoints must be an array of tables" % name)
         self.checkpoints = [Checkpoint(name, i, c, fields, values)
-                            for i, c in enumerate(spec.get("checkpoints", []))]
+                            for i, c in enumerate(checkpoints)]
         if not self.checkpoints:
             raise ManifestError("route %s: at least one checkpoint is required" % name)
         last = 0
@@ -212,12 +263,29 @@ class Manifest:
             raise ManifestError("%s: %s" % (path, e))
         if data.get("schema") != 1:
             raise ManifestError("%s: schema = 1 expected" % path)
-        self.values = data.get("values", {})
+        # The manifest's frames hold for one ROM and one BIOS only.
+        for key in ("rom_sha1", "bios_sha1"):
+            value = data.get(key)
+            if not isinstance(value, str) or not SHA1_RE.match(value):
+                raise ManifestError("%s: %s (40 lower-case hex digits) is required" % (path, key))
+        self.rom_sha1 = data["rom_sha1"]
+        self.bios_sha1 = data["bios_sha1"]
+        self.values = need_table("[values]", data.get("values", {}))
         for name, value in self.values.items():
-            if not isinstance(value, int):
+            need_name("value", name)
+            if not is_int(value):
                 raise ManifestError("values.%s: must be an integer" % name)
-        self.fields = {name: Field(name, spec) for name, spec in data.get("fields", {}).items()}
-        routes = data.get("routes", {})
+        self.fields = {name: Field(name, spec)
+                       for name, spec in need_table("[fields]", data.get("fields", {})).items()}
+        # A trace has one column per register or address: two fields on one
+        # column would silently read the same values.
+        columns = {}
+        for f in self.fields.values():
+            if f.column in columns:
+                raise ManifestError("fields %s and %s both read trace column %s"
+                                    % (columns[f.column], f.name, f.column))
+            columns[f.column] = f.name
+        routes = need_table("[routes]", data.get("routes", {}))
         self.routes = {name: Route(name, spec, self.fields, self.values, set(routes))
                        for name, spec in routes.items()}
         mem = [f for f in self.fields.values() if f.addr is not None]
@@ -253,30 +321,73 @@ class Manifest:
     def trace_mem(self):
         return ",".join("0x%08X:%d" % (f.addr, f.size) for f in self.fields.values() if f.addr is not None)
 
+    def check_pins(self, lib_sh=LIB_SH):
+        """The manifest's ROM and BIOS pins must be those of tools/analysis/lib.sh."""
+        try:
+            with open(lib_sh) as f:
+                text = f.read()
+        except OSError as e:
+            raise ManifestError("%s: %s" % (lib_sh, e.strerror or e))
+        for key, var in (("rom_sha1", "MRA_ROM_SHA1"), ("bios_sha1", "MRA_BIOS_SHA1")):
+            m = re.search(r"^%s=([0-9a-f]{40})\s*$" % var, text, re.M)
+            if not m:
+                raise ManifestError("%s: no %s=<40 hex digits> line" % (lib_sh, var))
+            if getattr(self, key) != m.group(1):
+                raise ManifestError("%s: %s is %s, but %s pins %s=%s"
+                                    % (self.path, key, getattr(self, key), lib_sh, var, m.group(1)))
+
+    def check_scripts(self, root=REPO_ROOT):
+        """Every route's script exists; script paths are relative to the repository root."""
+        for r in self.routes.values():
+            if not os.path.isfile(os.path.join(root, r.script)):
+                raise ManifestError("route %s: script %s not found under %s" % (r.name, r.script, root))
+
+
+def _column(path, header, col, what=""):
+    count = header.count(col)
+    if count == 0:
+        raise ManifestError("%s: no column %s%s" % (path, col, what))
+    if count > 1:
+        raise ManifestError("%s: column %s appears %d times" % (path, col, count))
+    return header.index(col)
+
+
+def _cell(path, n, header, parts, i, base):
+    try:
+        return int(parts[i], base)
+    except ValueError:
+        raise ManifestError("%s:%d: column %s: %r is not a %s number" % (
+            path, n, header[i], parts[i], "hex" if base == 16 else "decimal")) from None
+
+
+def _read_rows(path, f, fields, needed):
+    header = f.readline().rstrip("\r\n").split("\t")
+    i_frame = _column(path, header, "frame")
+    cols = {name: _column(path, header, fields[name].column, " for field %s" % name)
+            for name in sorted(needed)}
+    i_keys = _column(path, header, "keys") if "keys" in header else None
+    rows = []
+    for n, line in enumerate(f, 2):
+        parts = line.rstrip("\r\n").split("\t")
+        if len(parts) != len(header):
+            raise ManifestError("%s:%d: %d columns, header has %d" % (path, n, len(parts), len(header)))
+        row = {"frame": _cell(path, n, header, parts, i_frame, 10),
+               "keys": parts[i_keys] if i_keys is not None else None}
+        for name, i in cols.items():
+            row[name] = _cell(path, n, header, parts, i, 16)
+        rows.append(row)
+    return rows
+
 
 def read_trace(path, fields, needed):
     """Rows as dicts {frame, keys, <field>: int}, in file order."""
-    with open(path, newline="") as f:
-        header = f.readline().rstrip("\r\n").split("\t")
-        if "frame" not in header:
-            raise ManifestError("%s: no 'frame' column" % path)
-        cols = {}
-        for name in sorted(needed):
-            col = fields[name].column
-            if col not in header:
-                raise ManifestError("%s: no column %s for field %s" % (path, col, name))
-            cols[name] = header.index(col)
-        i_frame = header.index("frame")
-        i_keys = header.index("keys") if "keys" in header else None
-        rows = []
-        for n, line in enumerate(f, 2):
-            parts = line.rstrip("\r\n").split("\t")
-            if len(parts) != len(header):
-                raise ManifestError("%s:%d: %d columns, header has %d" % (path, n, len(parts), len(header)))
-            row = {"frame": int(parts[i_frame]), "keys": parts[i_keys] if i_keys is not None else None}
-            for name, i in cols.items():
-                row[name] = int(parts[i], 16)
-            rows.append(row)
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            rows = _read_rows(path, f, fields, needed)
+    except OSError as e:
+        raise ManifestError("%s: %s" % (path, e.strerror or e))
+    except UnicodeDecodeError as e:
+        raise ManifestError("%s: not a text file (%s)" % (path, e.reason))
     for a, b in zip(rows, rows[1:]):
         if b["frame"] != a["frame"] + 1:
             raise ManifestError("%s: frames are not consecutive (%d then %d)" % (path, a["frame"], b["frame"]))
@@ -363,6 +474,8 @@ def main(argv=None):
         elif args.cmd == "plan":
             print("\n".join(m.plan(args.routes)))
         elif args.cmd == "validate":
+            m.check_pins()
+            m.check_scripts()
             print("%s: %d fields, %d routes, %d checkpoints" % (
                 args.manifest, len(m.fields), len(m.routes),
                 sum(len(r.checkpoints) for r in m.routes.values())))

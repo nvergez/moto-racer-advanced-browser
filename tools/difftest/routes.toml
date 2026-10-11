@@ -39,6 +39,10 @@
 # (docs/research/phase2-diagnosis.md section 6): the "slack" column that
 # routes.py prints is how many frames later an event may come.
 
+# rom_sha1 and bios_sha1 must equal MRA_ROM_SHA1 and MRA_BIOS_SHA1 in
+# tools/analysis/lib.sh, the pins run_harness.sh checks its inputs against;
+# "routes.py validate" fails otherwise. Route, field and value names are
+# identifiers: letters, digits and _, not starting with a digit.
 schema = 1
 rom_sha1 = "b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0"
 bios_sha1 = "300c20df6731a33952ded8c436f7f186d25d3492"
@@ -48,6 +52,8 @@ FRONTEND = 0xE92D4FF3        # first word of the front-end IWRAM image
 RACE = 0xE3A00640            # first word of the race-program IWRAM image
 RACE_DISPLAY = 0x1741        # DISPCNT while a race is on screen
 ALL_UNLOCKED = 0x0FFF        # unlocks after the unlock code
+SINGLE_RACE = 0              # race_mode
+CHAMPIONSHIP = 1
 FRENCH = 1                   # language
 KENYA = 0                    # track ids
 TEXAS = 1
@@ -67,7 +73,7 @@ note = "Display control. 0x1741 while a race is displayed (Phase 1 section 2); 0
 [fields.image]
 addr = 0x03000000
 size = 4
-note = "First word of the resident IWRAM code image: 0xE92D4FF3 front end, 0xE3A00640 race program (diagnosis section 3.1; read from ROM 0x081596FC and 0x083F6820)."
+note = "First word of the resident IWRAM code image: 0xE92D4FF3 front end, 0xE3A00640 race program (diagnosis section 3.1; read from ROM 0x081596FC and 0x083F6820). During boot the word is 0 on frames 1-278 and already 0xE3A00640 on frames 279-292, before the front-end image arrives at 293 (every route's trace.tsv), so image == RACE means the race program only once the front end has run: put a front-end checkpoint (main_menu) before it."
 
 [fields.main_menu]
 addr = 0x0203CE3C
@@ -83,6 +89,11 @@ note = "Language in the save block (save offset 0x17, Phase 1 section 1): 0 Engl
 addr = 0x0203F01B
 size = 1
 note = "Save-block byte 0x1B: 1 while the multiplayer screens run (set at 0x08001400, cleared at 0x08001758; multiplayer_lobby frames 2773-3261). The Solo-menu builder reads it at 0x08000E20. Meaning beyond that is unverified."
+
+[fields.race_mode]
+addr = 0x0203F01A
+size = 1
+note = "Save-block byte 0x1A: the kind of race the front end sets up, 0 Single race, 1 Championship (2 League from static reading only, unverified). Harness --watch-write and --watch-read on 0x0203F01A: the Solo menu's code writes 0 at 0x08000DA8 when a single-race track is chosen (full_race_cross, frame 3052) and 1 at 0x08000EF0 when Championship is chosen (cup, frame 3030, and again at 25134, 45034, 62934); 0x08001008 writes 2 for League. 0 on a fresh save. The front end reads it at 0x080021F4 before each race (cup: 3576, 26062, 45962) and at 0x0800EDB0 when it takes over after each race (22404, 42308, 59864)."
 
 [fields.unlocks]
 addr = 0x0203F02A
@@ -428,7 +439,7 @@ before = 2843                # A: solo (its menu is built from the unlock bits)
 
 [[routes.cup.checkpoints]]
 event = "race1_display"
-when = "image == RACE and DISPCNT == RACE_DISPLAY and track == KENYA and cross_rookie_races == 0"
+when = "image == RACE and DISPCNT == RACE_DISPLAY and race_mode == CHAMPIONSHIP and track == KENYA and cross_rookie_races == 0"
 frame = 3593
 before = 3701                # hold A
 
@@ -447,7 +458,7 @@ before = 24831               # A: best lap -> best race
 
 [[routes.cup.checkpoints]]
 event = "race2_display"
-when = "image == RACE and DISPCNT == RACE_DISPLAY and track == TEXAS and cross_rookie_races == 1"
+when = "image == RACE and DISPCNT == RACE_DISPLAY and race_mode == CHAMPIONSHIP and track == TEXAS and cross_rookie_races == 1"
 frame = 26079
 before = 26191               # hold A
 
@@ -466,7 +477,7 @@ before = 44731               # A: best lap -> best race
 
 [[routes.cup.checkpoints]]
 event = "race3_display"
-when = "image == RACE and DISPCNT == RACE_DISPLAY and track == FRANCE and cross_rookie_races == 2"
+when = "image == RACE and DISPCNT == RACE_DISPLAY and race_mode == CHAMPIONSHIP and track == FRANCE and cross_rookie_races == 2"
 frame = 45980
 before = 46091               # hold A
 

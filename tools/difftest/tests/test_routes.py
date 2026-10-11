@@ -12,8 +12,15 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import routes  # noqa: E402
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+ROM_SHA1 = "1" * 40
+BIOS_SHA1 = "2" * 40
+
 MANIFEST = """\
 schema = 1
+rom_sha1 = "1111111111111111111111111111111111111111"
+bios_sha1 = "2222222222222222222222222222222222222222"
 
 [values]
 ON = 0x1741
@@ -160,11 +167,72 @@ class ManifestTests(Base):
     def test_unknown_route_key(self):
         self.bad('script = "first.txt"', 'script = "first.txt"\nscirpt = "x"', "unknown keys")
 
+    def test_route_name_must_be_an_identifier(self):
+        # mgba-routes.sh splits the route list on whitespace.
+        self.bad("[routes.second]", '[routes."my route"]', "route name 'my route'")
+
+    def test_field_and_value_names_must_be_identifiers(self):
+        self.bad("[fields.count]", '[fields."count-1"]', "field name 'count-1'")
+        self.bad("IMG_B = 0xB", '"IMG-B" = 0xB', "value name 'IMG-B'")
+
+    def test_two_fields_on_one_column(self):
+        self.bad("addr = 0x0203FC50\nsize = 1", "addr = 0x03000000\nsize = 1",
+                 "fields image and count both read trace column mem_03000000")
+        self.bad('io = "DISPCNT"\nnote', 'io = "DISPCNT"\nnote = "x"\n[fields.d2]\nio = "DISPCNT"\nnote',
+                 "both read trace column DISPCNT")
+
+    def test_field_types(self):
+        self.bad("addr = 0x0203FC50", 'addr = "0x0203FC50"', "addr must be a 32-bit address")
+        self.bad("addr = 0x0203FC50", "addr = 0x1_0000_0000", "addr must be a 32-bit address")
+        self.bad("size = 1", "size = true", "size must be 1, 2 or 4")
+        self.bad('io = "DISPCNT"', "io = 4", "io must be a string")
+        self.bad('io = "DISPCNT"', 'io = "keys"', "io must name a register column")
+        self.bad('io = "DISPCNT"', 'io = "DISPCNT"\nsize = 2', "not both")
+
+    def test_checkpoint_and_route_types(self):
+        self.bad("expect = { count = 2 }", "expect = { count = 2.0 }", "neither a number nor a name")
+        self.bad("expect = { count = 2 }", "expect = 2", "expect: must be a table")
+        self.bad('when = "image == IMG_B"', "when = 3", "when must be a string")
+        self.bad('event = "image_b"\nwhen = "image == IMG_B"', 'event = 7\nwhen = "image == IMG_B"',
+                 "event must be a string")
+        self.bad('script = "first.txt"', "script = 1", "script must be a string")
+        self.bad('sram = "none"', "sram = 0", "sram must be a string")
+        self.bad("ON = 0x1741", "ON = true", "values.ON: must be an integer")
+
+    def test_pins_are_required(self):
+        self.bad('rom_sha1 = "' + ROM_SHA1 + '"\n', "", "rom_sha1 (40 lower-case hex digits) is required")
+        self.bad('bios_sha1 = "' + BIOS_SHA1 + '"', 'bios_sha1 = "' + "A" * 40 + '"', "bios_sha1")
+
+    def test_pins_compared_with_lib_sh(self):
+        m = self.manifest()
+        lib = self.write("lib.sh", "MRA_ROM_SHA1=%s\nMRA_BIOS_SHA1=%s\n" % (ROM_SHA1, BIOS_SHA1))
+        m.check_pins(lib)
+        lib = self.write("lib.sh", "MRA_ROM_SHA1=%s\nMRA_BIOS_SHA1=%s\n" % (ROM_SHA1, "3" * 40))
+        with self.assertRaises(routes.ManifestError) as ctx:
+            m.check_pins(lib)
+        self.assertIn("bios_sha1", str(ctx.exception))
+        lib = self.write("lib.sh", "MRA_BIOS_SHA1=%s\n" % BIOS_SHA1)
+        with self.assertRaises(routes.ManifestError) as ctx:
+            m.check_pins(lib)
+        self.assertIn("no MRA_ROM_SHA1", str(ctx.exception))
+
+    def test_check_scripts(self):
+        m = self.manifest()
+        with self.assertRaises(routes.ManifestError) as ctx:
+            m.check_scripts(self.tmp.name)
+        self.assertIn("script first.txt not found", str(ctx.exception))
+        self.write("first.txt", "end\n")
+        self.write("second.txt", "end\n")
+        m.check_scripts(self.tmp.name)
+
     def test_real_manifest_is_valid(self):
         m = routes.Manifest(routes.DEFAULT_MANIFEST)
         self.assertGreater(len(m.routes), 0)
+        m.check_pins()
+        m.check_scripts()
         for r in m.routes.values():
             self.assertTrue(r.script.startswith("tools/analysis/input/"), r.script)
+            self.assertTrue(os.path.isfile(os.path.join(REPO_ROOT, r.script)), r.script)
 
 
 class CheckTests(Base):
@@ -268,6 +336,46 @@ class TraceTests(Base):
         path = self.trace([GOOD[0], GOOD[2]])
         with self.assertRaises(routes.ManifestError):
             routes.read_trace(path, m.fields, {"image"})
+
+    def read_error(self, path, needed=("image",)):
+        m = self.manifest()
+        with self.assertRaises(routes.ManifestError) as ctx:
+            routes.read_trace(path, m.fields, set(needed))
+        return str(ctx.exception)
+
+    def test_missing_file(self):
+        self.assertIn("No such file", self.read_error(os.path.join(self.tmp.name, "none.tsv")))
+
+    def test_bad_cells(self):
+        rows = [list(r) for r in GOOD]
+        rows[3][3] = "zz"
+        self.assertIn(":5: column mem_03000000: 'zz' is not a hex number", self.read_error(self.trace(rows)))
+        rows = [list(r) for r in GOOD]
+        rows[0][0] = "one"
+        self.assertIn(":2: column frame: 'one' is not a decimal number", self.read_error(self.trace(rows)))
+
+    def test_duplicate_column(self):
+        path = self.trace([r + ("00",) for r in GOOD],
+                          header="frame\tkeys\tDISPCNT\tmem_03000000\tmem_0203FC50\tmem_03000000")
+        self.assertIn("column mem_03000000 appears 2 times", self.read_error(path))
+
+    def test_binary_file(self):
+        path = os.path.join(self.tmp.name, "bin.tsv")
+        with open(path, "wb") as f:
+            f.write(b"frame\tmem_03000000\n\xff\xfe\n")
+        self.assertIn("not a text file", self.read_error(path))
+
+    def test_cli_reports_errors_without_traceback(self):
+        mpath = self.write("routes.toml", MANIFEST)
+        err = io.StringIO()
+        old = sys.stderr
+        sys.stderr = err
+        try:
+            rc = routes.main(["--manifest", mpath, "check", "first", os.path.join(self.tmp.name, "none.tsv")])
+        finally:
+            sys.stderr = old
+        self.assertEqual(rc, 1)
+        self.assertTrue(err.getvalue().startswith("routes.py: "), err.getvalue())
 
     def test_cli_check(self):
         mpath = self.write("routes.toml", MANIFEST)

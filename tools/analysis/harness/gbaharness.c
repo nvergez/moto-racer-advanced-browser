@@ -1246,7 +1246,8 @@ static void usage(void) {
 	fprintf(stderr,
 	        "usage: gbaharness --rom ROM --bios BIOS --out DIR [options]\n"
 	        "  --script FILE        input script (wait/press/tap/hold/release/until/dump/shot/mark/savestate/end)\n"
-	        "  --frames N           stop after frame N (also keeps running after the script ends until N)\n"
+	        "  --frames N           stop after frame N (also keeps running until N after a script\n"
+	        "                       that has no end command)\n"
 	        "  --dump-at LIST       full dumps at frames, e.g. 100,200-210\n"
 	        "  --dump-vcount L      take --dump-at dumps when VCOUNT first equals L during the frame\n"
 	        "                       (L<160: mid-drawing of that frame; 160-227: its leading VBlank)\n"

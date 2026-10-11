@@ -106,9 +106,9 @@ Every script starts from boot. The scripts and their checkpoints are listed in t
 
 | Script | Path and expected result (fresh save unless stated, checked on 2026-10-11) |
 |---|---|
-| `boot_to_race.txt` | Title, English, Solo, Single race, Cross, Kenya, Coolfix 250, Auto. Title 2450, main menu 2714, race image installed 3290, race display from 3303, A held from 3608, lap 1 at 3826. Writes `race_running.state` (3800) and `mid_race.state` (4200). |
+| `boot_to_race.txt` | Title, English, Solo, Single race, Cross, Kenya, Coolfix 250, Auto. Title 2450, main menu 2714, race image installed 3290, race display from 3303, A held from 3608, lap 1 at 3826. Writes `race_running.state` (3800) and `mid_race.state` (4200). No SRAM write. |
 | `full_race_cross.txt` | Same path, A held to the end. Finishes 3 laps in 8th place; race display ends at 21788, "Try again" screen from 21813. No SRAM write. |
-| `race_gp.txt`, `race_traffic.txt` | GP on California and Traffic on Moscow (the only unlocked tracks), with a pause at 4200. Race display from 3346 (GP) and 3358 (Traffic). |
+| `race_gp.txt`, `race_traffic.txt` | GP on California and Traffic on Moscow (the only unlocked tracks), with a pause at 4200. Race display from 3346 (GP) and 3358 (Traffic). No SRAM write. |
 | `options_save.txt` | Options, Language, Français, then B. Writes the 0xCD0-byte save block at frame 3415. Use with `--save FILE`. |
 | `boot_with_save.txt` | Boot from the save `options_save.txt` writes (pass a copy with `--save`: the harness writes the run's save back to it). No language menu: the main menu is up at 2484, in French. Solo and back. No SRAM write. |
 | `multiplayer_lobby.txt` | The link lobby with no partner. CpuSet (SWI 0x0B) runs about 5 times per frame there, and nowhere else. No SRAM write. |
@@ -146,13 +146,14 @@ python3 -I tools/difftest/routes.py check ROUTE TRACE.tsv     # checkpoints of a
 python3 -I -m unittest discover tools/difftest/tests          # no game data needed
 ```
 
-`mgba-routes.sh` runs each route twice from boot, each time from a fresh copy of its starting save, with `--trace 1-<frames>` and a `--trace-mem` column for every RAM field. It checks that the two `trace.tsv` and the two final saves are byte-identical, that the run stops at the route's frame count, that the checkpoints hold on their recorded frames, and that the final save is as the manifest says. Outputs go to `analysis-out/routes/`. The tools need Python 3.11 or newer (`tomllib`).
+`mgba-routes.sh` runs each route twice from boot, each time from a fresh copy of its starting save, with `--trace 1-<frames>` and a `--trace-mem` column for every RAM field. It checks that the two `trace.tsv` and the two final saves are byte-identical, that the run stops at the route's frame count, that the checkpoints hold on their recorded frames, and that the final save is as the manifest says. It stops before the first run if the harness is not built or the ROM or BIOS is not the pinned one. A route whose starting-save route failed is reported as failed without running, and a failing route keeps run b's output for comparison. Outputs go to `analysis-out/routes/`. The tools need Python 3.11 or newer (`tomllib`).
 
 ### Options
 
 ```
 run_harness.sh [--rom FILE] [--bios FILE] [--no-hash-check] --out DIR [options]
-  --script FILE | --frames N               # at least one; --frames also runs past the script end
+  --script FILE | --frames N               # at least one; --frames N stops the run at frame N, and also
+                                           # runs past the end of a script that has no end command
   --load-state FILE                        # start from a savestate written by the harness
   --save FILE                              # persistent cartridge save (default: fresh, in memory)
   --save-type TYPE                         # force sram|flash512|flash1m|eeprom|eeprom512|none
