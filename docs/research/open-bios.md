@@ -3,6 +3,7 @@
 **Date:** 2026-10-10 (revised after two review rounds the same day)
 **Question:** Can our build avoid the Nintendo GBA BIOS by shipping an open-source replacement, so a player only needs their ROM? What does it cost in work, licensing and fidelity?
 **Status:** Research plus scratch experiments (recompiling an open BIOS with gbarecomp, small scripts over the BIOS images and sources, and a read of a third-party 2022 A/B report). Nothing here has been run against the Moto Racer Advance ROM by us. This is engineering analysis, not legal advice.
+**Follow-up:** the mGBA A/B of §5.3 with the Cult-of-GBA image, and the check that gbarecomp's HALT exit condition is what stops it under gbarecomp, are in [open-bios-ab.md](open-bios-ab.md) (P2-17).
 
 Pinned sources (all paths and line numbers below refer to these commits):
 
