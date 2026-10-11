@@ -1,0 +1,258 @@
+Empty the GamePak prefetch buffer on every PC write: the runtime's half.
+
+The GamePak prefetch model (rwt_prefetch_stall, "exactly mGBA
+GBAMemoryStall") keeps the buffer's position in
+RuntimeWaitTable::last_prefetched_pc, and nothing but a reset or a state
+load cleared it. mGBA clears it on every PC write (GBASetActiveRegion sets
+lastPrefetchedPc = 0, called by ARMWritePC; mGBA 0.10.5 src/gba/memory.c:273,
+the same in 1d201b22). Without the reset, a loop that runs from the
+cartridge and stores to RAM kept the position of the opcodes after the
+loop across its branch back, and its store cost 8 cycles instead of 4: with
+WAITCNT 0x4317, `cmp r1, r2; strcc r3, [r1], #4; bcc` took 26 cycles per
+iteration instead of mGBA's 22.
+
+arm-recomp-core's half (0001-prefetch-reset-on-pc-write.patch of the
+arm-recomp-core series in the same repository as this patch) adds
+Bus::prefetch_reset, calls it from Interpreter::step after any PC write,
+and resets the position after the refill of every direct branch in
+generated code. This patch:
+
+- GbaBus::prefetch_reset clears its wait table's position (gba_bus.h); the
+  force-interp backend's bus adapter forwards it (ForceInterpBus,
+  runtime_arm_default_aborts.cpp), like prefetch_stall. The self-heal
+  bridge steps the GbaBus directly.
+- runtime_refill_cycles, which generated code charges for every PC write
+  known only at run time (BX, LDR/LDM/POP to PC, data-processing writes to
+  PC, exception returns through runtime_exception_return_refill), clears
+  it too (runtime_wait_inline.h, shared with the Stage-2 overlay shim).
+- The widescreen sidecar's shadow draws run guest code whose PC writes now
+  clear the live position; it saves and restores it with the rest of the
+  state it restores (ws_sidecar.cpp). Stalls in shadow mode already
+  evaluate on a copy (runtime_prefetch_stall_delta).
+- codegen_tests' bus forwards the reset to the table the generated side
+  reads, so the per-instruction comparison of the buffer position covers it
+  (tests/codegen/test_main.cpp).
+- interpreter_smoke checks that the interpreter resets the buffer once
+  after each kind of PC write and never otherwise
+  (tests/armv4t/interpreter_smoke.cpp).
+- docs/CPU_TIMING.md describes the reset.
+
+SWI entry does not reset it: the BIOS code it enters never reads the
+position, and the LLE BIOS returns to the caller through a PC write (an
+HLE SWI resumes at LR with no PC write, as mGBA's HLE does). IRQ entry
+resets it in the IRQ entry cycles patch that follows (0012).
+
+Needs arm-recomp-core's half: GbaBus::prefetch_reset overrides a virtual
+that patch adds, so this patch does not build without it. Leave both out
+together for an A/B build.
+
+Tested on macOS arm64 (Apple clang 21) at gbarecomp 5e89943 plus this
+series, arm-recomp-core 1f13cdf plus its half:
+
+- gbarecomp's ctest, 52 of 52 (with the gba-tests test ROMs), including
+  codegen_tests and the new interpreter_smoke case. Removing the reset
+  from runtime_refill_cycles makes codegen_tests fail on arm_pop_r4_pc,
+  arm_ldmia_pc_computed, arm_ldmia_empty_wb and thumb_pop_r4_pc.
+- A synthetic 4 KiB ROM (no Nintendo data, header logo zero), prefetch1,
+  times three loops of 64 stores to EWRAM from the cartridge with WAITCNT
+  0x4317, between two timer 0 reads at F/1: the loop above, the same loop
+  closed by `bxcc r6`, and a THUMB loop. mGBA 0.10.5: 1424, 1424 and 892
+  cycles. gbarecomp 5e89943: 1673, 1673 and 1141, on generated code
+  (GBARECOMP_STRICT_STATIC=1, fully static) and on the interpreter
+  (GBARECOMP_FORCE_INTERP=1, the BIOS interpreted too). With both halves:
+  1424, 1424 and 892 on both backends. The generator and config are in
+  tests/repro/ of https://github.com/nvergez/moto-racer-advanced-browser
+  (make_rom.py, prefetch1.toml); attach them when filing this patch.
+- A commercial game whose race start-up clears 54,459 words of EWRAM with
+  the loop above: without the fix its race code arrives one frame later
+  than in mGBA. With both halves and 0012, the clear's instruction timeline
+  equals mGBA's to the cycle over the 5 frames of the hand-off, and the
+  race code arrives on mGBA's frame on the interpreter and on generated
+  code.
+
+diff --git a/docs/CPU_TIMING.md b/docs/CPU_TIMING.md
+index 5506bf8..122079c 100644
+--- a/docs/CPU_TIMING.md
++++ b/docs/CPU_TIMING.md
+@@ -61,6 +61,19 @@ turns from N into S and the prefetched fetches become free. Its position
+ in the loop fixed point, and shadow re-runs (widescreen sidecar) evaluate on
+ a copy.
+ 
++Every PC write empties the buffer, as mGBA's `GBASetActiveRegion` does
++(`lastPrefetchedPc = 0`, called by `ARMWritePC` on every branch, exception
++entry and return): the interpreter calls `Bus::prefetch_reset` after any
++instruction that wrote R15, generated code clears `last_prefetched_pc` after
++the refill of every static branch, and `runtime_refill_cycles` does it for
++PC writes known only at run time (exception returns included). SWI entry
++does not reset it: the BIOS code it enters never reads the position, and
++the BIOS's return to the caller is a PC write. Without the reset,
++a loop that runs from the cartridge and stores to RAM (`cmp; strcc [ewram];
++bcc`) kept the position of the opcodes after the loop across the branch back
++and charged its store 8 cycles instead of mGBA's 4 (26 cycles per iteration
++instead of 22, with WAITCNT `4317h`).
++
+ ## Verification
+ 
+ | Test | Checks |
+diff --git a/src/armv4t/runtime_wait_inline.h b/src/armv4t/runtime_wait_inline.h
+index efa8dcf..01d2cee 100644
+--- a/src/armv4t/runtime_wait_inline.h
++++ b/src/armv4t/runtime_wait_inline.h
+@@ -18,9 +18,13 @@
+ 
+ // Pipeline refill after a PC write: the N+S opcode fetch pair in the target
+ // region and instruction set (mGBA ARMWritePC/ThumbWritePC wait part; the
+-// two base cycles are already in the instruction's fixed cost).
++// two base cycles are already in the instruction's fixed cost). The write
++// also empties the GamePak prefetch buffer (mGBA GBASetActiveRegion sets
++// lastPrefetchedPc = 0), as Bus::prefetch_reset does in the interpreter and
++// the codegen does after a static branch's refill.
+ static inline uint32_t runtime_refill_cycles(uint32_t target_pc,
+                                              uint32_t thumb) {
++    g_runtime_waits.last_prefetched_pc = 0u;
+     return rwt_code_wait(&g_runtime_waits, target_pc, thumb, 0u) +
+            rwt_code_wait(&g_runtime_waits, target_pc, thumb, 1u);
+ }
+diff --git a/src/debug/ws_sidecar.cpp b/src/debug/ws_sidecar.cpp
+index 9adac7a..778f587 100644
+--- a/src/debug/ws_sidecar.cpp
++++ b/src/debug/ws_sidecar.cpp
+@@ -374,6 +374,10 @@ void ws_sidecar_active_fill() {
+     // this is safe to call every frame during live play.
+     const unsigned saved_shadow = g_runtime_shadow_tick;
+     const unsigned long long saved_shadow_cyc = g_runtime_shadow_cycles;
++    // The draws' PC writes empty the prefetch buffer in the live wait table
++    // (runtime_refill_cycles, the codegen's static branches); stalls already
++    // evaluate on a copy in shadow mode (runtime_prefetch_stall_delta).
++    const uint32_t saved_prefetched_pc = g_runtime_waits.last_prefetched_pc;
+     g_runtime_shadow_tick = 1u;
+     // Preserve the VRAM scratch the synthetic draws overwrite (so VRAM stays
+     // byte-identical to a non-sidecar run). Each draw touches offsets 0,1,0x20,
+@@ -415,6 +419,7 @@ void ws_sidecar_active_fill() {
+     // Restore everything so the guest is bit-for-bit unaffected.
+     g_runtime_shadow_tick = saved_shadow;
+     g_runtime_shadow_cycles = saved_shadow_cyc;
++    g_runtime_waits.last_prefetched_pc = saved_prefetched_pc;
+     for (int k = 0; k < 3; ++k) {
+         wr32_iwram(bus, g_tilemap_ptrs + static_cast<uint32_t>(k) * 4u, saved_ptr[k]);
+         vram_restore(bus, kScratch[k], scratch_bak[k], kScratchSave);
+diff --git a/src/gba/gba_bus.h b/src/gba/gba_bus.h
+index c9636af..c37a8cb 100644
+--- a/src/gba/gba_bus.h
++++ b/src/gba/gba_bus.h
+@@ -224,6 +224,9 @@ public:
+     int32_t prefetch_stall(int32_t wait, uint32_t pc, bool thumb) override {
+         return waits_prefetch_stall(*waits_, wait, pc, thumb);
+     }
++    // A PC write empties the prefetch buffer (mGBA GBASetActiveRegion);
++    // generated code does the same through g_runtime_waits.
++    void prefetch_reset() override { waits_->last_prefetched_pc = 0u; }
+     // Live wait-state table (WAITCNT, EWRAM control, prefetch state).
+     RuntimeWaitTable* wait_table() { return waits_; }
+     const RuntimeWaitTable& wait_table() const { return *waits_; }
+diff --git a/src/runtime/runtime_arm_default_aborts.cpp b/src/runtime/runtime_arm_default_aborts.cpp
+index ae7fa7b..0d28e91 100644
+--- a/src/runtime/runtime_arm_default_aborts.cpp
++++ b/src/runtime/runtime_arm_default_aborts.cpp
+@@ -765,6 +765,7 @@ struct ForceInterpBus : armv4t::Bus {
+     int32_t prefetch_stall(int32_t w, uint32_t pc, bool t) override {
+         return raw->prefetch_stall(w, pc, t);
+     }
++    void prefetch_reset() override { raw->prefetch_reset(); }
+ };
+ }  // namespace
+ 
+diff --git a/tests/armv4t/interpreter_smoke.cpp b/tests/armv4t/interpreter_smoke.cpp
+index dcdee72..2c80ed3 100644
+--- a/tests/armv4t/interpreter_smoke.cpp
++++ b/tests/armv4t/interpreter_smoke.cpp
+@@ -433,6 +433,69 @@ void test_irq_exception_return_result() {
+     check_eq_u32("irq_exception_return_result", "pc", cpu.R[15], 0x104);
+ }
+ 
++// A PC write empties the GamePak prefetch buffer (mGBA GBASetActiveRegion):
++// the interpreter calls Bus::prefetch_reset after every instruction that
++// wrote R15, exception returns included, and after no other.
++struct ResetCountingBus : FlatBus {
++    int resets = 0;
++    explicit ResetCountingBus(std::size_t size) : FlatBus(size) {}
++    void prefetch_reset() override { ++resets; }
++};
++
++void expect_resets(armv4t::CPUState& cpu, ResetCountingBus& bus,
++                   const char* what, uint32_t pc, uint32_t word,
++                   int expect) {
++    bus.resets = 0;
++    cpu.R[15] = pc;
++    armv4t::Instr i{};
++    if (cpu.thumb) {
++        i = armv4t::ThumbDecoder::decode(static_cast<uint16_t>(word), pc);
++    } else {
++        i = armv4t::ArmDecoder::decode(word, pc);
++    }
++    armv4t::Interpreter::step(cpu, bus, i);
++    if (bus.resets != expect) {
++        std::printf("FAIL prefetch_reset_on_pc_write: %s reset the buffer "
++                    "%d time(s) (expected %d)\n", what, bus.resets, expect);
++        ++failures;
++    }
++}
++
++void test_prefetch_reset_on_pc_write() {
++    auto cpu = make_cpu();
++    ResetCountingBus bus(64 * 1024);
++    cpu.R[0] = 0x1000;
++    bus.write32(0x1000, 0x200);   // ldr pc, [r0] loads 0x200
++    cpu.R[13] = 0x2000;
++    bus.write32(0x2000, 0x300);   // ldmia sp!, {pc} pops 0x300
++    cpu.R[14] = 0x400;
++    expect_resets(cpu, bus, "mov r1, #5", 0x100, 0xE3A01005u, 0);
++    expect_resets(cpu, bus, "cmp r1, #6", 0x104, 0xE3510006u, 0);
++    expect_resets(cpu, bus, "beq (not taken)", 0x108, 0x0A000000u, 0);
++    expect_resets(cpu, bus, "str r1, [r0, #4]", 0x10C, 0xE5801004u, 0);
++    expect_resets(cpu, bus, "b", 0x110, 0xEA000000u, 1);
++    expect_resets(cpu, bus, "bl", 0x110, 0xEB000000u, 1);
++    expect_resets(cpu, bus, "mov pc, lr", 0x110, 0xE1A0F00Eu, 1);
++    expect_resets(cpu, bus, "ldr pc, [r0]", 0x110, 0xE590F000u, 1);
++    expect_resets(cpu, bus, "ldmia sp!, {pc}", 0x110, 0xE8BD8000u, 1);
++
++    cpu.R[1] = 0x500;             // bx r1: to ARM code at 0x500
++    cpu.R[13] = 0x2000;
++    bus.write32(0x2000, 0x601);   // pop {pc} pops 0x601 (THUMB)
++    cpu.thumb = true;
++    cpu.cpsr.t = true;
++    expect_resets(cpu, bus, "thumb mov r2, #1", 0x120, 0x2201u, 0);
++    expect_resets(cpu, bus, "thumb pop {pc}", 0x120, 0xBD00u, 1);
++    cpu.thumb = true;
++    cpu.cpsr.t = true;
++    expect_resets(cpu, bus, "thumb bx r1", 0x120, 0x4708u, 1);
++
++    cpu.thumb = false;
++    cpu.cpsr.t = false;
++    armv4t::Interpreter::enter_irq(cpu, 0x130);
++    expect_resets(cpu, bus, "movs pc, lr (exception return)", 0x18, 0xE1B0F00Eu, 1);
++}
++
+ }  // namespace
+ 
+ int main() {
+@@ -448,6 +511,7 @@ int main() {
+     test_thumb_bx_to_arm();
+     test_thumb_blt_loop_terminates();
+     test_irq_exception_return_result();
++    test_prefetch_reset_on_pc_write();
+ 
+     if (failures) {
+         std::printf("\n%d failure(s)\n", failures);
+diff --git a/tests/codegen/test_main.cpp b/tests/codegen/test_main.cpp
+index aedde99..7848355 100644
+--- a/tests/codegen/test_main.cpp
++++ b/tests/codegen/test_main.cpp
+@@ -102,6 +102,7 @@ struct FlatBus : armv4t::Bus {
+     int32_t prefetch_stall(int32_t wait, uint32_t pc, bool thumb) override {
+         return gba::waits_prefetch_stall(codegen_test::g_waits, wait, pc, thumb);
+     }
++    void prefetch_reset() override { codegen_test::g_waits.last_prefetched_pc = 0u; }
+ };
+ 
+ // ── CPSR pack / unpack between interpreter-style and recomp-style ──

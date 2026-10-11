@@ -48,17 +48,22 @@ IRQ_RETURN = 0x38       # where the user handler returns: bios.toml seeds it
 SWI_HANDLER = 0x40
 SWI_WAIT = 0x74
 SWI_RETURN = 0x9C
+HANG = 0xA0             # where the unused vectors go: a branch to itself
 
 CODE = {
-    # Exception vectors.
-    0x00: b(0x00, 0x00),                  # reset: b .   (never run: skip_intro)
-    0x04: b(0x04, 0x04),                  # undefined instruction: b .
+    # Exception vectors. The unused ones branch forward to HANG rather than
+    # to themselves: mGBA loads a BIOS image only if each of its first seven
+    # words is a forward branch (GBAIsBIOS, src/gba/gba.c in mGBA 0.10.5),
+    # and the timing repros take their reference values from mGBA running
+    # this image.
+    0x00: b(0x00, HANG),                  # reset (never run: skip_intro)
+    0x04: b(0x04, HANG),                  # undefined instruction
     0x08: b(0x08, SWI_HANDLER),           # SWI
-    0x0C: b(0x0C, 0x0C),                  # prefetch abort: b .
-    0x10: b(0x10, 0x10),                  # data abort: b .
-    0x14: b(0x14, 0x14),                  # reserved: b .
+    0x0C: b(0x0C, HANG),                  # prefetch abort
+    0x10: b(0x10, HANG),                  # data abort
+    0x14: b(0x14, HANG),                  # reserved
     0x18: b(0x18, IRQ_HANDLER),           # IRQ
-    0x1C: b(0x1C, 0x1C),                  # FIQ: b .
+    0x1C: b(0x1C, HANG),                  # FIQ
 
     # IRQ dispatcher (IRQ mode, IRQs masked, lr = interrupted PC + 4). Saves
     # the caller-saved registers, calls the user handler whose address is at
@@ -102,6 +107,8 @@ CODE = {
     0x94: 0xE49D1004,  # ldr r1, [sp], #4
     0x98: 0xE169F001,  # msr spsr_fc, r1
     0x9C: 0xE8FD8003,  # swi_return: ldmfd sp!, {r0, r1, pc}^   return, CPSR = SPSR_svc
+
+    HANG: b(HANG, HANG),                  # hang: b .
 }
 
 

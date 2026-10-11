@@ -2,7 +2,9 @@
 # Generate, recompile, build and run the synthetic repro ROMs in tests/repro/
 # (no Nintendo data inside), and check how each run ends. irqleak1-3 reproduce
 # the IRQ call-return leak that patches/gbarecomp/0003 fixes; overlay1, two
-# code images sharing IWRAM, which 0006's RAM overlay selector handles
+# code images sharing IWRAM, which 0006's RAM overlay selector handles;
+# prefetch1 and irqentry1 time CPU work against mGBA, for the prefetch reset
+# (0011 with patches/arm-recomp-core/0001) and the IRQ entry cycles (0012)
 # (tests/repro/README.md). Needs no game ROM and, by default, no BIOS dump, so
 # CI runs it.
 #
@@ -13,11 +15,12 @@
 #                      gbarecomp's BIOS config as for the game, instead of the
 #                      stand-in BIOS that tests/repro/make_bios.py generates
 #   --frames N         frames per run (default 2000)
-#   --without NAME     A/B build: leave gbarecomp patch NAME (0003, 0006) out,
-#                      and build under build/without-NAME/repro/
-#                      (patches/gbarecomp/README.md). The overlay cases read
-#                      their results through patch 0005's capture: without
-#                      0005 they are skipped, or refused if named
+#   --without NAME     A/B build: leave patch NAME (0003, 0006, 0011, 0012,
+#                      arm-recomp-core/0001) out, and build under
+#                      build/without-NAME/repro/ (patches/gbarecomp/README.md).
+#                      The overlay and timing cases read their results
+#                      through patch 0005's capture: without 0005 they are
+#                      skipped, or refused if named
 #   --expect-failure   require every run to end the way its bug makes it end
 #                      without the patch that fixes it, which --without must
 #                      leave out. irqleak1-3, without 0003: SIGABRT (exit code
@@ -25,11 +28,25 @@
 #                      case's leaked return address. overlay1, without 0006:
 #                      exit 0 under GBARECOMP_STRICT_STATIC=1, with image A's
 #                      result logged for image B; overlay1heal, the same with
-#                      healing on. Without CASE, runs the default cases whose
-#                      patch is left out
-#   CASE               irqleak1, irqleak2, irqleak3, overlay1 (the default:
-#                      these four), or overlay1heal, which runs only when
-#                      named (below)
+#                      healing on. prefetch1, without 0011 and
+#                      arm-recomp-core/0001 (they go together), and
+#                      irqentry1, without 0012: timings other than mGBA's.
+#                      Without CASE, runs the default cases whose patches are
+#                      left out
+#   CASE               irqleak1, irqleak2, irqleak3, overlay1, prefetch1,
+#                      irqentry1 (the default: these six), or overlay1heal,
+#                      which runs only when named (below)
+#
+# prefetch1 and irqentry1 store timer-measured cycle counts in EWRAM
+# (tests/repro/make_rom.py), which gbarecomp's capture (patch 0005) records
+# at every VBlank. Each runs twice: under GBARECOMP_STRICT_STATIC=1 (generated
+# code), and as CASE-interp under GBARECOMP_FORCE_INTERP=1 and
+# MRA_INTERP_BIOS=1 (every instruction, the BIOS's included, stepped by the
+# interpreter). Each run must exit 0 after at least N frames with the done
+# marker set and the values mGBA 0.10.5 gives for the same ROM on the same
+# BIOS image (timing_reference below; the strict run also fully static).
+# With --expect-failure, each run must give another value than mGBA's for
+# each measurement the bug changes.
 #
 # An irqleak run passes when it exits 0 after at least N frames, bridged F
 # (0x08000200, so the leak path ran), interprets at most 10 instructions per
@@ -73,7 +90,7 @@ set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 . "$(dirname "$0")/lib/common.sh"
 
-ALL_CASES="irqleak1 irqleak2 irqleak3 overlay1"
+ALL_CASES="irqleak1 irqleak2 irqleak3 overlay1 prefetch1 irqentry1"
 FRAMES=2000
 EXPECT=pass
 CASES_ARG=""
@@ -87,7 +104,7 @@ while [ $# -gt 0 ]; do
     --without) [ $# -ge 2 ] || die "--without needs a patch name or number"; add_without "$2"; shift ;;
     --without=*) add_without "${1#*=}" ;;
     --expect-failure) EXPECT=failure ;;
-    -h | --help) sed -n '2,71p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,88p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option: $1" ;;
     *) CASES_ARG="$CASES_ARG${CASES_ARG:+ }$1" ;;
   esac
@@ -99,40 +116,51 @@ esac
 [ "$FRAMES" -gt 0 ] || die "--frames needs a positive number"
 select_patch_variant
 
-# case_patch CASE: the number of the gbarecomp patch that fixes CASE's bug.
+# case_patch CASE: the patches that fix CASE's bug, as --without names them.
+# 0011 and arm-recomp-core/0001 are one fix in two repositories.
 case_patch() {
   case "$1" in
     irqleak*) echo 0003 ;;
     overlay1 | overlay1heal) echo 0006 ;;
+    prefetch1) echo "0011 arm-recomp-core/0001" ;;
+    irqentry1) echo 0012 ;;
   esac
 }
-# The numbers of the patches this build leaves out, separated by spaces.
+# The patches this build leaves out, as --without names them, separated by
+# spaces: 0003, arm-recomp-core/0001.
 left_out=" "
-for name in $(without_patch_names); do left_out="$left_out${name%%-*} "; done
+for name in $(without_patch_list); do
+  left_out="$left_out$(patch_label "${name%%/*}" "${name#*/}") "
+done
+# all_left_out PATCHES: every one of PATCHES is left out.
+all_left_out() {
+  local p
+  for p in $1; do
+    case "$left_out" in *" $p "*) ;; *) return 1 ;; esac
+  done
+}
 
 # Validate the cases, and run each one once even if it is named twice (two
 # entries for one case would give CMake two targets with the same name).
-# --expect-failure runs only cases whose patch is left out. Named cases must
-# all be testable; the default list keeps those that are.
+# --expect-failure runs only cases whose patches are left out. Named cases
+# must all be testable; the default list keeps those that are.
 CASES=""
 for c in ${CASES_ARG:-$ALL_CASES}; do
   case "$c" in
-    irqleak1 | irqleak2 | irqleak3 | overlay1 | overlay1heal) ;;
-    *) die "unknown case: $c (irqleak1, irqleak2, irqleak3, overlay1 or overlay1heal)" ;;
+    irqleak1 | irqleak2 | irqleak3 | overlay1 | overlay1heal | prefetch1 | irqentry1) ;;
+    *) die "unknown case: $c (irqleak1, irqleak2, irqleak3, overlay1, overlay1heal, prefetch1 or irqentry1)" ;;
   esac
   if [ "$EXPECT" = failure ]; then
     p=$(case_patch "$c")
-    case "$left_out" in
-      *" $p "*) ;;
-      *)
-        [ -z "$CASES_ARG" ] && continue
-        die "$c reproduces the bug that patch $p fixes: --expect-failure needs --without $p"
-        ;;
-    esac
+    if ! all_left_out "$p"; then
+      [ -z "$CASES_ARG" ] && continue
+      die "$c reproduces the bug that $p fix(es): --expect-failure needs --without for each: $p"
+    fi
   fi
-  # The overlay cases read the program's log through patch 0005's capture.
+  # The overlay and timing cases read their results through patch 0005's
+  # capture.
   case "$c:$left_out" in
-    overlay*:*" 0005 "*)
+    overlay*:*" 0005 "* | prefetch1:*" 0005 "* | irqentry1:*" 0005 "*)
       if [ -z "$CASES_ARG" ]; then
         info "Skipping $c: it reads its results through patch 0005's capture, which --without 0005 leaves out"
         continue
@@ -146,7 +174,7 @@ for c in ${CASES_ARG:-$ALL_CASES}; do
   esac
 done
 [ -n "$CASES" ] ||
-  die "no case to run: --expect-failure needs --without 0003 (irqleak1-3) or --without 0006 (overlay1, which also needs 0005)"
+  die "no case to run: --expect-failure needs --without 0003 (irqleak1-3), --without 0006 (overlay1, which also needs 0005), --without 0011 --without arm-recomp-core/0001 (prefetch1) or --without 0012 (irqentry1)"
 case "$BIOS_DUMP" in
   "" | /*) ;;
   *) BIOS_DUMP="$PWD/$BIOS_DUMP" ;;
@@ -164,6 +192,9 @@ F_PC=0x08000200
 # overlay1's log in EWRAM (tests/repro/make_rom.py, OVERLAY1): the result
 # after image A, the result after image B, completed cycles.
 OVERLAY_MEM="0x02000000:4;0x02000004:4;0x02000008:4"
+# The timing cases' results (make_rom.py, TIMING_RESULTS): three words, then
+# the done marker.
+TIMING_MEM="0x02020000:4;0x02020004:4;0x02020008:4;0x0201FFF0:4"
 # Wall-clock limit per run, in seconds. A fixed run takes about a second.
 RUN_TIMEOUT=300
 # Size limit for every file a run writes, its log included, in 1 KiB blocks
@@ -473,9 +504,116 @@ check_overlay() {
   [ -z "$problems" ] || report_failure "$name" "$problems"
 }
 
+# timing_reference CASE: what mGBA 0.10.5 gives for CASE's three results on
+# this run's BIOS image, in decimal, then '|' and the indices of the results
+# that the bug changes (tests/repro/README.md, "CPU timing against mGBA").
+# prefetch1 runs no BIOS code; irqentry1's IRQ goes through the BIOS's IRQ
+# dispatcher, so its values depend on the image. Nothing for other images.
+timing_reference() {
+  case "$1:$bios_kind:$bios_sha1" in
+    prefetch1:*) echo "1424 1424 892|0 1 2" ;;
+    irqentry1:"stand-in BIOS":*) echo "2596 2748 1|1" ;;
+    irqentry1:*:"$NINTENDO_BIOS_SHA1") echo "2596 2747 1|1" ;;
+  esac
+}
+
+# check_timing RUN CASE strict|interp: run CASE (prefetch1 or irqentry1) as
+# RUN with the capture on, on generated code under GBARECOMP_STRICT_STATIC=1
+# or on the interpreter with the BIOS interpreted too, and compare its
+# results with mGBA's.
+check_timing() {
+  local name=$1 c=$2 backend=$3 ref want changed frames coverage capture
+  local row got="" marker="?" i v w problems=""
+  ref=$(timing_reference "$c")
+  if [ "$backend" = strict ]; then
+    run_case "$name" "$c" "$FRAMES" GBARECOMP_STRICT_STATIC=1 \
+      GBARECOMP_CAPTURE=capture.tsv GBARECOMP_CAPTURE_MEM="$TIMING_MEM" \
+      GBARECOMP_CAPTURE_LINE_STATE=0
+  else
+    run_case "$name" "$c" "$FRAMES" GBARECOMP_FORCE_INTERP=1 MRA_INTERP_BIOS=1 \
+      GBARECOMP_CAPTURE=capture.tsv GBARECOMP_CAPTURE_MEM="$TIMING_MEM" \
+      GBARECOMP_CAPTURE_LINE_STATE=0
+  fi
+  capture="$run_dir/capture.tsv"
+  frames=$(sed -nE 's/.*ppu_frames=([0-9]+).*/\1/p' "$log" | tail -n 1)
+  coverage=$(sed -nE 's/.*(self_heal_coverage=[A-Z_]+ dispatch_misses=[0-9]+ interpreted_insns=[0-9]+).*/\1/p' "$log" | tail -n 1)
+  if [ -s "$capture" ]; then
+    # The last record's three results and the marker, as hex words.
+    row=$(awk -F '\t' '
+      NR == 1 {
+        for (i = 1; i <= NF; i++) {
+          if ($i == "mem_02020000") r0 = i
+          if ($i == "mem_02020004") r1 = i
+          if ($i == "mem_02020008") r2 = i
+          if ($i == "mem_0201FFF0") m = i
+        }
+        next
+      }
+      r0 && r1 && r2 && m { last = $r0 " " $r1 " " $r2 " " $m }
+      END { print last }' "$capture" 2> /dev/null || true)
+    if [ -n "$row" ]; then
+      # shellcheck disable=SC2086  # four words, split on purpose
+      set -- $row
+      marker=$4
+      for w in "$1" "$2" "$3"; do
+        case "$w" in
+          [0-9A-Fa-f]*) got="$got${got:+ }$((16#$w))" ;;
+          *) got="$got${got:+ }?" ;;
+        esac
+      done
+    fi
+  fi
+  printf '  exit=%s frames=%s %s results=%s marker=%s mGBA=%s\n' "$rc" "${frames:-?}" \
+    "${coverage:-no coverage banner}" "$(printf '%s' "${got:-?}" | tr ' ' ',')" "$marker" \
+    "$(printf '%s' "${ref%%|*}" | tr ' ' ',')"
+
+  [ "$rc" = 0 ] || problems="$problems $(describe_exit "$rc");"
+  if [ -z "$frames" ] || [ "$frames" -lt "$FRAMES" ]; then
+    problems="$problems stopped at frame ${frames:-?};"
+  fi
+  if [ "$backend" = strict ]; then
+    grep -q '^strict_static=ENABLED' "$log" || problems="$problems not run strict-static;"
+    case "$coverage" in
+      'self_heal_coverage=FULLY_STATIC dispatch_misses=0 interpreted_insns=0') ;;
+      *) problems="$problems not fully static (${coverage:-no coverage banner});" ;;
+    esac
+  fi
+  if [ -z "$ref" ]; then
+    problems="$problems no mGBA reference values for this BIOS image ($bios_sha1);"
+  elif [ ! -s "$capture" ]; then
+    problems="$problems no capture file (the timing cases read their results through patch 0005's capture);"
+  elif [ "$marker" != 0000600D ]; then
+    problems="$problems the program did not finish (marker $marker);"
+  else
+    want=${ref%%|*}
+    changed=" ${ref#*|} "
+    i=0
+    for w in $want; do
+      v=$(printf '%s\n' "$got" | awk -v k=$((i + 1)) '{ print $k }')
+      if [ "$EXPECT" = failure ]; then
+        case "$changed" in
+          *" $i "*) [ "$v" != "$w" ] || problems="$problems result $i is $v, mGBA's value;" ;;
+        esac
+      else
+        [ "$v" = "$w" ] || problems="$problems result $i is $v, not mGBA's $w;"
+      fi
+      i=$((i + 1))
+    done
+  fi
+  # The interpreter run sets MRA_INTERP_BIOS, which src/main.cpp reports.
+  if [ "$EXPECT" = pass ] && [ "$backend" = strict ]; then
+    problems="$problems$(main_cpp_problems)"
+  fi
+  [ -z "$problems" ] || report_failure "$name" "$problems"
+}
+
 for c in $CASES; do
   case "$c" in
     irqleak*) check_irqleak "$c" ;;
+    prefetch1 | irqentry1)
+      check_timing "$c" "$c" strict
+      check_timing "$c-interp" "$c" interp
+      ;;
     overlay1 | overlay1heal)
       if [ "$EXPECT" = failure ]; then
         # Without patch 0006 there is no selector: image A's body (overlay1)
