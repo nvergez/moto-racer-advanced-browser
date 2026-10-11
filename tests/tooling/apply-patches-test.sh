@@ -13,7 +13,10 @@
 # history and is skipped in a shallow clone. Later sections add 0003 (lines 5
 # and 6), refresh 0001 under 0002, leave out 0001 that 0002 needs, hold the
 # build lock from another process, record the toy's pin as a gitlink and give
-# the toy a nested repository.
+# the toy another nested repository. The toy's external/arm-recomp-core is a
+# nested repository, as in gbarecomp; the last section gives it a series of
+# its own in patches/arm-recomp-core/, two stacked patches again, and runs
+# the same checks on it.
 # The checks below pass helper functions to check(), which shellcheck cannot
 # see being called.
 # shellcheck disable=SC2317
@@ -100,27 +103,40 @@ has_line() { grep -qx -- "$2" "$1"; }
 lacks_line() { ! grep -qx -- "$2" "$1"; }
 
 # make_root DIR: a repository root with this repository's scripts and a toy
-# gbarecomp/ at its "pin". The toy has what require_submodule looks for, and
-# a CMake project whose build copies f.txt, so that the test can see which
-# tree each build directory was built from.
+# gbarecomp/ at its "pin". The toy has what require_submodule looks for, in
+# a nested repository at external/arm-recomp-core (with n.txt, which the
+# nested series edits), and a CMake project whose build copies f.txt and
+# n.txt, so that the test can see which trees each build directory was built
+# from.
 make_root() {
   local root=$1 g=$1/gbarecomp i
-  mkdir -p "$root/patches/gbarecomp" "$g/external/arm-recomp-core/cmake"
+  local core=$g/external/arm-recomp-core
+  mkdir -p "$root/patches/gbarecomp" "$core/cmake"
   cp -R "$repo/scripts" "$root/scripts"
-  : > "$g/external/arm-recomp-core/cmake/ArmRecompCore.cmake"
+  : > "$core/cmake/ArmRecompCore.cmake"
+  for i in $(seq 1 20); do echo "core $i"; done > "$core/n.txt"
+  git -C "$core" -c init.defaultBranch=main init -q
+  git -C "$core" add -A
+  git -C "$core" commit -q -m core
   for i in $(seq 1 20); do echo "line $i"; done > "$g/f.txt"
   printf 'build/\n' > "$g/.gitignore"
   cat > "$g/CMakeLists.txt" << 'EOF'
 cmake_minimum_required(VERSION 3.20)
 project(toy NONE)
 add_custom_target(copy_f ALL
-  COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/f.txt ${CMAKE_BINARY_DIR}/f.txt)
+  COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/f.txt ${CMAKE_BINARY_DIR}/f.txt
+  COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/external/arm-recomp-core/n.txt
+          ${CMAKE_BINARY_DIR}/n.txt)
 enable_testing()
 add_test(NAME toy_built
   COMMAND ${CMAKE_COMMAND} -E compare_files ${CMAKE_SOURCE_DIR}/f.txt ${CMAKE_BINARY_DIR}/f.txt)
+add_test(NAME toy_built_core
+  COMMAND ${CMAKE_COMMAND} -E compare_files ${CMAKE_SOURCE_DIR}/external/arm-recomp-core/n.txt
+          ${CMAKE_BINARY_DIR}/n.txt)
 EOF
   git -C "$g" -c init.defaultBranch=main init -q
-  git -C "$g" add -A
+  # (a warning about the embedded repository, which becomes a gitlink)
+  git -C "$g" add -A 2> /dev/null
   git -C "$g" commit -q -m pin
 }
 
@@ -505,6 +521,163 @@ check "... with the same message" said "nested submodules of gbarecomp are not a
 run_fails "and so does a normal run" "$apply"
 git -C "$nest" checkout -q main
 run_ok "with it back, the series is in place" "$apply" --check
+
+# --- The nested series (patches/arm-recomp-core) ----------------------------
+
+# The toy's external/arm-recomp-core gets a series of its own, as gbarecomp
+# has: 0001 edits line 10 of n.txt, 0002 (written on top of 0001) line 12
+# and adds sub2/new.txt. gbarecomp's series (0001, 0002, 0003-d) stays.
+core=$g/external/arm-recomp-core
+np=$root/patches/arm-recomp-core
+mkdir -p "$np"
+set_line "$core/n.txt" 10 "core 10 NA"
+{ printf 'Toy nested patch A: line 10.\n\n'; git -C "$core" diff; } > "$np/0001-na.patch"
+git -C "$core" add n.txt
+set_line "$core/n.txt" 12 "core 12 NB"
+mkdir -p "$core/sub2"
+echo "added by NB" > "$core/sub2/new.txt"
+git -C "$core" add -N sub2/new.txt
+{ printf 'Toy nested patch B: line 12 and sub2/new.txt, on top of A.\n\n'; git -C "$core" diff; } > "$np/0002-nb.patch"
+git -C "$core" reset -q --hard
+rm -rf "$core/sub2"
+has_na() { has_line "$core/n.txt" "core 10 NA"; }
+has_nb() { has_line "$core/n.txt" "core 12 NB" && [ -f "$core/sub2/new.txt" ]; }
+lacks_nb() { lacks_line "$core/n.txt" "core 12 NB" && [ ! -e "$core/sub2" ]; }
+core_clean() { [ -z "$(git -C "$core" status --porcelain)" ]; }
+gbarecomp_full() { has_ab && has_line "$g/f.txt" "line 15 D"; }
+both_full() { has_na && has_nb && gbarecomp_full; }
+
+run_fails "--check with the nested series not applied fails" "$apply" --check
+check "... says so for the nested tree" said "NO: gbarecomp/external/arm-recomp-core is the pin, not the pin plus 0001, 0002"
+check "... and OK for gbarecomp" said "^OK: gbarecomp is the pin plus 0001, 0002, 0003"
+run_ok "a normal run applies the nested series" "$apply"
+check "... both nested patches, on top of gbarecomp's series" both_full
+check "... and says which series it is" said "arm-recomp-core [0-9a-f]*: the pin plus 0001, 0002"
+check "... with gbarecomp's series in place" said "(up to date)"
+run_ok "--check passes with both series applied" "$apply" --check
+check "... and says OK for each" said_all "^OK: gbarecomp is" "^OK: gbarecomp/external/arm-recomp-core is the pin plus 0001, 0002"
+touch -t 200001010000 "$core/n.txt" "$core/sub2/new.txt"
+touch -t 200101010000 "$work/ref"
+run_ok "re-applies" "$apply"
+check "... writing nothing" not_newer "$core/n.txt" "$core/sub2/new.txt"
+run_ok "--reverse restores both pins" "$apply" --reverse
+check "... the nested tree too, sub2/ included" core_clean
+check "... and gbarecomp's" clean_status
+run_ok "applied again" "$apply"
+check "... both series" both_full
+
+run_ok "--without arm-recomp-core/0002" "$apply" --without arm-recomp-core/0002
+na_only() { has_na && lacks_nb && gbarecomp_full; }
+check "... leaves out the nested 0002 only" na_only
+check "... and says so" said "left out .*0002-nb.patch"
+run_ok "--check --without arm-recomp-core/0002 passes" "$apply" --check --without arm-recomp-core/0002
+run_ok "--without patches/arm-recomp-core/0002-nb.patch names the same patch" \
+  "$apply" --check --without "$np/0002-nb.patch"
+run_ok "--without 0003 is gbarecomp's 0003" "$apply" --without 0003
+d_out_core_full() { has_ab && lacks_line "$g/f.txt" "line 15 D" && has_na && has_nb; }
+check "... and leaves the nested series whole" d_out_core_full
+run_fails "an unknown nested patch stops" "$apply" --without arm-recomp-core/0009
+check "... with a message" said "no patch in patches/arm-recomp-core matches 'arm-recomp-core/0009'"
+run_fails "an unqualified name of a nested patch stops" "$apply" --without 0002-nb
+check "... and says how to name it" said "qualify the name: arm-recomp-core/0002-nb"
+check "... before writing anything" d_out_core_full
+run_ok "a normal run restores both" "$apply"
+check "... series" both_full
+rm -rf "$root/build"
+run_ok "--without arm-recomp-core/0002 with no stamps" "$apply" --without arm-recomp-core/0002
+rm -rf "$root/build"
+run_ok "with the stamps deleted, a leading part of the nested series is recognized" "$apply"
+check "... and it says where it came from" said "arm-recomp-core: the pin plus 0001, 0002 (was the pin plus 0001)"
+
+# Hand edits in the nested tree.
+set_line "$core/n.txt" 5 "core 5 by hand"
+cp "$core/n.txt" "$work/core-edited"
+run_fails "a hand edit in the nested tree stops the script" "$apply"
+check "... naming the nested tree and the file" \
+  said_all "gbarecomp/external/arm-recomp-core has changes that no known patch series explains" "n.txt"
+check "... and keeps the edit" cmp -s "$core/n.txt" "$work/core-edited"
+run_fails "--check reports it" "$apply" --check
+if command -v cmake > /dev/null 2>&1; then
+  run_fails "a build stops too" "$root/scripts/test-engine.sh"
+  check "... and keeps the edit" cmp -s "$core/n.txt" "$work/core-edited"
+fi
+run_ok "--diff" "$apply" --diff
+nested_diff() { said "^+++ b/external/arm-recomp-core/n.txt" && said "^+core 5 by hand" && ! said "core 12 NB"; }
+check "--diff shows the nested edit only, with its path in gbarecomp" nested_diff
+discard_all() { "$apply" --diff | git -C "$g" apply -R; }
+run_ok "the --diff output undoes it with git -C gbarecomp apply -R" discard_all
+check "... which leaves exactly the series" both_full
+run_ok "... as --check says" "$apply" --check
+
+# --write-patch in the nested series.
+set_line "$core/n.txt" 5 "core 5 NC"
+run_ok "--write-patch patches/arm-recomp-core/0003-nc.patch" \
+  "$apply" --write-patch "$np/0003-nc.patch"
+nested_paths() { file_matches "$np/0003-nc.patch" "^diff --git a/n.txt b/n.txt" "^+core 5 NC"; }
+check "... with paths relative to the nested repository" nested_paths
+check "... and says the tree is now the series" said "is now the pin plus 0001, 0002, 0003"
+run_ok "the nested series with 0003 is in place" "$apply" --check
+gbarecomp_patches_unchanged() { [ "$(ls "$root/patches/gbarecomp")" = "$(printf '0001-a.patch\n0002-b.patch\n0003-d.patch')" ]; }
+check "gbarecomp's series was not touched" gbarecomp_patches_unchanged
+set_line "$core/n.txt" 18 "core 18 by hand"
+run_ok "--write-patch refreshes the nested 0001 under 0002 and 0003" \
+  in_dir "$root" "$apply" --write-patch patches/arm-recomp-core/0001-na.patch
+check "... taking them out of the tree first" said "(0002, 0003 taken out of the tree first)"
+check "... and puts the edit in 0001" file_matches "$np/0001-na.patch" "^+core 10 NA" "^+core 18 by hand"
+run_ok "... and the series gives the tree" "$apply" --check
+set_line "$core/n.txt" 18 "core 18"
+run_ok "the edit undone, 0001 refreshed again" "$apply" --write-patch "$np/0001-na.patch"
+run_fails "--write-patch with --series naming the other series stops" \
+  "$apply" --write-patch "$np/0003-nc.patch" --series gbarecomp
+check "... with a message" said "is a patch of the arm-recomp-core series, not of gbarecomp"
+set_line "$core/n.txt" 7 "core 7 by hand"
+run_ok "--write-patch FILE --series arm-recomp-core, for a FILE elsewhere" \
+  "$apply" --write-patch "$work/core-extra.patch" --series arm-recomp-core
+check "... writes the nested change" file_matches "$work/core-extra.patch" "^diff --git a/n.txt b/n.txt" "^+core 7 by hand"
+set_line "$core/n.txt" 7 "core 7"
+run_ok "with the edit undone, the series is in place" "$apply" --check
+
+# A/B builds that leave a nested patch out.
+if command -v cmake > /dev/null 2>&1; then
+  engine=$root/scripts/test-engine.sh
+  run_ok "A/B build: scripts/test-engine.sh --without arm-recomp-core/0003" "$engine" --without arm-recomp-core/0003
+  ab=$root/build/without-arm-recomp-core-0003/gbarecomp
+  ab_without_nc() { has_line "$ab/n.txt" "core 12 NB" && lacks_line "$ab/n.txt" "core 5 NC"; }
+  check "... builds into build/without-arm-recomp-core-0003, without the nested 0003" ab_without_nc
+  check "... and says what it leaves in gbarecomp/" said "gbarecomp/ is left without arm-recomp-core/0003"
+  run_ok "an A/B build without patches of both series" "$engine" --without 0003 --without arm-recomp-core/0003
+  check "... goes to build/without-0003-arm-recomp-core-0003" test -f "$root/build/without-0003-arm-recomp-core-0003/gbarecomp/n.txt"
+  check "... and names both" said "gbarecomp/ is left without 0003, arm-recomp-core/0003"
+  run_ok "the next normal build" "$engine"
+  check "... restores both series" has_line "$core/n.txt" "core 5 NC"
+  check "... and builds from them" has_line "$root/build/gbarecomp/n.txt" "core 5 NC"
+else
+  skip "A/B builds without a nested patch" "cmake not found"
+fi
+
+# The nested repository off its pinned commit, or recorded at another one.
+# The commit holds only moved.txt: the series' changes stay in the working
+# tree, outside the nested repository's index.
+echo "moved" > "$core/moved.txt"
+git -C "$core" add moved.txt
+git -C "$core" commit -q -m moved
+run_fails "a nested repository moved to another commit stops gbarecomp's series" "$apply"
+check "... with a message" said "nested submodules of gbarecomp are not at their pinned commit"
+run_fails "--check reports it" "$apply" --check
+git -C "$core" reset -q HEAD~1
+rm "$core/moved.txt"
+run_ok "back at its commit, the series are in place" "$apply" --check
+core_pin=$(git -C "$core" rev-parse HEAD)
+git -C "$g" update-index --cacheinfo "160000,$(git -C "$g" rev-parse HEAD),external/arm-recomp-core"
+run_fails "--check fails when gbarecomp's index records another commit for it" "$apply" --check
+check "... and says why" said "gbarecomp/external/arm-recomp-core has .* checked out, but gbarecomp records"
+git -C "$g" update-index --cacheinfo "160000,$core_pin,external/arm-recomp-core"
+run_ok "with the recorded commit back, --check passes" "$apply" --check
+run_ok "--reverse --series arm-recomp-core restores the nested pin only" "$apply" --reverse --series arm-recomp-core
+nested_only_reversed() { core_clean && gbarecomp_full; }
+check "... and leaves gbarecomp's series" nested_only_reversed
+run_ok "and a normal run applies it again" "$apply"
+check "... all of it" has_line "$core/n.txt" "core 5 NC"
 
 echo "1..$count"
 if [ "$failures" != 0 ]; then
