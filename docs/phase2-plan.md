@@ -433,7 +433,7 @@ Deliverable: `docs/research/phase2-race-lockstep.md` *(new)* with root cause and
 
 Acceptance: if fixed, layer 1 is exact on `boot_to_race` race frames 3290-4400 and `full_race_cross` gives mGBA's finishing position and time. Otherwise, the document explains the difference with evidence, and the owner has the decision.
 
-Result: [phase2-race-lockstep.md](research/phase2-race-lockstep.md). Two gbarecomp timing differences from mGBA (the prefetch position kept across branches, no cycles for IRQ entry) cause the loss of lockstep; fixed in a scratch build, `full_race_cross` plays as in mGBA and the cup gives mGBA's positions and points, with one lap time of race 3 different. The fix needs a change in the nested arm-recomp-core submodule, which the patch tooling cannot carry yet, and criterion 3 on the cup needs an owner decision (section 8 there). Tooling: `--trace-pc-cycles` in the harness and `tools/difftest/timeline.py`.
+Result: [phase2-race-lockstep.md](research/phase2-race-lockstep.md). Two gbarecomp timing differences from mGBA (the prefetch position kept across branches, no cycles for IRQ entry) cause the loss of lockstep; fixed in a scratch build, `full_race_cross` plays as in mGBA and the cup gives mGBA's positions and points, with one lap time of race 3 different. Most of the fix can be ordinary gbarecomp patches, but the prefetch reset in generated code needs a change in the nested arm-recomp-core submodule, which the patch tooling cannot carry yet (owner decision 9), and criterion 3 on the cup needs an owner decision (decision 4; section 8 there). Follow-up: proposed P2-21, the timing patch with synthetic repros, which waits for decision 9. Tooling: `--trace-pc-cycles` in the harness and `tools/difftest/timeline.py`.
 
 ### P2-14. OBJ cycle budget (fidelity switch)
 
@@ -626,11 +626,12 @@ The critical path is PR #5 (merged) → P2-00 → P2-03 → P2-02 → P2-05 → 
 1. Accept, amend or reject [ADR 0001](adr/0001-port-via-static-recompilation.md).
 2. Which upstream candidates to file, and when (diagnosis §9). The patch headers will be ready.
 3. The cup route's starting state (P2-04): play from a fresh save, or a script-generated unlock save.
-4. Exit criterion 3, if P2-13 finds a timing difference neither engine is known to get right.
+4. Exit criterion 3, if P2-13 finds a timing difference neither engine is known to get right. P2-13 found one, IRQ and DMA latency; the options are in [phase2-race-lockstep.md](research/phase2-race-lockstep.md) section 8, point 2.
 5. The bridge frame-boundary patch (P2-16).
 6. Later, with Phase 4: whether players get the OBJ cycle budget (P2-14).
 7. Optional: a small test ROM on the owner's hardware to settle blend rounding, semi-transparent OBJ brightness and the OBJ budget's edge cases (diagnosis, open question 5).
 8. Before Phase 3, not part of Phase 2: whether any browser bundle is published (ADR 0001 decision 4, "Out of scope").
+9. How to carry a change to gbarecomp's nested submodule `external/arm-recomp-core`, which `scripts/apply-patches.sh` refuses to touch: extend the patch tooling with a series for it, or another way. The proposed P2-21 timing patch needs one such change, the prefetch reset after a static branch in generated code ([phase2-race-lockstep.md](research/phase2-race-lockstep.md) section 8, point 1).
 
 ## Out of scope for Phase 2
 

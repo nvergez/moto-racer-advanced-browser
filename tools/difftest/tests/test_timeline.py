@@ -55,6 +55,12 @@ def loop(body, times):
     return [ins for _ in range(times) for ins in body]
 
 
+def probe(ctx, clk, cost, next_pc, kind="tick"):
+    """One clock-probe line, as gbarecomp's cyc_probe prints it."""
+    return "[cycprobe] %-12s [%s] +%d  clk=%d->%d  pc=%08x cpsr=0000001f\n" % (
+        kind, ctx, cost, clk, clk + cost, next_pc)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -78,9 +84,62 @@ class TestReading(Base):
     def test_reconstructs_irq_entry(self):
         prog = [(0x08000000, 4), (0x08000004, 4)] + IRQ + [(0x08000008, 4)]
         path = self.write("gb.log", gb_text(run(prog)))
-        stream, other = timeline.read_gbarecomp(path)
+        stream, skipped = timeline.read_gbarecomp(path)
         self.assertEqual([pc for pc, _ in stream], [pc for pc, _ in prog])
-        self.assertEqual(other, 0)
+        self.assertEqual(skipped, {"halted": 0, "generated": 0})
+
+    def test_swi_entry_and_bridge_are_instructions(self):
+        # BIOS reference: the SWI at 0x08000004 is ticked by runtime_swi as
+        # [gen] with the PC already at the vector, then the bridge steps the
+        # vector's branch to 0x140 and the interpreter goes on.
+        m_prog = [(0x08000000, 4), (0x08000004, 4), (0x08, 3), (0x140, 4), (0x144, 1)]
+        g_text = (probe("finterp", 999, 1, 0x08000000) + probe("finterp", 1000, 4, 0x08000004)
+                  + probe("gen", 1004, 4, 0x08) + probe("bridge", 1008, 3, 0x140)
+                  + probe("finterp", 1011, 4, 0x144) + probe("finterp", 1015, 1, 0x148))
+        g = self.write("gb.log", g_text)
+        stream, skipped = timeline.read_gbarecomp(g)
+        self.assertEqual(stream, run(m_prog))
+        self.assertEqual(skipped, {"halted": 0, "generated": 0})
+        m = self.write("pctrace.tsv", mgba_text(run(m_prog)))
+        out = io.StringIO()
+        self.assertEqual(timeline.main([m, g], out=out), 0)
+        self.assertNotIn("warning", out.getvalue())
+        self.assertIn("at the last matched instruction: +0", out.getvalue())
+
+    def test_generated_code_warns(self):
+        g_text = (probe("finterp", 999, 1, 0x08000000) + probe("gen", 1000, 12, 0x08000010)
+                  + probe("gen", 1012, 6, 0x08000020) + probe("finterp", 1018, 1, 0x08000024))
+        g = self.write("gb.log", g_text)
+        _, skipped = timeline.read_gbarecomp(g)
+        self.assertEqual(skipped, {"halted": 0, "generated": 2})
+        m = self.write("pctrace.tsv", mgba_text(run([(0x08000000, 12), (0x08000010, 6), (0x08000020, 1)])))
+        out = io.StringIO()
+        timeline.main([m, g], out=out)
+        self.assertIn("warning: 2 gbarecomp tick lines come from generated code", out.getvalue())
+
+    def test_halt_idle_ticks_are_cycles(self):
+        # The store to HALTCNT at 0x344 halts the CPU: the run loop then ticks
+        # [gen] chunks with the PC left at 0x348, and mGBA logs nothing until
+        # the IRQ wakes the CPU.
+        m_prog = [(0x340, 1), (0x344, 500)] + IRQ + [(0x348, 3), (0x34C, 1)]
+        g_text = (probe("finterp", 999, 1, 0x340) + probe("finterp", 1000, 1, 0x344)
+                  + probe("finterp", 1001, 2, 0x348) + probe("gen", 1003, 300, 0x348)
+                  + probe("gen", 1303, 191, 0x348) + probe("gen", 1494, 7, 0x348, kind="irq_wake"))
+        clk = 1501
+        for pc, cost in IRQ:
+            g_text += probe("finterp", clk, cost, {0x18: 0x128, 0x13C: 0x348}.get(pc, pc + 4))
+            clk += cost
+        g_text += probe("finterp", clk, 3, 0x34C) + probe("finterp", clk + 3, 1, 0x350)
+        g = self.write("gb.log", g_text)
+        stream, skipped = timeline.read_gbarecomp(g)
+        self.assertEqual(skipped, {"halted": 2, "generated": 0})
+        self.assertEqual(stream, run(m_prog))
+        m = self.write("pctrace.tsv", mgba_text(run(m_prog)))
+        out = io.StringIO()
+        self.assertEqual(timeline.main([m, g], out=out), 0)
+        self.assertNotIn("warning", out.getvalue())
+        self.assertIn("2 idle ticks while halted", out.getvalue())
+        self.assertIn("at the last matched instruction: +0", out.getvalue())
 
     def test_needs_cycles_column(self):
         m = self.write("pctrace.tsv", "frame\tvcount\tpc\tmode\topcode\n2\t160\t08000000\tA\tE1A00000\n")
@@ -130,6 +189,34 @@ class TestAlign(Base):
         self.assertEqual(status, 0)
         self.assertIn("by skipped loop iterations: +16 (1)", out)
         self.assertIn("changed by instruction costs: +0", out)
+
+    def test_cannot_realign(self):
+        m_prog = [(0x08000000 + 4 * k, 1) for k in range(20)]
+        g_prog = [(0x08000000, 1)] + [(0x08100000 + 4 * k, 1) for k in range(19)]
+        status, out = self.compare(m_prog, g_prog)
+        self.assertEqual(status, 1)
+        self.assertIn("cannot realign at mGBA main-line instruction 1 (pc 08000004)", out)
+        self.assertIn("matched 1", out)
+
+    def test_nested_irq(self):
+        inner = [(0x18, 3), (0x128, 7), (0x12C, 1), (0x130, 1), (0x134, 5), (0x13C, 4)]
+        outer = [(0x18, 3), (0x128, 7), (0x12C, 1), (0x130, 1), (0x134, 5)] + inner + [(0x138, 7), (0x13C, 4)]
+        prog = [(0x08000000, 4), (0x08000004, 4)] + outer + [(0x08000008, 4)]
+        main, irqs = timeline.split(run(prog))
+        self.assertEqual([pc for pc, _ in main], [0x08000000, 0x08000004, 0x08000008])
+        self.assertEqual([(at, before[0]) for at, _, before in irqs], [(2, 0x08000004), (2, 0x134)])
+
+    def test_pc_max_warning(self):
+        prog = loop([(0x08000000, 4), (0x08000004, 4)], 5)
+        old = timeline.HARNESS_PC_MAX
+        timeline.HARNESS_PC_MAX = len(prog)
+        try:
+            status, out = self.compare(prog, prog)
+        finally:
+            timeline.HARNESS_PC_MAX = old
+        self.assertEqual(status, 0)
+        self.assertIn("the harness's default --pc-max: it was probably cut short", out)
+        self.assertIn("last clock: mGBA 1036, gbarecomp 1036", out)
 
 
 if __name__ == "__main__":

@@ -23,8 +23,19 @@ a line that branches to 0x128 when the PC before it was not 0x18 is the BIOS
 IRQ vector's "b 0x128" (retail BIOS). Lines of other kinds (irq_wake,
 dma_steal, resync) charge cycles between instructions.
 
+Which "tick" lines are instructions (gbarecomp 5e89943): the interpreter's
+steps ([finterp], runtime_arm_default_aborts.cpp:839, and [bridge], the
+BIOS stepped in a bridge, :599), and a SWI, which runtime_swi ticks as [gen]
+after setting the PC to the vector 0x08 (runtime_arm.cpp:1386, :1396). A
+[gen] tick that leaves the PC where it was is the run loop's idle pump while
+the CPU is halted (runtime.cpp:2079): it is read as cycles between
+instructions, as mGBA logs no instruction while halted. Any other [gen] tick
+comes from generated code, which does not keep the PC per instruction: the
+tool warns, and the PCs rebuilt around it are unreliable.
+
 Each stream is split into main-line code and IRQ segments (from the vector
-0x18 to the instruction after the retail BIOS's return at 0x13C). The
+0x18 to the instruction after the retail BIOS's return at 0x13C; an IRQ taken
+inside a handler opens a nested segment, closed by its own 0x13C). The
 main-line instructions are matched one to one (a busy-wait loop that runs a
 different number of times is skipped over by looking ahead for the next 8
 equal PCs), and every change of the clock difference (gbarecomp - mGBA) at a
@@ -47,17 +58,26 @@ usage: timeline.py MGBA_PCTRACE GB_LOG [--line0 CLK] [--watch PC,...] [--top N]
                 instruction is at one of these PCs (hex, comma-separated)
   --top N       instructions listed by cost difference (default 20)
 
-Exit 0, or 2 on unreadable input. Evidence it produced: docs/research/
-phase2-race-lockstep.md.
+The last clock of each stream is printed: when one stream ends well before
+the other, check that its window covered the same span. The harness caps
+pctrace.tsv at --pc-max lines (default 5,000,000) without saying so; an mGBA
+stream of exactly that length gets a warning.
+
+Exit 0; 1 when the main lines cannot be realigned (the figures printed then
+cover only the instructions matched before that point); 2 on unreadable
+input. Evidence it produced: docs/research/phase2-race-lockstep.md.
 """
 import argparse
 import re
 import sys
 from collections import Counter, defaultdict
 
+SWI_VECTOR = 0x08
 IRQ_VECTOR = 0x18
 BIOS_IRQ_BRANCH_TARGET = 0x128
 BIOS_IRQ_RETURN = 0x13C
+INTERPRETER_CONTEXTS = ("finterp", "bridge")
+HARNESS_PC_MAX = 5000000
 LINE_CYCLES = 1232
 VISIBLE_LINES = 160
 LINES_PER_FRAME = 228
@@ -88,10 +108,11 @@ def read_mgba(path):
 
 
 def read_gbarecomp(path):
-    """[(pc, clock)] reconstructed from gbarecomp's clock-probe lines, and the
-    number of tick lines that did not come from the interpreter."""
+    """[(pc, clock)] reconstructed from gbarecomp's clock-probe lines, and
+    counts of the tick lines that are not instructions: {"halted": idle ticks
+    while the CPU is halted, "generated": ticks of generated code}."""
     out = []
-    other_ctx = 0
+    skipped = {"halted": 0, "generated": 0}
     prev_next = None
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
@@ -102,28 +123,39 @@ def read_gbarecomp(path):
             next_pc = int(next_pc, 16)
             if kind != "tick":
                 continue
-            if ctx != "finterp":
-                other_ctx += 1
+            if ctx not in INTERPRETER_CONTEXTS and not (ctx == "gen" and next_pc == SWI_VECTOR):
+                if next_pc == prev_next:
+                    skipped["halted"] += 1
+                    continue
+                skipped["generated"] += 1
             if prev_next is not None:
                 pc = prev_next
                 if next_pc == BIOS_IRQ_BRANCH_TARGET and prev_next != IRQ_VECTOR:
                     pc = IRQ_VECTOR
                 out.append((pc, int(before)))
             prev_next = next_pc
-    return out, other_ctx
+    return out, skipped
 
 
 def split(stream):
-    """Main-line instructions [(pc, clock)] and IRQs [(main index taken before, entry clock, instruction before)]."""
+    """Main-line instructions [(pc, clock)] and IRQs [(main index taken before,
+    entry clock, instruction before)]. An IRQ taken inside a handler is listed
+    too, at the same main index; its segment nests in the outer one."""
     main, irqs = [], []
     k, n = 0, len(stream)
     while k < n:
         if stream[k][0] == IRQ_VECTOR:
-            before = stream[k - 1] if k else None
-            irqs.append((len(main), stream[k][1], before))
-            while k < n and stream[k][0] != BIOS_IRQ_RETURN:
+            depth = 0
+            while k < n:
+                pc = stream[k][0]
+                if pc == IRQ_VECTOR:
+                    irqs.append((len(main), stream[k][1], stream[k - 1] if k else None))
+                    depth += 1
+                elif pc == BIOS_IRQ_RETURN:
+                    depth -= 1
                 k += 1
-            k += 1
+                if depth == 0:
+                    break
             continue
         main.append(stream[k])
         k += 1
@@ -224,20 +256,26 @@ def main(argv, out=sys.stdout):
     try:
         watch = {int(x, 16) for x in args.watch.split(",") if x}
         m_stream = read_mgba(args.mgba)
-        g_stream, other = read_gbarecomp(args.gbarecomp)
+        g_stream, skipped = read_gbarecomp(args.gbarecomp)
     except (OSError, InputError, ValueError) as e:
         print("timeline.py: %s" % e, file=sys.stderr)
         return 2
     if not m_stream or not g_stream:
         print("timeline.py: an input has no instructions", file=sys.stderr)
         return 2
-    if other:
-        print("warning: %d gbarecomp lines were not stepped by the interpreter; their PCs are unreliable "
-              "(run with GBARECOMP_FORCE_INTERP=1 MRA_INTERP_BIOS=1)" % other, file=out)
+    if skipped["generated"]:
+        print("warning: %d gbarecomp tick lines come from generated code, not the interpreter; the PCs rebuilt "
+              "around them are unreliable (run with GBARECOMP_FORCE_INTERP=1 MRA_INTERP_BIOS=1)"
+              % skipped["generated"], file=out)
+    if len(m_stream) == HARNESS_PC_MAX:
+        print("warning: the mGBA trace has %d instructions, the harness's default --pc-max: it was probably "
+              "cut short (raise --pc-max or narrow --step-frames)" % HARNESS_PC_MAX, file=out)
     r = align(m_stream, g_stream, watch, out)
-    print("instructions: mGBA %d (%d main-line, %d IRQs), gbarecomp %d (%d main-line, %d IRQs); matched %d"
+    print("instructions: mGBA %d (%d main-line, %d IRQs), gbarecomp %d (%d main-line, %d IRQs, %d idle ticks "
+          "while halted); matched %d"
           % (len(m_stream), r["m_main"], len(r["m_irqs"]), len(g_stream), r["g_main"], len(r["g_irqs"]),
-             r["matched"]), file=out)
+             skipped["halted"], r["matched"]), file=out)
+    print("last clock: mGBA %d, gbarecomp %d" % (m_stream[-1][1], g_stream[-1][1]), file=out)
     print("clock difference gbarecomp - mGBA at the last matched instruction: %s" % (
         "%+d" % r["final"] if r["final"] is not None else "-"), file=out)
     print("  changed by instruction costs: %+d; next to IRQs: %+d (%d changes); by skipped loop iterations: %+d (%d)"
@@ -254,7 +292,7 @@ def main(argv, out=sys.stdout):
                 print("%s IRQ entries on %s lines: %d; entry overhead %s; position in line (most common) %s" % (
                     name, kind, sum(pos[kind].values()), sorted(over[kind].items()),
                     pos[kind].most_common(4)), file=out)
-    return 0
+    return 1 if r["unaligned"] else 0
 
 
 if __name__ == "__main__":
