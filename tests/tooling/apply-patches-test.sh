@@ -617,7 +617,11 @@ nested_paths() { file_matches "$np/0003-nc.patch" "^diff --git a/n.txt b/n.txt" 
 check "... with paths relative to the nested repository" nested_paths
 check "... and says the tree is now the series" said "is now the pin plus 0001, 0002, 0003"
 run_ok "the nested series with 0003 is in place" "$apply" --check
-gbarecomp_patches_unchanged() { [ "$(ls "$root/patches/gbarecomp")" = "$(printf '0001-a.patch\n0002-b.patch\n0003-d.patch')" ]; }
+gbarecomp_patches_unchanged() {
+  local f names=""
+  for f in "$root"/patches/gbarecomp/*; do names="$names ${f##*/}"; done
+  [ "$names" = " 0001-a.patch 0002-b.patch 0003-d.patch" ]
+}
 check "gbarecomp's series was not touched" gbarecomp_patches_unchanged
 set_line "$core/n.txt" 18 "core 18 by hand"
 run_ok "--write-patch refreshes the nested 0001 under 0002 and 0003" \
