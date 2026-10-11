@@ -337,6 +337,8 @@ scripts/replay-test.sh boot_to_race --against mgba
 scripts/replay-test.sh boot_to_race --against interp
 ```
 
+As implemented: `tools/difftest/compare.py`, `scripts/replay-test.sh ROUTE --against interp|mgba|none` (`none`: checkpoints only), the allowlist of `boot_to_race` in `tools/difftest/allowlists/`, `tools/difftest/comparison1.toml` (comparison 1's excluded regions: none), and, for the fingerprint ring, `tools/difftest/fpdiff.py` with `MRA_FP_TAIL` in `src/main.cpp`, which writes the ring's last records (`GBARECOMP_FP_SAVE` writes all of it, 640 MB). Against mGBA, frames 1-3,289 of `boot_to_race` give the diagnosis's classes; 220-221 pass layer 2 (one step at most), so the OBJ 1st-target frames that fail are 222-269. Comparison 1's RAM differences come from the IWRAM bridges and from two code-generation timing bugs, U21 (the fetch wait states of a store to WAITCNT) and U22 (an IRQ pending at an exception return), not from state that legitimately differs; both need arm-recomp-core (decision 9). Every manifest route follows its checkpoints on the BIOS-interpreting reference. Results: [phase2-comparator.md](research/phase2-comparator.md); usage: [tools/difftest/README.md](../tools/difftest/README.md).
+
 ### P2-10. Compile both IWRAM images and select per dispatch
 
 *Depends on:* P2-05, P2-06 (its script finds the race image's switch slots), P2-07, and P2-09: its tests use `scripts/replay-test.sh`, and it gates on comparison 1 and on P2-09's results (P2-02 and P2-03 through it). *Effort:* 2.
@@ -633,7 +635,7 @@ The critical path is PR #5 (merged) → P2-00 → P2-03 → P2-02 → P2-05 → 
 6. Later, with Phase 4: whether players get the OBJ cycle budget (P2-14).
 7. Optional: a small test ROM on the owner's hardware to settle blend rounding, semi-transparent OBJ brightness and the OBJ budget's edge cases (diagnosis, open question 5).
 8. Before Phase 3, not part of Phase 2: whether any browser bundle is published (ADR 0001 decision 4, "Out of scope").
-9. How to carry a change to gbarecomp's nested submodule `external/arm-recomp-core`, which `scripts/apply-patches.sh` refuses to touch: extend the patch tooling with a series for it, or another way. The proposed P2-21 timing patch needs one such change, the prefetch reset after a static branch in generated code ([phase2-race-lockstep.md](research/phase2-race-lockstep.md) section 8, point 1).
+9. How to carry a change to gbarecomp's nested submodule `external/arm-recomp-core`, which `scripts/apply-patches.sh` refuses to touch: extend the patch tooling with a series for it, or another way. The proposed P2-21 timing patch needs one such change, the prefetch reset after a static branch in generated code ([phase2-race-lockstep.md](research/phase2-race-lockstep.md) section 8, point 1). P2-09 found two more that comparison 1 needs (U21, U22: [phase2-comparator.md](research/phase2-comparator.md) section 4.4).
 
 ## Out of scope for Phase 2
 

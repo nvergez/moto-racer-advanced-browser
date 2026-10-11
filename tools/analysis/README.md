@@ -147,6 +147,8 @@ python3 -I tools/difftest/routes.py check ROUTE TRACE.tsv     # checkpoints of a
 python3 -I -m unittest discover tools/difftest/tests          # no game data needed
 ```
 
+`scripts/replay-test.sh ROUTE --against mgba|interp|none` plays a route on gbarecomp (and on mGBA or gbarecomp's interpreter), checks the gbarecomp run's checkpoints and compares the two runs ([tools/difftest/README.md](../difftest/README.md)).
+
 `mgba-routes.sh` runs each route twice from boot, each time from a fresh copy of its starting save, with `--trace 1-<frames>` and a `--trace-mem` column for every RAM field. It checks that the two `trace.tsv` and the two final saves are byte-identical, that the run stops at the route's frame count, that the checkpoints hold on their recorded frames, and that the final save is as the manifest says. It stops before the first run if the harness is not built or the ROM or BIOS is not the pinned one. A route whose starting-save route failed is reported as failed without running, and a failing route keeps run b's output for comparison. Outputs go to `analysis-out/routes/`. The tools need Python 3.11 or newer (`tomllib`).
 
 ### Replays for gbarecomp
