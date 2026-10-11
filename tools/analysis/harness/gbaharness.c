@@ -92,6 +92,7 @@ static struct {
 	Range pc[MAX_RANGES];
 	int nPc;
 	bool pcRegs;
+	bool pcCycles;
 	long pcMax;
 	bool coverage;
 	bool calls;
@@ -1477,6 +1478,8 @@ static void runFrameStepping(void) {
 				for (int i = 0; i < 16; ++i) fprintf(fPc, "\t%08X", cpu->gprs[i]);
 				fprintf(fPc, "\t%08X", cpu->cpsr.packed);
 			}
+			/* The master clock before the instruction runs: the clock of capture.tsv's cycles column. */
+			if (opt.pcCycles) fprintf(fPc, "\t%llu", (unsigned long long) mTimingGlobalTime(&gba->timing));
 			fprintf(fPc, "\n");
 		}
 		uint32_t opcode = cpu->prefetch[0];
@@ -1793,6 +1796,7 @@ static void usage(void) {
 	        "  --watch-max N        cap on writes.tsv lines (default 2000000)\n"
 	        "  --trace-pc LIST      log executed instructions in PC ranges -> pctrace.tsv (stepping)\n"
 	        "  --trace-pc-regs      include r0-r15,cpsr in pctrace.tsv\n"
+	        "  --trace-pc-cycles    include the master clock before each instruction in pctrace.tsv\n"
 	        "  --pc-max N           cap on pctrace.tsv lines (default 5000000)\n"
 	        "  --coverage           count executed instructions per address -> coverage.tsv (stepping)\n"
 	        "  --calls              detect call targets (BL, mov lr,pc+bx, bx via veneers) -> calls.tsv (stepping)\n"
@@ -1850,7 +1854,7 @@ int main(int argc, char** argv) {
 		{ "capture-raw", required_argument, 0, 1006 },
 		{ "log-bios-reads", no_argument, 0, 'B' }, { "skip-bios", no_argument, 0, 'k' },
 		{ "dump-at-pc", required_argument, 0, 'D' }, { "trace-ram", no_argument, 0, 'm' },
-		{ "swi-cycles", no_argument, 0, 'Y' },
+		{ "swi-cycles", no_argument, 0, 'Y' }, { "trace-pc-cycles", no_argument, 0, 1007 },
 		{ "help", no_argument, 0, 'h' }, { 0, 0, 0, 0 },
 	};
 	int ch;
@@ -1916,6 +1920,7 @@ int main(int argc, char** argv) {
 		case 1004: opt.nCaptureLines += parseRanges(optarg, opt.captureLines + opt.nCaptureLines, MAX_RANGES - opt.nCaptureLines); break;
 		case 1005: opt.nCaptureFifo += parseRanges(optarg, opt.captureFifo + opt.nCaptureFifo, MAX_RANGES - opt.nCaptureFifo); break;
 		case 1006: opt.nCaptureRaw += parseRanges(optarg, opt.captureRaw + opt.nCaptureRaw, MAX_RANGES - opt.nCaptureRaw); break;
+		case 1007: opt.pcCycles = true; break;
 		case 'B': opt.logBiosReads = true; break;
 		case 'k': opt.skipBios = true; break;
 		case 'D': opt.dumpPcOn = true; opt.dumpPc = parseNum(optarg); break;
@@ -2024,7 +2029,8 @@ int main(int argc, char** argv) {
 	capSetup();
 	if (opt.nPc) {
 		fPc = openOut("pctrace.tsv", "w");
-		fprintf(fPc, "frame\tvcount\tpc\tmode\topcode%s\n", opt.pcRegs ? "\tr0\tr1\tr2\tr3\tr4\tr5\tr6\tr7\tr8\tr9\tr10\tr11\tr12\tsp\tlr\tpc_reg\tcpsr" : "");
+		fprintf(fPc, "frame\tvcount\tpc\tmode\topcode%s%s\n", opt.pcRegs ? "\tr0\tr1\tr2\tr3\tr4\tr5\tr6\tr7\tr8\tr9\tr10\tr11\tr12\tsp\tlr\tpc_reg\tcpsr" : "",
+		        opt.pcCycles ? "\tcycles" : "");
 	}
 	/* SWIs are always counted (cheap); the per-call log is optional. */
 	origSwi16 = cpu->irqh.swi16;

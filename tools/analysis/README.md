@@ -168,7 +168,9 @@ run_harness.sh [--rom FILE] [--bios FILE] [--no-hash-check] --out DIR [options]
   --trace-io NAMES  --trace-mem ADDR:SIZE,...   # extra trace.tsv columns
   --trace-lines LIST                       # per-scanline register rows -> lines.tsv
   --watch-write RANGES  --watch-read RANGES  [--watch-frames LIST] [--watch-max N]
-  --trace-pc RANGES [--trace-pc-regs] [--pc-max N]    # executed instructions -> pctrace.tsv
+  --trace-pc RANGES [--trace-pc-regs] [--trace-pc-cycles] [--pc-max N]
+                                           # executed instructions -> pctrace.tsv; --trace-pc-cycles adds
+                                           # the master clock before each one (capture.tsv's cycles clock)
   --coverage                               # executed address histogram -> coverage.tsv
   --calls                                  # dynamic call targets -> calls.tsv
   --step-frames LIST                       # limit --coverage/--calls/--trace-pc to these frames
@@ -199,7 +201,7 @@ LIST and RANGES entries are inclusive: `A`, `A-B` (A <= B) or `A+LEN` (LEN >= 1)
 | `trace.tsv` | per frame: keys, DISPCNT/mode/page, DISPSTAT, BG0-3CNT, BG2/BG3 affine, BLDCNT, DMA0-3CNT_H, IE, CRC32 of VRAM regions, palette and OAM, bytes written per VRAM 16 KiB chunk, palette, OAM, EWRAM, IWRAM and I/O (CPU and DMA), plus `--trace-io`/`--trace-mem` columns, and with `--trace-ram` CRC32s of IWRAM 0x03000000-0x03006FFF, IWRAM 0x03007000-0x03007FFF (stacks and BIOS words) and EWRAM |
 | `lines.tsv` | per scanline: DISPCNT, BGxCNT, scroll, BG2/BG3 affine, windows, blend, mosaic (no OAM) |
 | `writes.tsv` / `reads.tsv` | frame, vcount, source (`cpu`, `bios`, `dmaN`), pc, mode, lr, most recent SWI and its call site, address, size, old/new value or value. Includes LDM/STM words and DMA transfers |
-| `pctrace.tsv` | frame, vcount, pc, mode, opcode [, r0-r15, cpsr] |
+| `pctrace.tsv` | frame, vcount, pc, mode, opcode [, r0-r15, cpsr] [, cycles: the master clock before the instruction runs, the clock of `capture.tsv`'s `cycles` column, with `--trace-pc-cycles`; `tools/difftest/timeline.py` aligns it with gbarecomp's clock probe] |
 | `coverage.tsv` | every executed address in BIOS, EWRAM, IWRAM and ROM, with mode (A, T or AT) and count |
 | `calls.tsv` | call targets: `call` = non-sequential PC change with LR = previous instruction + size (BL, `mov lr,pc; bx`, SWI and IRQ vectors); `bx` = BX to an address never seen as a return address. Count, first caller, first frame |
 | `swi.tsv` | frame, vcount, SWI address, mode, BIOS function and name, r0-r3, lr |
@@ -220,6 +222,7 @@ The code that produced the Phase 1 evidence is this one minus the changes below.
 - For the open-BIOS A/B (P2-17): `--skip-bios`, `--dump-at-pc`, `--log-bios-reads`, `--trace-ram` and `--swi-cycles`. Without them the outputs are unchanged: a `boot_to_race.txt` run with `--trace 3290-4400 --trace-swi --watch-write` and one with `--coverage --trace-pc` over a few stepped frames gave byte-identical files to the previous build (`summary.json` apart from `wall_seconds`, `index.tsv` apart from the run directory). With `--swi-cycles` (every frame stepped), `trace.tsv` was byte-identical to a run without it.
 - New `--capture` options (P2-03). They only add the `capture*` outputs: a `boot_to_race.txt` run with `--trace`, `--trace-mem`, `--dump-at` and `--shot-at` gives the same `trace.tsv`, dumps, screenshots and `summary.json` (wall time aside) with and without `--capture`, and the same as before the options existed.
 - List options are parsed strictly (P2-03 review). A malformed number, a range whose end is before its start, `A+0` or an empty list used to be read as 0 or cut short without an error (`--capture-frames 1;5` captured frame 1 only, `--dump-at xyz` was accepted); they now stop the harness. `;` and spaces separate entries like `,`, and `010` is 10, no longer octal 8. Lists without leading zeros mean what they meant before: a 3,400-frame `boot_to_race.txt` run with `--trace`, `--trace-mem`, `--dump-at`, `--shot-at`, `--trace-lines`, `--watch-write`, `--watch-frames A+LEN`, `--trace-swi` and the capture options writes byte-identical outputs before and after the change.
+- New `--trace-pc-cycles` option (P2-13): a `cycles` column in `pctrace.tsv`. Without it the outputs are unchanged: a 3,292-frame `boot_to_race.txt` run with `--trace-pc` over frames 3285-3291, `--watch-write` and the capture options writes byte-identical `pctrace.tsv`, `writes.tsv` and `capture.tsv` before and after the change.
 
 ### Pitfalls
 
