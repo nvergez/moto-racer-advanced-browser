@@ -1,0 +1,46 @@
+# gba_recompile and runtime config for the synthetic repro ROM overlay1
+# (tests/repro/make_rom.py overlay1; no Nintendo data inside): two code images
+# that the program copies in turn to IWRAM 0x03000000, the case that
+# patches/gbarecomp/0006's RAM overlay selector handles. See
+# tests/repro/README.md. This is the main corpus, with image A at 0x03000000;
+# image B is compiled from overlay1.ovl.toml into a second corpus.
+# scripts/repro-test.sh generates the ROM, checks its SHA-1 against [identity]
+# below, recompiles it with both configs and runs it.
+[game]
+name = "RAM overlay repro 1"
+short_name = "overlay1"
+
+[program]
+name = "overlay1"
+id = "ZZZW"                     # header game code written by make_rom.py
+load_address = 0x08000000
+size = 0x00001000               # 4096 bytes
+entry_pc = 0x08000000
+speculative_literal_harvest = false
+# The main loop resumes after its VBlankIntrWait SWI at 0x0800025C, which no
+# branch targets: give every instruction an entry.
+static_resume_all = true
+
+[identity]
+sha1 = "5b0ac75c53f66d5e0ece14cf390a34b8cbec9289"
+
+[bios]
+# The header logo is zero, so the BIOS intro, which checks it, must not run.
+skip_intro = true
+
+[[code_copy]]
+runtime_start = 0x03000000
+source_start  = 0x08000400
+size          = 0x00000010
+name          = "image_a"
+note          = "Image A: copied to IWRAM 0x03000000 by the copy routine at 0x08000300 from ROM 0x08000400, 4 words (make_rom.py, OVERLAY1). Image B, copied to the same address, is in overlay1.ovl.toml"
+
+[[extra_func]]
+addr = 0x03000000
+mode = "arm"
+note = "Entry of image A: the main loop reaches it only through 'bx r12' at 0x08000324, with r12 = 0x03000000 (make_rom.py)"
+
+[[extra_func]]
+addr = 0x08000180
+mode = "arm"
+note = "VBlank IRQ handler. Its address appears only in the literal at 0x08000104, which the start-up code stores at 0x03007FFC (make_rom.py)"

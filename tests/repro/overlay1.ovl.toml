@@ -1,0 +1,25 @@
+# Second gba_recompile config for the synthetic repro ROM overlay1
+# (tests/repro/README.md): image B alone, compiled by scripts/repro-test.sh
+# with `gba_recompile --output-prefix ovl_ --no-symbol-map` into its own
+# corpus, ovl_kDispatchTable. Image A is in the main corpus (overlay1.toml).
+# Only gba_recompile reads this file; the runtime gets overlay1.toml.
+[program]
+name = "overlay1 image B"
+id = "ZZZW"                     # header game code written by make_rom.py
+load_address = 0x08000000
+size = 0x00001000               # 4096 bytes
+# Discovery starts at image B's entry; B returns with `mov pc, lr`, so it
+# reaches no ROM code.
+entry_pc = 0x03000000
+speculative_literal_harvest = false
+static_resume_all = true
+
+[identity]
+sha1 = "5b0ac75c53f66d5e0ece14cf390a34b8cbec9289"
+
+[[code_copy]]
+runtime_start = 0x03000000
+source_start  = 0x08000500
+size          = 0x00000014
+name          = "image_b"
+note          = "Image B: copied to IWRAM 0x03000000 by the copy routine at 0x08000300 from ROM 0x08000500, 5 words (make_rom.py, OVERLAY1)"

@@ -1,0 +1,37 @@
+# gba_recompile and runtime config for overlay1heal, an opt-in repro case
+# (tests/repro/README.md): overlay1's ROM, byte for byte (tests/repro/
+# make_rom.py overlay1heal; no Nintendo data inside), with no corpus for
+# either IWRAM image. It tests the heal-tier guard of
+# patches/gbarecomp/0006: scripts/repro-test.sh runs it with RAM healing on,
+# so image A's first dispatch heals 0x03000000 from A's bytes, and the
+# selector in overlay1heal_hooks.cpp claims image B's dispatches without a
+# corpus, which 0006 must bridge rather than hand to A's heal.
+[game]
+name = "RAM overlay repro 1, heal-tier guard"
+short_name = "overlay1heal"
+
+[program]
+name = "overlay1heal"
+id = "ZZZW"                     # header game code written by make_rom.py
+load_address = 0x08000000
+size = 0x00001000               # 4096 bytes
+entry_pc = 0x08000000
+speculative_literal_harvest = false
+# The main loop resumes after its VBlankIntrWait SWI at 0x0800025C, which no
+# branch targets: give every instruction an entry.
+static_resume_all = true
+
+[identity]
+sha1 = "5b0ac75c53f66d5e0ece14cf390a34b8cbec9289"
+
+[bios]
+# The header logo is zero, so the BIOS intro, which checks it, must not run.
+skip_intro = true
+
+# No [[code_copy]] and no root at 0x03000000, unlike overlay1.toml: the
+# 'bx r12' at 0x08000324 into IWRAM is a dispatch miss for both images.
+
+[[extra_func]]
+addr = 0x08000180
+mode = "arm"
+note = "VBlank IRQ handler. Its address appears only in the literal at 0x08000104, which the start-up code stores at 0x03007FFC (make_rom.py)"
