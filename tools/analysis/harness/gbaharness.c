@@ -1246,7 +1246,8 @@ static void usage(void) {
 	fprintf(stderr,
 	        "usage: gbaharness --rom ROM --bios BIOS --out DIR [options]\n"
 	        "  --script FILE        input script (wait/press/tap/hold/release/until/dump/shot/mark/savestate/end)\n"
-	        "  --frames N           stop after frame N (also keeps running after the script ends until N)\n"
+	        "  --frames N           stop after frame N (also keeps running until N after a script\n"
+	        "                       that has no end command)\n"
 	        "  --dump-at LIST       full dumps at frames, e.g. 100,200-210\n"
 	        "  --dump-vcount L      take --dump-at dumps when VCOUNT first equals L during the frame\n"
 	        "                       (L<160: mid-drawing of that frame; 160-227: its leading VBlank)\n"
@@ -1477,7 +1478,9 @@ int main(int argc, char** argv) {
 	clock_t t0 = clock();
 	if (opt.script) runScript(opt.script);
 	if (opt.frames >= 0) {
-		while (!frameLimitReached()) runFrames(1, heldKeys);
+		/* A script "end" stops the run even before --frames (runFrames does
+		 * nothing once stopRequested is set, so looping on would hang). */
+		while (!stopRequested && !frameLimitReached()) runFrames(1, heldKeys);
 	}
 	double secs = (double) (clock() - t0) / CLOCKS_PER_SEC;
 

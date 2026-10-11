@@ -1,12 +1,35 @@
 # Pause the race and choose ABORT, which returns to the front-end program.
-# Start from the mid-race savestate written by boot_to_race.txt:
-#   run_harness.sh --out DIR --load-state RUN/mid_race.state --script abort_race.txt
-# Held keys are not part of a savestate, so A is held again here.
+# Starts from boot with a fresh empty save: boot_to_race.txt's inputs up to
+# frame 4210 (no dumps or savestates), then the pause-and-abort inputs. Until
+# 2026-10-11 this script started from boot_to_race's mid_race.state; gbarecomp
+# cannot load an mGBA savestate, so every route now starts from boot.
 # Expected: the race program writes FFFFFFFF x4 to 0x03007B00 and jumps to the
 # front end at frame 4298, which reruns its crt0 and shows the Kenya track
-# select (about frame 4600).
+# select (about frame 4600); the two taps after it reach the bike and gearbox
+# screens. Frame numbers as in boot_to_race.txt.
 
-hold A
+until 2450
+tap START                  # -> language select (English preselected)
+wait 60
+tap A                      # English -> main menu
+wait 180
+tap A                      # solo
+wait 120
+tap A                      # single race
+wait 90
+tap A                      # cross -> track select (Kenya)
+wait 90
+tap A                      # Kenya -> bike select
+wait 90
+tap A                      # Coolfix 250 -> gearbox
+wait 90
+tap A                      # Auto -> race loads
+until 3608
+hold A                     # accelerate
+until 3950
+hold RIGHT                 # first right-hand bend
+wait 70
+release RIGHT
 until 4210
 release
 tap START                  # pause

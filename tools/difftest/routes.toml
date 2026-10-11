@@ -1,0 +1,496 @@
+# Route manifest (docs/phase2-plan.md, P2-04).
+#
+# Every route starts from boot, with a fresh empty save or with the save
+# another route writes (start_save), never from a savestate. Read and checked
+# by tools/difftest/routes.py; run on mGBA by tools/difftest/mgba-routes.sh.
+#
+# All frames are mGBA harness frames (tools/analysis/README.md, "Frame
+# numbering") on the pinned ROM and BIOS below, with the harness's real BIOS
+# boot. Addresses and values in this file were found on that ROM; evidence is
+# in each field's note and in docs/research/phase2-routes.md.
+#
+# Route keys:
+#   script      harness input script
+#   frames      run length (the script ends there; the runner passes --frames)
+#   start_save  "" for a fresh empty save, or the name of an earlier route
+#               whose final save the run starts from (copied before each run,
+#               because the harness writes the run's save back to the file)
+#   sram        "none" if the route never writes the save, "written" if it does
+#   save_sha1   SHA-1 of the route's final 32 KiB save in mGBA (a fresh save
+#               that is never written stays all 0xFF)
+#   checkpoints in order; each one is an event that both engines' per-frame
+#               captures can show:
+#     event   name
+#     when    predicate on one frame's fields: FIELD OP VALUE [and ...], with
+#             OP one of == != >= <= > < and VALUE a number or a name from
+#             [values]
+#     frame   the frame where it first holds in mGBA
+#     before  the first frame played with the first later input that relies
+#             on it: the frame where trace.tsv's keys column changes, which is
+#             one after the script's "until N" or "wait" frame (the input
+#             after "until 2714" lands on frame 2715). Omitted: the end of the
+#             route. A run follows the route when every event occurs, in
+#             order, on a frame before its "before" frame.
+#     expect  field values at the event frame in mGBA that are results, not
+#             route following (finishing positions, points): compared with
+#             mGBA (P2-19), not required for a run to follow the route
+#
+# Post-race inputs leave slack for engines whose races end on another frame
+# (docs/research/phase2-diagnosis.md section 6): the "slack" column that
+# routes.py prints is how many frames later an event may come.
+
+# rom_sha1 and bios_sha1 must equal MRA_ROM_SHA1 and MRA_BIOS_SHA1 in
+# tools/analysis/lib.sh, the pins run_harness.sh checks its inputs against;
+# "routes.py validate" fails otherwise. Route, field and value names are
+# identifiers: letters, digits and _, not starting with a digit.
+schema = 1
+rom_sha1 = "b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0"
+bios_sha1 = "300c20df6731a33952ded8c436f7f186d25d3492"
+
+[values]
+FRONTEND = 0xE92D4FF3        # first word of the front-end IWRAM image
+RACE = 0xE3A00640            # first word of the race-program IWRAM image
+RACE_DISPLAY = 0x1741        # DISPCNT while a race is on screen
+ALL_UNLOCKED = 0x0FFF        # unlocks after the unlock code
+SINGLE_RACE = 0              # race_mode
+CHAMPIONSHIP = 1
+FRENCH = 1                   # language
+KENYA = 0                    # track ids
+TEXAS = 1
+FRANCE = 2
+CALIFORNIA = 6
+MOSCOW = 12
+
+# Per-frame fields, sampled at VBlank start. "io" names a trace.tsv column of
+# the harness; "addr"/"size" a little-endian memory read (--trace-mem column
+# mem_AAAAAAAA). A capture checked against a route needs the fields its
+# checkpoints use; mgba-routes.sh captures all of them.
+
+[fields.DISPCNT]
+io = "DISPCNT"
+note = "Display control. 0x1741 while a race is displayed (Phase 1 section 2); 0 while the race program loads."
+
+[fields.image]
+addr = 0x03000000
+size = 4
+note = "First word of the resident IWRAM code image: 0xE92D4FF3 front end, 0xE3A00640 race program (diagnosis section 3.1; read from ROM 0x081596FC and 0x083F6820). During boot the word is 0 on frames 1-278 and already 0xE3A00640 on frames 279-292, before the front-end image arrives at 293 (every route's trace.tsv), so image == RACE means the race program only once the front end has run: put a front-end checkpoint (main_menu) before it."
+
+[fields.main_menu]
+addr = 0x0203CE3C
+size = 4
+note = "1 while the main menu runs: set at 0x08005664 on entry to the main-menu function 0x08005658, cleared at 0x08005948 when it returns; the key reader at 0x08002370 accepts the unlock code only while it is 1. Harness: 2524-2732 on boot_to_race."
+
+[fields.language]
+addr = 0x0203F017
+size = 1
+note = "Language in the save block (save offset 0x17, Phase 1 section 1): 0 English, 1 Francais. Written at 0x08009B70 when the Options language cursor moves (options_save, frame 3049)."
+
+[fields.multiplayer]
+addr = 0x0203F01B
+size = 1
+note = "Save-block byte 0x1B: 1 while the multiplayer screens run (set at 0x08001400, cleared at 0x08001758; multiplayer_lobby frames 2773-3261). The Solo-menu builder reads it at 0x08000E20. Meaning beyond that is unverified."
+
+[fields.race_mode]
+addr = 0x0203F01A
+size = 1
+note = "Save-block byte 0x1A: the kind of race the front end sets up, 0 Single race, 1 Championship (2 League from static reading only, unverified). Harness --watch-write and --watch-read on 0x0203F01A: the Solo menu's code writes 0 at 0x08000DA8 when a single-race track is chosen (full_race_cross, frame 3052) and 1 at 0x08000EF0 when Championship is chosen (cup, frame 3030, and again at 25134, 45034, 62934); 0x08001008 writes 2 for League. 0 on a fresh save. The front end reads it at 0x080021F4 before each race (cup: 3576, 26062, 45962) and at 0x0800EDB0 when it takes over after each race (22404, 42308, 59864)."
+
+[fields.unlocks]
+addr = 0x0203F02A
+size = 2
+note = "Save-block halfword 0x2A: championship and league unlock bits. Bits 0/3/6 open the Cross/GP/Traffic championship, bits 3d+1 and 3d+2 the second and third cup of discipline d, bit 9 the league (Solo menu 0x08000E18-0x08000E40, discipline menu 0x08000F50-0x08000F74, cup menu 0x0800098C-0x080009A4). 0 on a fresh save; the unlock code (code 0 of the table at 0x02000100) ORs in 0x0FFF at 0x08000458-0x08000464."
+
+[fields.track]
+addr = 0x0203F00A
+size = 1
+note = "Save-block byte 0x0A: id of the selected track, 6 per discipline (0 Kenya, 1 Texas, 2 France, 6 California, 12 Moscow). Written by the single-race track select at 0x08005F20 and by the championship from its cup table at 0x08001160 and 0x08000AB8; the front end reads it at 0x0800212C just before handing over to the race program (race_gp, frame 3328)."
+
+[fields.cross_rookie_races]
+addr = 0x0203FC50
+size = 1
+note = "Save-block byte 0xC50: races completed in the Cross Rookie championship (cup record k=0 at 0xC50+10k, compared with the cup's race count at 0x080010A4 and 0x0800094C). Incremented when the standings screen is left after each race (cup: 24532, 44432, 62032)."
+
+[fields.cross_rookie_best]
+addr = 0x0203FC51
+size = 1
+note = "Save-block byte 0xC51: 8 until the Cross Rookie cup is completed, then the player's final standing, 0-based (7 = 8th of 8; the cup's final standings screen shows the player last). The 0-based reading is likely, not verified."
+
+[fields.cross_rookie_points]
+addr = 0x0203FC52
+size = 1
+note = "Save-block byte 0xC52: the player's championship points in Cross Rookie, written when the front end takes over after each race; 0xC53-0xC59 hold CP1-CP7. Matches the race-complete screen (8 points for 1st down to 1 for 8th): cup race 1 gives the player +1 (8th) and 1, 3, 2, 5, 4, 8, 6, 7 for PLR and CP1-CP7."
+
+# ---------------------------------------------------------------- routes
+
+[routes.boot_to_race]
+script = "tools/analysis/input/boot_to_race.txt"
+frames = 4400
+sram = "none"
+save_sha1 = "ca711c69165e1fa5be72993b9a7870ef6d485249"
+
+[[routes.boot_to_race.checkpoints]]
+event = "main_menu"
+when = "main_menu == 1"
+frame = 2524
+before = 2715                # A: solo
+
+[[routes.boot_to_race.checkpoints]]
+event = "race_image"
+when = "image == RACE and track == KENYA"
+frame = 3290
+before = 3609                # hold A
+
+[[routes.boot_to_race.checkpoints]]
+event = "race_display"
+when = "DISPCNT == RACE_DISPLAY"
+frame = 3303
+before = 3609                # hold A
+
+[routes.full_race_cross]
+script = "tools/analysis/input/full_race_cross.txt"
+frames = 25000
+sram = "none"
+save_sha1 = "ca711c69165e1fa5be72993b9a7870ef6d485249"
+
+[[routes.full_race_cross.checkpoints]]
+event = "main_menu"
+when = "main_menu == 1"
+frame = 2524
+before = 2715                # A: solo
+
+[[routes.full_race_cross.checkpoints]]
+event = "race_image"
+when = "image == RACE and track == KENYA"
+frame = 3290
+before = 3609                # hold A
+
+[[routes.full_race_cross.checkpoints]]
+event = "race_display"
+when = "DISPCNT == RACE_DISPLAY"
+frame = 3303
+before = 3609                # hold A
+
+[[routes.full_race_cross.checkpoints]]
+event = "race_over"
+when = "image == FRONTEND"
+frame = 21794
+
+[routes.race_gp]
+script = "tools/analysis/input/race_gp.txt"
+frames = 6000
+sram = "none"
+save_sha1 = "ca711c69165e1fa5be72993b9a7870ef6d485249"
+
+[[routes.race_gp.checkpoints]]
+event = "main_menu"
+when = "main_menu == 1"
+frame = 2524
+before = 2715                # A: solo
+
+[[routes.race_gp.checkpoints]]
+event = "gp_track_select"
+when = "track == CALIFORNIA"
+frame = 3008
+before = 3093                # A: California
+
+[[routes.race_gp.checkpoints]]
+event = "race_image"
+when = "image == RACE"
+frame = 3332
+before = 3601                # hold A
+
+[[routes.race_gp.checkpoints]]
+event = "race_display"
+when = "DISPCNT == RACE_DISPLAY"
+frame = 3346
+before = 3601                # hold A
+
+[routes.race_traffic]
+script = "tools/analysis/input/race_traffic.txt"
+frames = 6000
+sram = "none"
+save_sha1 = "ca711c69165e1fa5be72993b9a7870ef6d485249"
+
+[[routes.race_traffic.checkpoints]]
+event = "main_menu"
+when = "main_menu == 1"
+frame = 2524
+before = 2715                # A: solo
+
+[[routes.race_traffic.checkpoints]]
+event = "traffic_track_select"
+when = "track == MOSCOW"
+frame = 3020
+before = 3105                # A: Moscow
+
+[[routes.race_traffic.checkpoints]]
+event = "race_image"
+when = "image == RACE"
+frame = 3344
+before = 3601                # hold A
+
+[[routes.race_traffic.checkpoints]]
+event = "race_display"
+when = "DISPCNT == RACE_DISPLAY"
+frame = 3358
+before = 3601                # hold A
+
+[routes.abort_race]
+script = "tools/analysis/input/abort_race.txt"
+frames = 5232
+sram = "none"
+save_sha1 = "ca711c69165e1fa5be72993b9a7870ef6d485249"
+
+[[routes.abort_race.checkpoints]]
+event = "main_menu"
+when = "main_menu == 1"
+frame = 2524
+before = 2715                # A: solo
+
+[[routes.abort_race.checkpoints]]
+event = "race_image"
+when = "image == RACE and track == KENYA"
+frame = 3290
+before = 3609                # hold A
+
+[[routes.abort_race.checkpoints]]
+event = "race_display"
+when = "DISPCNT == RACE_DISPLAY"
+frame = 3303
+before = 3609                # hold A
+
+[[routes.abort_race.checkpoints]]
+event = "aborted"
+when = "image == FRONTEND"
+frame = 4303
+before = 4609                # A: Kenya track select
+
+[routes.restart_race]
+script = "tools/analysis/input/restart_race.txt"
+frames = 5500
+sram = "none"
+save_sha1 = "ca711c69165e1fa5be72993b9a7870ef6d485249"
+
+[[routes.restart_race.checkpoints]]
+event = "main_menu"
+when = "main_menu == 1"
+frame = 2524
+before = 2715                # A: solo
+
+[[routes.restart_race.checkpoints]]
+event = "race_image"
+when = "image == RACE and track == KENYA"
+frame = 3290
+before = 3609                # hold A
+
+[[routes.restart_race.checkpoints]]
+event = "race_display"
+when = "DISPCNT == RACE_DISPLAY"
+frame = 3303
+before = 3609                # hold A
+
+[[routes.restart_race.checkpoints]]
+event = "restart_blank"
+when = "image == RACE and DISPCNT == 0"
+frame = 4286
+before = 4421                # hold A
+
+[[routes.restart_race.checkpoints]]
+event = "race_display_again"
+when = "image == RACE and DISPCNT == RACE_DISPLAY"
+frame = 4304
+before = 4421                # hold A
+
+[routes.two_races]
+script = "tools/analysis/input/two_races.txt"
+frames = 6828
+sram = "none"
+save_sha1 = "ca711c69165e1fa5be72993b9a7870ef6d485249"
+
+[[routes.two_races.checkpoints]]
+event = "main_menu"
+when = "main_menu == 1"
+frame = 2524
+before = 2715                # A: solo
+
+[[routes.two_races.checkpoints]]
+event = "race1_display"
+when = "image == RACE and DISPCNT == RACE_DISPLAY and track == KENYA"
+frame = 3303
+before = 3609                # hold A
+
+[[routes.two_races.checkpoints]]
+event = "race1_aborted"
+when = "image == FRONTEND"
+frame = 4303
+before = 4609                # RIGHT: Texas
+
+[[routes.two_races.checkpoints]]
+event = "texas_selected"
+when = "image == FRONTEND and track == TEXAS"
+frame = 4610
+before = 4651                # A: Texas
+
+[[routes.two_races.checkpoints]]
+event = "race2_display"
+when = "image == RACE and DISPCNT == RACE_DISPLAY and track == TEXAS"
+frame = 5123
+before = 5231                # hold A
+
+[[routes.two_races.checkpoints]]
+event = "race2_aborted"
+when = "image == FRONTEND"
+frame = 6323
+
+[routes.options_save]
+script = "tools/analysis/input/options_save.txt"
+frames = 3644
+sram = "written"
+save_sha1 = "a5149c87b90e486f8fb5d0aba6272052f5b8eb70"
+
+[[routes.options_save.checkpoints]]
+event = "main_menu"
+when = "main_menu == 1"
+frame = 2524
+before = 2715                # DOWN: options
+
+[[routes.options_save.checkpoints]]
+event = "francais_selected"
+when = "language == FRENCH"
+frame = 3049
+before = 3081                # A: Francais
+
+[[routes.options_save.checkpoints]]
+event = "back_on_main_menu"
+when = "main_menu == 1"
+frame = 3416
+
+[routes.boot_with_save]
+script = "tools/analysis/input/boot_with_save.txt"
+frames = 2906
+start_save = "options_save"
+sram = "none"
+save_sha1 = "a5149c87b90e486f8fb5d0aba6272052f5b8eb70"
+
+[[routes.boot_with_save.checkpoints]]
+event = "save_loaded"
+when = "language == FRENCH"
+frame = 596
+before = 2451                # START
+
+[[routes.boot_with_save.checkpoints]]
+event = "main_menu"
+when = "main_menu == 1"
+frame = 2484
+before = 2643                # A: solo (a fresh save would show the language menu here)
+
+[[routes.boot_with_save.checkpoints]]
+event = "left_main_menu"
+when = "main_menu == 0"
+frame = 2660
+before = 2775                # B: back
+
+[[routes.boot_with_save.checkpoints]]
+event = "back_on_main_menu"
+when = "main_menu == 1"
+frame = 2788
+
+[routes.multiplayer_lobby]
+script = "tools/analysis/input/multiplayer_lobby.txt"
+frames = 3392
+sram = "none"
+save_sha1 = "ca711c69165e1fa5be72993b9a7870ef6d485249"
+
+[[routes.multiplayer_lobby.checkpoints]]
+event = "main_menu"
+when = "main_menu == 1"
+frame = 2524
+before = 2715                # DOWN: multiplayer
+
+[[routes.multiplayer_lobby.checkpoints]]
+event = "lobby"
+when = "multiplayer == 1"
+frame = 2773
+before = 2949                # A in the lobby
+
+[[routes.multiplayer_lobby.checkpoints]]
+event = "back_on_main_menu"
+when = "multiplayer == 0 and main_menu == 1"
+frame = 3263
+
+[routes.cup]
+script = "tools/analysis/input/cup.txt"
+frames = 63542
+sram = "written"
+save_sha1 = "f6743468e8ecd41f21a5e3d58cdc83ab4c9e2128"
+note = "Championship is locked on a fresh save; the script enters the game's unlock code on the main menu (docs/research/phase2-routes.md). Open-loop: 8th place in every race."
+
+[[routes.cup.checkpoints]]
+event = "main_menu"
+when = "main_menu == 1"
+frame = 2524
+before = 2715                # hold L: unlock code
+
+[[routes.cup.checkpoints]]
+event = "unlocked"
+when = "unlocks == ALL_UNLOCKED"
+frame = 2761
+before = 2843                # A: solo (its menu is built from the unlock bits)
+
+[[routes.cup.checkpoints]]
+event = "race1_display"
+when = "image == RACE and DISPCNT == RACE_DISPLAY and race_mode == CHAMPIONSHIP and track == KENYA and cross_rookie_races == 0"
+frame = 3593
+before = 3701                # hold A
+
+[[routes.cup.checkpoints]]
+event = "race1_result"
+when = "image == FRONTEND and cross_rookie_points >= 1"
+frame = 22404
+before = 24201               # release A
+expect = { cross_rookie_points = 1 }
+
+[[routes.cup.checkpoints]]
+event = "race1_recorded"
+when = "cross_rookie_races == 1"
+frame = 24532
+before = 24831               # A: best lap -> best race
+
+[[routes.cup.checkpoints]]
+event = "race2_display"
+when = "image == RACE and DISPCNT == RACE_DISPLAY and race_mode == CHAMPIONSHIP and track == TEXAS and cross_rookie_races == 1"
+frame = 26079
+before = 26191               # hold A
+
+[[routes.cup.checkpoints]]
+event = "race2_result"
+when = "image == FRONTEND and cross_rookie_points >= 2"
+frame = 42308
+before = 44101               # release A
+expect = { cross_rookie_points = 2 }
+
+[[routes.cup.checkpoints]]
+event = "race2_recorded"
+when = "cross_rookie_races == 2"
+frame = 44432
+before = 44731               # A: best lap -> best race
+
+[[routes.cup.checkpoints]]
+event = "race3_display"
+when = "image == RACE and DISPCNT == RACE_DISPLAY and race_mode == CHAMPIONSHIP and track == FRANCE and cross_rookie_races == 2"
+frame = 45980
+before = 46091               # hold A
+
+[[routes.cup.checkpoints]]
+event = "race3_result"
+when = "image == FRONTEND and cross_rookie_points >= 3"
+frame = 59864
+before = 61701               # release A
+expect = { cross_rookie_points = 3 }
+
+[[routes.cup.checkpoints]]
+event = "cup_complete"
+when = "cross_rookie_races == 3"
+frame = 62032
+before = 62331               # A: cup result -> best lap
+expect = { cross_rookie_best = 7, cross_rookie_points = 3 }

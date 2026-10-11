@@ -1,0 +1,64 @@
+# Two races with a return to the front end in between, so both IWRAM image
+# switches (front end -> race, race -> front end) happen twice. Race 1 is
+# abort_race.txt: Kenya, aborted from the pause menu. The front end then shows
+# the Kenya track select; RIGHT picks Texas (the other Cross track open on a
+# fresh save), and race 2 on Texas is aborted the same way. Fresh empty save;
+# frame numbers as in boot_to_race.txt.
+# Expected: race image 3290, race 1 display 3303, front end 4303 (abort),
+# race image 5110, race 2 display 5123, front end 6323 (abort), Texas track
+# select from about 6620.
+
+until 2450
+tap START                  # -> language select (English preselected)
+wait 60
+tap A                      # English -> main menu
+wait 180
+tap A                      # solo
+wait 120
+tap A                      # single race
+wait 90
+tap A                      # cross -> track select (Kenya)
+wait 90
+tap A                      # Kenya -> bike select
+wait 90
+tap A                      # Coolfix 250 -> gearbox
+wait 90
+tap A                      # Auto -> race 1 loads
+until 3608
+hold A                     # accelerate
+until 3950
+hold RIGHT                 # first right-hand bend
+wait 70
+release RIGHT
+until 4210
+release
+tap START                  # pause
+wait 30
+tap DOWN 2                 # continue / restart / abort
+wait 20
+mark abort1
+tap A                      # abort -> front end
+until 4608                 # Kenya track select
+shot track_select
+tap RIGHT                  # -> Texas
+wait 30
+tap A                      # Texas -> bike select
+wait 200
+tap A                      # Coolfix 250 -> gearbox
+wait 200
+tap A                      # Auto -> race 2 loads
+until 5230                 # race display from 5123; fly-in
+mark race2
+hold A                     # accelerate
+until 6230
+release
+tap START                  # pause
+wait 30
+tap DOWN 2                 # continue / restart / abort
+wait 20
+mark abort2
+tap A                      # abort -> front end
+wait 300
+shot after_abort2          # Texas track select
+wait 200
+end
