@@ -72,7 +72,8 @@ series:
   run aborts with "SELF-HEAL bridge for 0x08003E70 exceeded 200000000
   instructions without returning to stop_pc=0x08004E10". With it, runs of
   2,700, 3,600, 5,400 and 12,000 frames exit 0, and the instructions
-  interpreted in 2,700 frames fall from 228,577,755 to 119,865,640.
+  interpreted in 2,700 frames fall from 228,577,755 (with neither this
+  patch nor the next) to 119,865,640.
 
 diff --git a/src/armv4t/runtime_arm.cpp b/src/armv4t/runtime_arm.cpp
 index 3d07d55..ba03741 100644
