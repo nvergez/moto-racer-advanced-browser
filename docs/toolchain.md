@@ -15,6 +15,7 @@ How to build this project on macOS from a fresh clone: prerequisites, setup, the
 | Recompile the game (BIOS + ROM to C++) | `scripts/regen.sh` | Yes |
 | Native executable | `scripts/build-native.sh` | Yes |
 | Browser bundle, local server | `scripts/build-web.sh`, `scripts/serve-web.sh` | Yes |
+| Play a route on gbarecomp and compare it with mGBA or the interpreter ([tools/difftest](../tools/difftest/README.md)) | `scripts/replay-test.sh` | Yes, and the mGBA harness for `--against mgba` |
 
 Generating the game's C++ needs only the ROM, but every build of the game also recompiles the BIOS dump and links it, and the runtime loads the dump at start. So the scripts that build the game check for both files up front and stop with one message listing whatever is missing. They read `roms/moto-racer-advance.gba` and `bios/gba_bios.bin` unless you pass `--rom PATH` and `--bios PATH` (see [Inputs](#inputs)).
 

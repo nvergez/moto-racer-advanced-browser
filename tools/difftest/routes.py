@@ -14,7 +14,8 @@ usage: routes.py [--manifest FILE] COMMAND ...
                                start_save, sram, save_sha1); empty if unset
   trace-mem                    the harness --trace-mem list for every memory
                                field (ADDR:SIZE,...)
-  check ROUTE TRACE [--exact]  check the route's checkpoints on a per-frame
+  check ROUTE TRACE [--exact] [--partial]
+                               check the route's checkpoints on a per-frame
                                trace (TSV); exit 1 if the run does not follow
                                the route
 
@@ -39,6 +40,13 @@ and each "before" frame must be a frame where the keys change (the "keys"
 column). Without --exact, frame offsets and "expect" differences are
 reported but do not fail the check: they are results to compare with mGBA,
 not route following.
+
+--partial is for a run that stops before the end of the route
+(scripts/replay-test.sh --frames): an event that does not occur in the trace
+is reported as not reached, not as a failure, when the trace ends before the
+event's deadline, since the run might still have followed the route. Every
+event the trace can decide is checked as usual, and the summary says how
+far: "follows up to frame N (k of n checkpoints checked ...)".
 """
 import argparse
 import os
@@ -394,9 +402,15 @@ def read_trace(path, fields, needed):
     return rows
 
 
-def check(route, rows, exact=False, out=None):
-    """Check a route's checkpoints on trace rows. Returns the number of failures."""
+def check(route, rows, exact=False, out=None, partial=False, stats=None):
+    """Check a route's checkpoints on trace rows. Returns the number of failures.
+
+    `stats`, a dict, receives "checked" (the checkpoints decided, passed or
+    failed), "total" and "not_reached" (True when --partial stopped at an
+    event the trace ends before)."""
     out = out or sys.stdout
+    stats = stats if stats is not None else {}
+    stats.update(checked=0, total=len(route.checkpoints), not_reached=False)
     failures = 0
     by_frame = {r["frame"]: r for r in rows}
     start = rows[0]["frame"] if rows else 0
@@ -414,7 +428,14 @@ def check(route, rows, exact=False, out=None):
             i += 1
         label = "%-28s" % cp.event
         if found is None:
+            last = rows[-1]["frame"] if rows else 0
+            if partial and last < deadline - 1:
+                print("--   %s not reached: the trace ends at frame %d, before its deadline %d; "
+                      "later events not checked" % (label, last, deadline), file=out)
+                stats["not_reached"] = True
+                return failures
             print("FAIL %s never occurs after frame %d (%s)" % (label, start, cp.when_text), file=out)
+            stats["checked"] += 1
             return failures + 1  # later events are searched from this one: stop here
         f = found["frame"]
         delta = f - cp.frame
@@ -446,8 +467,19 @@ def check(route, rows, exact=False, out=None):
         print("%s %s frame %6d (mGBA %6d, %+d; slack %d)%s" % (
             status, label, f, cp.frame, delta, deadline - 1 - f,
             ": " + "; ".join(notes) if notes else ""), file=out)
+        stats["checked"] += 1
         start = f
     return failures
+
+
+def verdict(route, rows, failures, stats):
+    """The summary line of `check ROUTE TRACE`."""
+    if failures:
+        return "route %s: %d checkpoint(s) failed" % (route.name, failures)
+    if stats.get("not_reached"):
+        return "route %s: follows up to frame %d (%d of %d checkpoints checked; the trace ends before the others)" % (
+            route.name, rows[-1]["frame"] if rows else 0, stats["checked"], stats["total"])
+    return "route %s: follows" % route.name
 
 
 def main(argv=None):
@@ -466,6 +498,7 @@ def main(argv=None):
     p.add_argument("route")
     p.add_argument("trace")
     p.add_argument("--exact", action="store_true")
+    p.add_argument("--partial", action="store_true")
     args = ap.parse_args(argv)
     try:
         m = Manifest(args.manifest)
@@ -487,8 +520,9 @@ def main(argv=None):
             route = m.route(args.route)
             needed = set().union(*(cp.fields_used() for cp in route.checkpoints))
             rows = read_trace(args.trace, m.fields, needed)
-            failures = check(route, rows, exact=args.exact)
-            print("route %s: %s" % (route.name, "follows" if not failures else "%d checkpoint(s) failed" % failures))
+            stats = {}
+            failures = check(route, rows, exact=args.exact, partial=args.partial, stats=stats)
+            print(verdict(route, rows, failures, stats))
             return 1 if failures else 0
     except ManifestError as e:
         print("routes.py: %s" % e, file=sys.stderr)

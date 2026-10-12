@@ -1,0 +1,26 @@
+# RAM regions that comparison 1 leaves out (ADR 0001, decision 5; exit
+# criterion 2 of docs/phase2-plan.md). Read by tools/difftest/compare.py
+# --against interp.
+#
+# Comparison 1 compares the recompiled build with gbarecomp's interpreter
+# running the BIOS too (MRA_INTERP_BIOS=1). Both share gbarecomp's device
+# model, so its frame CRC and its RAM region hashes are exact on every frame
+# unless a region legitimately differs between the two backends. A region is
+# listed here only with its cause, measured, and a reference to the evidence:
+#
+#   [[exclude]]
+#   region = "NAME"     a region of tools/capture/spec.txt ("ram NAME ...")
+#   cause = "..."       why the two backends legitimately differ there
+#   ref = "..."         where the measurement is written up
+#
+# The list is empty: P2-09 measured every RAM-hash difference between the
+# recompiled build and the reference on boot_to_race frames 1-4,400 and on a
+# 3,600-frame boot without input, and none is a legitimate backend difference.
+# Each comes either from the IWRAM code that still runs in interpreter bridges
+# (gone once P2-10 compiles it) or from one of two gbarecomp code-generation
+# timing bugs, which are bugs to fix, not regions to leave out: U21, the
+# opcode-fetch wait states of a store that changes WAITCNT (frames 295-296),
+# and U22, an IRQ pending at an exception return taken one instruction late
+# (frame 3303) (docs/research/phase2-comparator.md, section 4).
+
+schema = 1

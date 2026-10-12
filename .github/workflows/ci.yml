@@ -41,6 +41,8 @@ jobs:
           fetch-depth: 0
       - name: Test scripts/apply-patches.sh and A/B builds on a toy repository
         run: tests/tooling/apply-patches-test.sh
+      - name: Test scripts/replay-test.sh's option checks and output directory (no game data)
+        run: tests/tooling/replay-test-args-test.sh
 
   python-tools:
     name: route tools (no game data)

@@ -12,7 +12,8 @@
 #    Then build our own host executable (CMakeLists.txt, src/main.cpp) with
 #    the arm.gba code in place of the game's, to check the wiring and the link,
 #    as a test build with an input replay compiled in, and check how
-#    src/main.cpp takes its test variables (MRA_REPLAY, MRA_INTERP_BIOS).
+#    src/main.cpp takes its test variables (MRA_REPLAY, MRA_INTERP_BIOS,
+#    MRA_FP_TAIL).
 # 4. Web (needs Emscripten): the same runners compiled to WebAssembly and run
 #    under Node; gbarecomp's browser host linked with each ROM's code; and
 #    web/game-lib built with emcc, as scripts/build-web.sh will use it, with
@@ -114,7 +115,8 @@ if [ "$NATIVE" = 1 ]; then
     rc=0
     rm -f "$SMOKE_DIR/native-host/bios.cfg" "$SMOKE_DIR/native-host/rom.cfg"
     out=$(cd "$SMOKE_DIR/host-run" && env -u MRA_REPLAY -u MRA_INTERP_BIOS \
-      -u GBARECOMP_FORCE_INTERP -u GBARECOMP_INPUT_REPLAY "$@" "$host" --no-window \
+      -u GBARECOMP_FORCE_INTERP -u GBARECOMP_INPUT_REPLAY -u MRA_FP_TAIL -u MRA_FP_TAIL_RECORDS \
+      -u GBARECOMP_INSN_TRACE "$@" "$host" --no-window \
       --frames 1 --rom "$ROMS/arm/arm.gba" --state-dir "$SMOKE_DIR/states" 2>&1) || rc=$?
   }
   host_run
@@ -125,7 +127,7 @@ if [ "$NATIVE" = 1 ]; then
   esac
   # What src/main.cpp prints: a hook's status line, or a refusal.
   case "$out" in
-    *mra_replay=* | *mra_interp_bios=* | *"mra: "*)
+    *mra_replay=* | *mra_interp_bios=* | *mra_fp_tail* | *"mra: "*)
       die "the host printed a test hook's line without its variable: $out" ;;
   esac
 
@@ -173,6 +175,14 @@ if [ "$NATIVE" = 1 ]; then
   case "$out" in
     *mra_interp_bios=* | *"mra: "*) die "MRA_INTERP_BIOS=0 turned the BIOS reference on: $out" ;;
   esac
+  expect_host "fingerprint tail" fail "mra_fp_tail=ENABLED path=\"$SMOKE_DIR/fp.csv\" records=1000" \
+    MRA_FP_TAIL="$SMOKE_DIR/fp.csv" MRA_FP_TAIL_RECORDS=1000 GBARECOMP_INSN_TRACE=1
+  expect_host "fingerprint tail without the ring" 2 "MRA_FP_TAIL needs GBARECOMP_INSN_TRACE=1" \
+    MRA_FP_TAIL="$SMOKE_DIR/fp.csv"
+  expect_host "fingerprint tail of 0 records" 2 "MRA_FP_TAIL_RECORDS must be a number from 1 to 2000000" \
+    MRA_FP_TAIL="$SMOKE_DIR/fp.csv" MRA_FP_TAIL_RECORDS=0 GBARECOMP_INSN_TRACE=1
+  expect_host "fingerprint tail records alone" 2 "MRA_FP_TAIL_RECORDS is set without MRA_FP_TAIL" \
+    MRA_FP_TAIL_RECORDS=1000
   info "Host test variables: replay file and embedded route taken, bad values refused"
 fi
 

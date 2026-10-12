@@ -1,0 +1,111 @@
+# Allowlist of route boot_to_race for comparison 2 (gbarecomp against mGBA),
+# read by tools/difftest/compare.py through scripts/replay-test.sh
+# boot_to_race --against mgba. Format: tools/difftest/README.md. Every entry
+# names the frames, the checks it covers, its cause and where the evidence is;
+# fixed_by names the task expected to make it unnecessary.
+#
+# Frames are harness frames on the pinned ROM (SHA-1
+# b91bad8ee04652d71e0610f8d1a5deaebd4c1fd0) and BIOS (SHA-1
+# 300c20df6731a33952ded8c436f7f186d25d3492), with gbarecomp's interpreter
+# (GBARECOMP_FORCE_INTERP=1) as the gbarecomp side, measured on gbarecomp
+# 5e89943 with patches 0001-0006 (docs/research/phase2-comparator.md,
+# section 3). An entry covers a check on a frame; the first matching entry
+# counts the hit.
+#
+# The front-end entries (frames 1-3285) name exactly the frames where their
+# check differs, one entry per check, so a later change that makes another
+# frame differ there fails: compare.py reports an entry that covers frames it
+# does not hit as PARTLY USED. The race entry is the one exception: the race
+# is out of lockstep with mGBA on this gbarecomp and every check differs on
+# most of its frames, so it covers them all until P2-21 removes it.
+
+schema = 1
+route = "boot_to_race"
+against = "mgba"
+
+[[allow]]
+id = "affine-reset-values"
+frames = "1"
+checks = ["layer1"]
+cause = "Before the BIOS first writes them, BG2PA, BG2PD, BG3PA and BG3PD read 0 in gbarecomp and 0x0100 in mGBA: line 0 of frame 1 only. Which reset value the hardware has is unverified."
+ref = "docs/research/phase2-diagnosis.md section 7.2; docs/research/phase2-comparator.md section 3.1"
+
+[[allow]]
+id = "obj-1st-target"
+frames = "222-269, 2453-2481, 3258-3289"
+checks = ["layer2"]
+cause = "gbarecomp applies a color effect to an OBJ pixel only when the OBJ is semi-transparent and ignores BLDCNT bit 4 (OBJ 1st target), so normal OBJs stay unfaded: the BIOS logo (BLDCNT 0x3FBF, BLDY 2 to 16) and the game's fades from the title and from the last menu (BLDCNT 0x00FF). The line state is equal on these frames. Frames 220-221 (BLDY 1) differ by one step at most and pass."
+ref = "docs/research/phase2-diagnosis.md section 5.1; docs/research/phase2-replay.md section 3"
+fixed_by = "P2-08"
+
+[[allow]]
+id = "obj-priority-over-affine-bg"
+frames = "2968-2973"
+checks = ["layer2"]
+cause = "Only where OBJ 0 (priority 2) and OBJ 6 (priority 0, transparent at those pixels) overlap BG2 (affine, priority 1): mGBA draws OBJ 0 in front of BG2, gbarecomp behind it. The line state is equal on these frames (but line 25 of 2972, see mid-frame-write-timing). Which engine matches hardware is unverified."
+ref = "docs/research/phase2-replay.md section 3; docs/research/phase2-comparator.md section 3.1"
+
+[[allow]]
+id = "mid-frame-write-timing"
+frames = "294, 296, 607, 610, 1031, 1393-1395, 1864, 1873, 2149, 2157, 2165, 2188, 2482-2483, 2490, 2498, 2506, 2514, 2522, 2524, 2733, 2965, 2967, 2972, 2997, 3002, 3010-3011, 3014, 3018, 3027-3029, 3031, 3033, 3037, 3039, 3041-3045, 3052-3053, 3154, 3183, 3188, 3196, 3225, 3232, 3236, 3240, 3254"
+checks = ["layer1"]
+cause = "A write to a video register, the palette, OAM or VRAM lands on another line than in mGBA: the per-line state differs on a band of lines and is equal again later in the frame (2188: from the next frame on, its DMA3 spans the VBlank start). CPU, DMA or IRQ timing, the same profile on every gbarecomp backend. Pixels: see mid-frame-write-pixels."
+ref = "docs/research/phase2-diagnosis.md section 5.4; docs/research/phase2-comparator.md section 3.1"
+
+[[allow]]
+id = "mid-frame-write-pixels"
+frames = "610, 1031, 2188, 2482, 2498"
+checks = ["layer2"]
+cause = "The frames of mid-frame-write-timing whose pixels differ beyond one step: on each, the first such pixel is on a line whose state differs (lines 30, 80, 133, 110 and 30). The other frames of that entry have equal pixels or pass layer 2 (607, 1393-1395, 2483), but 2972, whose pixels obj-priority-over-affine-bg covers."
+ref = "docs/research/phase2-diagnosis.md section 5.4; docs/research/phase2-comparator.md section 3.1"
+
+[[allow]]
+id = "ram-snapshot-timing-ewram"
+frames = "294-295, 596-606, 608-609, 2155, 2482"
+checks = ["ram:ewram"]
+cause = "A CPU copy or decompression into EWRAM runs across the VBlank start, where the record is taken, at a slightly different point in the two engines: on each frame one 4 KiB block differs, a different block every frame, and EWRAM is equal again the next frame."
+ref = "docs/research/phase2-comparator.md section 3.2"
+
+[[allow]]
+id = "ram-snapshot-timing-iwram"
+frames = "607"
+checks = ["ram:iwram"]
+cause = "The same on IWRAM, once: 0x03001C00-0x03001FFF differs on frame 607 and is equal again the next frame."
+ref = "docs/research/phase2-comparator.md section 3.2"
+
+[[allow]]
+id = "irq-frames-on-stacks"
+frames = """
+295-296, 597-609, 1030, 1392-1395, 1416-1418, 1420-1422, 1424-1447, 1449-1458, 1460-1503,
+1505-1517, 1519, 1521-1536, 1538-1552, 1556, 1558-1565, 1567, 1569-1588, 1591-1595, 1597-1598,
+1600-1615, 1618-1635, 1637-1650, 1652-1661, 1663-1674, 1676-1689, 1691-1696, 1698-1699, 1701-1706,
+1708-1718, 1722, 1724-1726, 1728-1734, 1736-1738, 1740-1750, 1754-1756, 1758-1766, 1768-1790,
+1792-1809, 1811-1820, 1822-1825, 1827, 1829-1831, 1833-1849, 1851-1862, 1864-1872, 1874-1895,
+1897-1898, 1900-1903, 1905-1908, 1910-1920, 1922-1927, 1929-1943, 1945, 1947-1951, 1953-1955,
+1957-1973, 1977-1984, 1987, 1989-1996, 1998, 2000, 2002-2013, 2015-2018, 2020-2025, 2027-2032,
+2034-2046, 2048-2052, 2054-2058, 2060-2079, 2081-2083, 2085-2095, 2097-2098, 2100-2110, 2112-2129,
+2131-2137, 2139-2141, 2143-2153, 2157-2158, 2160-2161, 2164, 2185, 2187, 2481-2483, 2485, 2488,
+2490, 2494, 2497, 2500-2501, 2505, 2512-2513, 2521-2522, 2525, 2530, 2532, 2538-2541, 2545,
+2548-2549, 2552-2553, 2558, 2560-2561, 2564-2565, 2567, 2570, 2577, 2581, 2583, 2588, 2590,
+2599-2600, 2604-2605, 2607-2609, 2612, 2617, 2624, 2626-2629, 2632, 2635, 2644, 2660, 2669, 2676,
+2678, 2680, 2684, 2691, 2693, 2695, 2698, 2701, 2703, 2708, 2713-2716, 2721, 2724, 2733,
+2736-2737, 2739, 2742, 2747, 2749-2750, 2756, 2758-2761, 2763-2764, 2772-2773, 2775-2776, 2782,
+2799, 2806, 2810, 2813, 2817-2819, 2822, 2828-2829, 2832-2833, 2839-2840, 2845, 2850, 2864-2865,
+2869, 2871, 2875-2876, 2879, 2883-2884, 2890-2891, 2893, 2897-2898, 2900, 2906, 2911, 2915, 2919,
+2922, 2926-2929, 2932, 2934-2936, 2946, 2949, 2951, 2961, 2963, 2965-2967, 2971-2972, 2977, 2982,
+2984, 2990, 2992, 2995, 2998, 3000, 3006, 3009, 3014, 3017, 3020, 3023, 3035, 3069-3070, 3073,
+3079-3081, 3086, 3088-3089, 3098-3099, 3105, 3107, 3111, 3125, 3129-3130, 3138, 3145, 3153, 3155,
+3157, 3159, 3162, 3172, 3176, 3180, 3184, 3186, 3188, 3191, 3206-3207, 3209, 3213, 3215, 3229,
+3231, 3233-3235, 3237-3238, 3250-3251
+"""
+checks = ["ram:iwram_stacks"]
+cause = "891 frames. The stack words that differ are those an interrupt entry pushes: the BIOS IRQ handler's frames at 0x03007F70-0x03007F9F (r0-r3, r12 and lr of the interrupted code, a nested IRQ's below them) and 0x03007E60-0x03007E7F on 11 frames, below the main thread's stack. Which instruction an IRQ interrupts follows the engines' IRQ timing, which differs (gbarecomp charges no IRQ entry cycles and has no IRQ delay); the rest of RAM is equal on these frames."
+ref = "docs/research/phase2-race-lockstep.md sections 3 and 5; docs/research/phase2-comparator.md section 3.2"
+
+[[allow]]
+id = "race-starts-one-frame-late"
+frames = "3286-4400"
+checks = ["layer1", "layer2", "ram:*"]
+cause = "gbarecomp's GamePak prefetch model never resets on a branch, so the race program's start-up loop is 18% slower: EWRAM differs from 3286 while it clears .bss, the race image arrives at 3291 instead of 3290, and with the inputs on the same frames the race leaves lockstep with mGBA (no IRQ entry cycles in gbarecomp also moves VCOUNT-fed random draws). No frame map realigns it: with a +1 map EWRAM still differs from 3293. Deliberately wider than the frames that differ (the report lists the others): with the race out of lockstep, nothing on these frames is compared until P2-21 removes this entry."
+ref = "docs/research/phase2-race-lockstep.md sections 2-4; docs/research/phase2-comparator.md section 3.3"
+fixed_by = "P2-21"

@@ -3,7 +3,8 @@
 
 Stdlib only; run with python3 -I. The file format is in README.md next to
 this script. This is the interim comparison P2-03 needs (a join on the frame
-column); the comparator with allowlists and tolerances is P2-09's.
+column). The comparator with allowlists and tolerances is
+tools/difftest/compare.py (P2-09).
 
 usage: capture.py COMMAND ...
 
