@@ -1,0 +1,30 @@
+# gba_recompile and runtime config for the synthetic repro ROM irqentry2
+# (tests/repro/make_rom.py irqentry2; no Nintendo data inside). It times an
+# immediate DMA with and without one timer IRQ raised while the DMA runs,
+# which shows that patches/gbarecomp/0012 hides the IRQ entry's refill behind
+# a DMA wherever the DMA's cycles are charged: see tests/repro/README.md.
+# scripts/repro-test.sh generates the ROM, checks its SHA-1 against
+# [identity] below, recompiles it with this file and runs it.
+[game]
+name = "IRQ entry repro 2"
+short_name = "irqentry2"
+
+[program]
+name = "irqentry2"
+id = "ZZZT"                     # header game code written by make_rom.py
+load_address = 0x08000000
+size = 0x00001000               # 4096 bytes
+entry_pc = 0x08000000
+speculative_literal_harvest = false
+
+[identity]
+sha1 = "327b21fbbe4275555315ae19b0bfad970d81ac4e"
+
+[bios]
+# The header logo is zero, so the BIOS intro, which checks it, must not run.
+skip_intro = true
+
+[[extra_func]]
+addr = 0x08000180
+mode = "arm"
+note = "Timer 1 IRQ handler, as in irqentry1. Its address appears only in the literal at 0x0800014C, which the start-up code stores at 0x03007FFC (make_rom.py, IRQENTRY2)"

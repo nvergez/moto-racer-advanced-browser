@@ -445,15 +445,26 @@ match_patch() {
 # resolve_patch NAME: SERIES/FILE, the one patch that NAME designates: its
 # number (0003), its file name with or without .patch, or a path to it. A
 # name in the nested series is qualified with the series' name or directory
-# (arm-recomp-core/0001, patches/arm-recomp-core/0001-x.patch); any other
-# name designates a patch of patches/gbarecomp/.
+# (arm-recomp-core/0001, patches/arm-recomp-core/0001-x.patch); a name
+# without a directory designates a patch of patches/gbarecomp/. A directory
+# that is neither a series' name nor, for an existing file, a series'
+# directory stops: a mistyped series must not leave out another patch.
 resolve_patch() {
   local want=${1##*/} series=gbarecomp dir s found count other
   case "$1" in
     */*)
       dir=${1%/*}
       dir=${dir##*/}
+      series=""
       for s in $MRA_PATCH_SERIES; do [ "$dir" != "$s" ] || series=$s; done
+      if [ -z "$series" ] && [ -f "$1" ]; then
+        dir=$(cd "$(dirname "$1")" && pwd -P)
+        for s in $MRA_PATCH_SERIES; do
+          [ "$dir" != "$(cd "$MRA_ROOT/patches/$s" 2> /dev/null && pwd -P)" ] || series=$s
+        done
+      fi
+      [ -n "$series" ] ||
+        die "unknown patch series '${1%/*}' in '$1': qualify a patch with one of: $MRA_PATCH_SERIES"
       ;;
   esac
   want=${want%.patch}
@@ -634,6 +645,31 @@ reset_dir() {
   done
   rm -rf "$dir"
   mkdir -p "$dir"
+}
+
+# clear_stale_heal_cache BUILD_DIR: empty BUILD_DIR/recomp_cache when the
+# patched trees of the series differ from those BUILD_DIR's cache was last
+# kept with (BUILD_DIR/recomp_cache.series). gbarecomp's Stage-2 healing,
+# on by default, compiles each missed function into recomp_cache/ under the
+# runtime's working directory and loads it again at every start. The cache
+# is keyed by the ROM's SHA-1, the compiler, the host, the PC and a CRC of
+# the guest code, and checked against an ABI version that covers its data
+# layout only (overlay_loader.cpp:118-123 and 356-395 at the pin), not the
+# code generator or the inline runtime that the patches change. A function
+# healed before a patch would otherwise keep the timing of the series it was
+# compiled with. Runs with GBARECOMP_SELFHEAL_RECOMPILE=0 or under
+# GBARECOMP_STRICT_STATIC=1 never read the cache.
+clear_stale_heal_cache() {
+  local dir=$1 key series stamp
+  key=$(for series in $MRA_PATCH_SERIES; do
+    stamp="$(series_state_dir "$series")/stamp"
+    printf '%s tree=%s\n' "$series" "$(sed -n 's/^tree=//p' "$stamp" 2> /dev/null | head -n 1)"
+  done)
+  if [ -d "$dir/recomp_cache" ] && [ "$(cat "$dir/recomp_cache.series" 2> /dev/null)" != "$key" ]; then
+    reset_dir "$dir/recomp_cache"
+    info "Emptied $(rel "$dir/recomp_cache"): its heals may come from another patch series"
+  fi
+  printf '%s\n' "$key" > "$dir/recomp_cache.series"
 }
 
 # recompile_rom <rom> <config> <out dir> <log> [gba_recompile option...]

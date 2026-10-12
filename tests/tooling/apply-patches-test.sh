@@ -581,6 +581,18 @@ check "... with a message" said "no patch in patches/arm-recomp-core matches 'ar
 run_fails "an unqualified name of a nested patch stops" "$apply" --without 0002-nb
 check "... and says how to name it" said "qualify the name: arm-recomp-core/0002-nb"
 check "... before writing anything" d_out_core_full
+# A mistyped series must not fall back to gbarecomp's patch of that number.
+run_fails "a name in an unknown series stops" "$apply" --without arm-recomp/0002
+check "... with a message" said "unknown patch series 'arm-recomp' in 'arm-recomp/0002'"
+run_fails "... also when gbarecomp has a patch of that number" "$apply" --without foo/0003
+check "... before writing anything" d_out_core_full
+run_fails "... and --check stops too" "$apply" --check --without foo/0003
+check "... with the same message" said "unknown patch series 'foo' in 'foo/0003'"
+run_ok "a normal run restores both" "$apply"
+check "... series" both_full
+run_ok "a relative path to a nested patch, from its directory" \
+  in_dir "$np" "$apply" --without ./0002-nb.patch
+check "... names the nested 0002" na_only
 run_ok "a normal run restores both" "$apply"
 check "... series" both_full
 rm -rf "$root/build"

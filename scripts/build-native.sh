@@ -87,6 +87,8 @@ grep -q "BIOS recompiled output present" "$build_dir.configure.log" ||
 
 info "Building MotoRacerAdvanceRecomp"
 cmake --build "$build_dir" --target MotoRacerAdvanceRecomp --parallel "$(job_count)"
+# Heals compiled by a run of an earlier series must not load into this one.
+clear_stale_heal_cache "$build_dir"
 
 info "Built $(rel "$build_dir")/MotoRacerAdvanceRecomp"
 # The same command as docs/toolchain.md, "Native build", with absolute paths,

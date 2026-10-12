@@ -2,17 +2,18 @@
 """Synthetic 4 KiB GBA ROMs that reproduce gbarecomp runtime bugs.
 
     make_rom.py CASE OUT.gba      CASE is irqleak1, irqleak2, irqleak3,
-                                  overlay1, overlay1heal, prefetch1 or
-                                  irqentry1
+                                  overlay1, overlay1heal, prefetch1,
+                                  irqentry1 or irqentry2
 
 Prints the SHA-1 of the ROM it wrote. Each case has a gba_recompile config
 next to this script (CASE.toml) whose [identity].sha1 pins these bytes.
 irqleak1-3 reproduce the IRQ call-return leak (patch 0003, below); overlay1
 reproduces the shared-IWRAM code images that patch 0006's RAM overlay
 selector handles (see OVERLAY1). overlay1heal is the same ROM, byte for byte,
-run with another config and selector (tests/repro/README.md). prefetch1 and
-irqentry1 time CPU work against mGBA's model: the GamePak prefetch reset on a
-PC write and the cycles of IRQ entry (see PREFETCH1 and IRQENTRY1).
+run with another config and selector (tests/repro/README.md). prefetch1,
+irqentry1 and irqentry2 time CPU work against mGBA's model: the GamePak
+prefetch reset on a PC write, and the cycles of IRQ entry, which a DMA hides
+(see PREFETCH1, IRQENTRY1 and IRQENTRY2).
 
 No Nintendo code or data is inside: the header logo (0x04-0x9F) is left zero,
 so the runtime must skip the BIOS intro ([bios] skip_intro = true in the
@@ -443,6 +444,36 @@ IRQENTRY1 = {
     0x08000220: 0xE12FFF1E,  # bx lr
 }
 
+# irqentry2: an IRQ raised while a DMA holds the bus costs no refill in mGBA,
+# whose event loop advances a CPU that a DMA blocks to its next event
+# (GBAProcessEvents, cpuBlocked). irqentry1's program, with the timed routine
+# at 0x08000200 replaced: it starts an immediate DMA3 of 64 words from EWRAM
+# to EWRAM with one store to DMA3CNT, between the two timer 0 reads. In the
+# second run, timer 1 overflows about 256 cycles after it starts, while the
+# DMA runs (it takes about 770 cycles), so the IRQ is taken right after the
+# store. Generated code and the interpreter charge the DMA's cycles after the
+# store, from runtime_resync_horizon; patch 0012 must hide the refill there
+# too, not only after a DMA drained inside runtime_tick.
+IRQENTRY2 = {
+    **{a: w for a, w in IRQENTRY1.items() if a < 0x08000200},
+    # k_dma: one immediate DMA3, timed.
+    0x08000200: 0xE59FA02C,  # ldr r10, [pc, #0x2C] -> 0x040000D4 (literal at 0x08000234)
+    0x08000204: 0xE3A01402,  # mov r1, #0x02000000
+    0x08000208: 0xE58A1000,  # str r1, [r10]         DMA3SAD = 0x02000000
+    0x0800020C: 0xE2811A01,  # add r1, r1, #0x1000
+    0x08000210: 0xE58A1004,  # str r1, [r10, #4]     DMA3DAD = 0x02001000
+    0x08000214: 0xE59F601C,  # ldr r6, [pc, #0x1C]   -> 0x84000040 (literal at 0x08000238)
+    0x08000218: 0xE1DC40B0,  # ldrh r4, [r12]        t0
+    0x0800021C: 0xE58A6008,  # str r6, [r10, #8]     DMA3CNT: 64 words, 32-bit, start now
+    0x08000220: 0xE1DC50B0,  # ldrh r5, [r12]        t1
+    0x08000224: 0xE0450004,  # sub r0, r5, r4
+    0x08000228: 0xE1A00800,  # mov r0, r0, lsl #16
+    0x0800022C: 0xE1A00820,  # mov r0, r0, lsr #16
+    0x08000230: 0xE12FFF1E,  # bx lr
+    0x08000234: 0x040000D4,
+    0x08000238: 0x84000040,
+}
+
 
 def check_overlay_images():
     """Stop unless every word of images A and B is defined and the two images
@@ -470,6 +501,7 @@ CASES = {
     'overlay1heal': (b'RAMOVERLAY1', b'ZZZW', OVERLAY1),
     'prefetch1': (b'PREFETCH1', b'ZZZV', PREFETCH1, PREFETCH1_THUMB),
     'irqentry1': (b'IRQENTRY1', b'ZZZU', IRQENTRY1),
+    'irqentry2': (b'IRQENTRY2', b'ZZZT', IRQENTRY2),
 }
 
 

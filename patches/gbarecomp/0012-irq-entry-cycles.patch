@@ -20,117 +20,139 @@ both). Enough to move a VCOUNT read across a line boundary now and then.
 
 The change, in runtime_tick (runtime_bus_bridge.cpp): before runtime_irq,
 charge 2 + runtime_refill_cycles(0x18, ARM), the same refill a generated
-PC write charges, unless drain_dma_steal charged DMA cycles in the same
-runtime_tick (it now returns how many). The cycles are pumped as the HALT
-wake delay is: devices advance, IRQs raised meanwhile stay pending in IF,
-and the IRQ already decided is taken. A wake from HALT now costs the 7
-cycles of kIrqWakeDelayCycles plus the 2 of the entry, as in mGBA (the IRQ
-event's delay, then ARMRaiseIRQ). runtime_refill_cycles also empties the
-GamePak prefetch buffer, as for any PC write, when the prefetch reset
-patch (0011) is applied; on its own this patch only adds the cycles.
+PC write charges, unless a DMA held the bus during the instruction that
+just ran. drain_dma_steal sets a flag whenever it charges a DMA's stolen
+cycles, and runtime_tick reads and clears it at every IRQ check, so the
+answer does not depend on where the cycles were drained: in runtime_tick
+itself (timed and FIFO DMA, or an immediate DMA started on the raw bus by
+the self-heal bridge) or in runtime_resync_horizon, right after the guest
+write that started an immediate DMA (generated code and the force-interp
+backend). The flag is cleared when another machine's timing context is
+restored. The cycles are pumped as the HALT wake delay is: devices
+advance, IRQs raised meanwhile stay pending in IF, and the IRQ already
+decided is taken. A wake from HALT now costs the 7 cycles of
+kIrqWakeDelayCycles plus the 2 of the entry, as in mGBA (the IRQ event's
+delay, then ARMRaiseIRQ). runtime_refill_cycles also empties the GamePak
+prefetch buffer, as for any PC write, when the prefetch reset patch (0011)
+is applied; this patch applies and builds without it, and then only adds
+the cycles.
 
-"A DMA in the same runtime_tick" approximates mGBA's "a DMA blocks the
-CPU when the IRQ is raised": gbarecomp charges a DMA's stolen cycles at
-once, where mGBA starts it 3 cycles after its trigger, and takes an IRQ at
-the next instruction boundary, where mGBA takes it 7 cycles after it is
-raised (13 for HBlank). Those latencies are not copied here. Multiplayer
-session execution takes IRQs in runtime_should_yield, not here, and is
-unchanged; so is tools/bios_smoke, which keeps its own IRQ loop.
+A first version hid the refill only when DMA cycles were drained in the
+same runtime_tick. Generated code and the interpreter then charged it
+after an immediate DMA, which they drain after the write, and the
+self-heal bridge did not: comparing a commercial game's recompiled run
+with its interpreter run, an IRQ taken after an 11,266-cycle DMA started
+from bridged IWRAM code cost 2 cycles on one side and none on the other,
+and one scanline's palette write landed on the other side of the line.
+
+"A DMA during this instruction" approximates mGBA's "a DMA blocks the CPU
+when the IRQ is raised": gbarecomp charges a DMA's stolen cycles at once,
+where mGBA starts it 3 cycles after its trigger, and takes an IRQ at the
+next instruction boundary, where mGBA takes it 7 cycles after it is
+raised (13 for HBlank). Those latencies are not copied here, so an IRQ
+raised in the last few cycles of a DMA is hidden here and not in mGBA.
+Multiplayer session execution takes IRQs in runtime_should_yield, not
+here, and is unchanged; so is tools/bios_smoke, which keeps its own IRQ
+loop.
 
 Tested on macOS arm64 (Apple clang 21) at gbarecomp 5e89943 plus this
 series:
 
 - gbarecomp's ctest, 52 of 52 (with the gba-tests test ROMs).
-- A synthetic 4 KiB ROM (no Nintendo data, header logo zero), irqentry1,
-  times 100 iterations of `subs; bne` from the cartridge between two timer
-  0 reads at F/1, alone and with one timer 1 IRQ inside (no DMA, the
-  handler in the cartridge). mGBA 0.10.5 on a minimal stand-in BIOS
-  (vectors, an IRQ dispatcher, VBlankIntrWait): 2596 and 2748 cycles.
-  gbarecomp 5e89943 on the same image: 2596 and 2746, on generated code
-  (GBARECOMP_STRICT_STATIC=1, fully static) and on the interpreter
-  (GBARECOMP_FORCE_INTERP=1, BIOS interpreted too). With this patch: 2596
-  and 2748 on both. On the retail BIOS, mGBA gives 2596 and 2747. The
-  generators and config are in tests/repro/ of
+- Two synthetic 4 KiB ROMs (no Nintendo data, header logo zero), on a
+  minimal stand-in BIOS (vectors, an IRQ dispatcher, VBlankIntrWait) and
+  on the retail BIOS, each on generated code (GBARECOMP_STRICT_STATIC=1,
+  fully static) and on the interpreter (GBARECOMP_FORCE_INTERP=1, BIOS
+  interpreted too). irqentry1 times 100 iterations of `subs; bne` from the
+  cartridge between two timer 0 reads at F/1, alone and with one timer 1
+  IRQ inside (no DMA, the handler in the cartridge): mGBA 0.10.5 gives
+  2596 and 2748 cycles on the stand-in BIOS (2747 on the retail one);
+  gbarecomp 5e89943 2596 and 2746 on both backends; with this patch,
+  mGBA's values on both. irqentry2 times one immediate DMA3 of 64 words
+  from EWRAM to EWRAM, started by a store between the two timer reads,
+  alone and with the timer 1 IRQ raised while it runs: mGBA gives 789 and
+  939 (938 on the retail BIOS), as does gbarecomp with this patch and
+  without it on both backends; the first version gave 941. The generators
+  and configs are in tests/repro/ of
   https://github.com/nvergez/moto-racer-advanced-browser (make_rom.py,
-  make_bios.py, irqentry1.toml); attach them when filing this patch.
+  make_bios.py, irqentry1.toml, irqentry2.toml); attach them when filing
+  this patch.
 - A commercial game (HBlank IRQ on every line, HBlank DMA on the visible
   lines), on the interpreter, with the prefetch reset (0011 and its
   arm-recomp-core half): over one race frame, the IRQ entries on VBlank
   lines cost 2 cycles in mGBA (58 of 60 measured) and 0 without this
-  patch, 2 (60 of 61) with it; on visible lines 30 in both, with and
-  without. Without it the game's random number generator, which adds
-  VCOUNT to its state, read one line earlier than in mGBA at the first
-  draw near a line boundary, and the race diverged; with it, the
-  generator's state equals mGBA's on every frame of a full race, and a
-  three-race cup ends with mGBA's positions and points.
+  patch, 2 (57 of 60) with it; on visible lines 30 in mGBA (158 of 160)
+  and with this patch (155 of 160). Without it the game's random number
+  generator, which adds VCOUNT to its state, read one line earlier than in
+  mGBA at the first draw near a line boundary, and the race diverged; with
+  it, the generator's state equals mGBA's on every frame of a full race,
+  and a three-race cup ends with mGBA's positions and points.
 
 diff --git a/docs/CPU_TIMING.md b/docs/CPU_TIMING.md
-index 122079c..6938ec2 100644
+index 122079c..b3bb484 100644
 --- a/docs/CPU_TIMING.md
 +++ b/docs/CPU_TIMING.md
-@@ -74,6 +74,17 @@ bcc`) kept the position of the opcodes after the loop across the branch back
- and charged its store 8 cycles instead of mGBA's 4 (26 cycles per iteration
- instead of 22, with WAITCNT `4317h`).
+@@ -25,6 +25,20 @@ instr_cycle_base(op)            fixed part: 1S fetch + internal cycles
+ `next_fetch_nonsequential` (arm-recomp-core `arm_ir.h`) lists the ops whose
+ next fetch is N. SWP/SWPB cost 1S+2N+1I and, like mGBA, get no N adjust.
  
 +## IRQ entry
 +
 +`runtime_tick` takes an IRQ at the first instruction boundary after it is
 +pending and unmasked. The entry writes the PC (the vector at `18h`, in the
 +zero-wait BIOS) and costs the refill, 2 cycles plus the vector's N+S fetch
-+waits, as mGBA's `ARMRaiseIRQ` charges `ARMWritePC`. When a DMA's stolen
-+cycles were charged in the same tick, the refill is hidden: mGBA advances a
-+CPU that a DMA blocks straight to its next event, and the refill passes
-+within that wait. A wake from HALT adds `kIrqWakeDelayCycles` (7) before
-+the entry.
++waits, as mGBA's `ARMRaiseIRQ` charges `ARMWritePC`. When a DMA held the
++bus during the instruction that just ran, the refill is hidden: mGBA
++advances a CPU that a DMA blocks straight to its next event, and the refill
++passes within that wait. That holds wherever the DMA's stolen cycles were
++charged: in `runtime_tick` (timed and FIFO DMA, or an immediate DMA started
++on the raw bus inside a self-heal bridge) or after the guest write that
++started an immediate DMA. A wake from HALT adds `kIrqWakeDelayCycles` (7)
++before the entry.
 +
- ## Verification
+ ## Wait states
  
- | Test | Checks |
+ `RuntimeWaitTable` (`runtime_arm_types.h`) holds, per region `addr >> 24`,
 diff --git a/src/runtime/runtime_bus_bridge.cpp b/src/runtime/runtime_bus_bridge.cpp
-index 273a3c7..b678bc2 100644
+index 273a3c7..2db4200 100644
 --- a/src/runtime/runtime_bus_bridge.cpp
 +++ b/src/runtime/runtime_bus_bridge.cpp
-@@ -673,17 +673,18 @@ static inline void recompute_event_budget(gba::GbaBus* bus, gba::GbaPpu* ppu) {
+@@ -668,6 +668,12 @@ static inline void recompute_event_budget(gba::GbaBus* bus, gba::GbaPpu* ppu) {
+     g_event_budget = static_cast<long long>(h);
+ }
+ 
++// Set whenever DMA-stolen cycles are charged (drain_dma_steal, from
++// runtime_tick or runtime_resync_horizon); runtime_tick reads and clears it
++// at every IRQ-eligibility check, so there it tells whether a DMA held the bus
++// during the instruction that just ran, wherever its cycles were drained.
++static bool g_dma_since_irq_check = false;
++
+ // Charge DMA-stolen bus cycles (accumulated by the GbaIo DMA loops) to the
+ // master clock and advance devices for that window — i.e. model cycle-stealing.
  // Called OUTSIDE tick_devices (end of runtime_tick for timed/FIFO DMA; after a
- // guest write for immediate DMA), so its own tick_devices is not re-entrant.
- // Guarded against the (currently unreachable) in-tick case for safety.
--static inline void drain_dma_steal(gba::GbaBus* bus, gba::GbaPpu* ppu) {
--    if (!bus || !ppu) return;
-+// Returns the cycles charged (0 when no DMA ran).
-+static inline uint32_t drain_dma_steal(gba::GbaBus* bus, gba::GbaPpu* ppu) {
-+    if (!bus || !ppu) return 0;
+@@ -678,6 +684,7 @@ static inline void drain_dma_steal(gba::GbaBus* bus, gba::GbaPpu* ppu) {
      uint32_t cyc = bus->io().take_dma_steal_cycles();
--    if (cyc == 0) return;
-+    if (cyc == 0) return 0;
+     if (cyc == 0) return;
      cyc_probe("dma_steal", cyc);
++    g_dma_since_irq_check = true;
      g_runtime_cycles += cyc;
      if (g_in_device_tick) {
          // Defensive: defer the device-advance into the pending window.
-         g_pending_cycles += cyc;
-         g_event_budget   -= static_cast<long long>(cyc);
--        return;
-+        return cyc;
-     }
-     if (g_pending_cycles) {
-         tick_devices(bus, ppu, static_cast<uint32_t>(g_pending_cycles));
-@@ -691,6 +692,7 @@ static inline void drain_dma_steal(gba::GbaBus* bus, gba::GbaPpu* ppu) {
-     }
-     tick_devices(bus, ppu, cyc);
-     recompute_event_budget(bus, ppu);
-+    return cyc;
- }
- 
- // Materialize lagged device state up to 'now'. Called before any MMIO access so
-@@ -776,7 +778,7 @@ extern "C" void runtime_tick(uint32_t cycles) {
-     // A timed/FIFO DMA may have fired inside that flush; charge its stolen bus
+@@ -777,6 +784,13 @@ extern "C" void runtime_tick(uint32_t cycles) {
      // cycles (advancing the clock + devices) before the IRQ-eligibility check,
      // so a DMA-end IRQ or a timer that overflowed during the steal is seen now.
--    drain_dma_steal(bus, ppu);
-+    const uint32_t dma_stolen = drain_dma_steal(bus, ppu);
+     drain_dma_steal(bus, ppu);
++    // Whether a DMA held the bus during this instruction: a timed or FIFO DMA
++    // drained just above, or an immediate DMA drained after the guest write
++    // that started it (runtime_resync_horizon, from generated code and the
++    // force-interp backend; the self-heal bridge writes the raw bus, so its
++    // immediate DMAs are drained above). Cleared here at every check.
++    const bool dma_held_bus = g_dma_since_irq_check;
++    g_dma_since_irq_check = false;
  
      if (bus->io().irq_pending() && (g_cpu.cpsr & CPSR_I_BIT) == 0) {
          g_runtime_irq_from_halt = bus->io().halted() ? 1u : 0u;
-@@ -810,6 +812,26 @@ extern "C" void runtime_tick(uint32_t cycles) {
+@@ -810,6 +824,27 @@ extern "C" void runtime_tick(uint32_t cycles) {
              tick_devices(bus, ppu, gba::kIrqWakeDelayCycles);
              recompute_event_budget(bus, ppu);
          }
@@ -138,13 +160,14 @@ index 273a3c7..b678bc2 100644
 +        // which costs a pipeline refill: 2 cycles plus the vector's N+S fetch
 +        // waits, as mGBA's ARMRaiseIRQ charges them (cpu->cycles +=
 +        // ARMWritePC). runtime_refill_cycles also empties the prefetch buffer,
-+        // as any PC write does. A DMA that held the bus in this tick hides the
-+        // refill: mGBA advances a CPU that a DMA blocks to its next event
-+        // (GBAProcessEvents, cpuBlocked), and the refill cycles pass within
-+        // that wait. Pumped like the wake delay above: devices advance, but
-+        // the IRQ is not re-taken; IRQs raised meanwhile stay pending in IF.
++        // as any PC write does. A DMA that held the bus during this
++        // instruction hides the refill: mGBA advances a CPU that a DMA blocks
++        // to its next event (GBAProcessEvents, cpuBlocked), and the refill
++        // cycles pass within that wait. Pumped like the wake delay above:
++        // devices advance, but the IRQ is not re-taken; IRQs raised meanwhile
++        // stay pending in IF.
 +        const uint32_t entry = 2u + runtime_refill_cycles(0x00000018u, 0u);
-+        if (dma_stolen == 0u) {
++        if (!dma_held_bus) {
 +            if (g_pending_cycles) {
 +                tick_devices(bus, ppu, static_cast<uint32_t>(g_pending_cycles));
 +                g_pending_cycles = 0;
@@ -157,3 +180,12 @@ index 273a3c7..b678bc2 100644
          runtime_irq(g_cpu.R[15]);
      }
  
+@@ -1164,6 +1199,8 @@ void runtime_restore_timing_context(const RuntimeTimingContext& in) {
+     g_runtime_yielded_vblank_start = in.yielded_vblank;
+     g_pending_cycles = in.pending_cycles;
+     g_event_budget = in.event_budget;
++    // Per-instruction, never carried from one machine to another.
++    g_dma_since_irq_check = false;
+     // These are speculative idle proofs, not guest state. Invalidating them
+     // on rebinding prevents one machine's proof being applied to another.
+     g_idle_sites.clear();

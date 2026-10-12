@@ -3,10 +3,10 @@
 # (no Nintendo data inside), and check how each run ends. irqleak1-3 reproduce
 # the IRQ call-return leak that patches/gbarecomp/0003 fixes; overlay1, two
 # code images sharing IWRAM, which 0006's RAM overlay selector handles;
-# prefetch1 and irqentry1 time CPU work against mGBA, for the prefetch reset
-# (0011 with patches/arm-recomp-core/0001) and the IRQ entry cycles (0012)
-# (tests/repro/README.md). Needs no game ROM and, by default, no BIOS dump, so
-# CI runs it.
+# prefetch1, irqentry1 and irqentry2 time CPU work against mGBA, for the
+# prefetch reset (0011 with patches/arm-recomp-core/0001) and the IRQ entry
+# cycles (0012), which a DMA hides (irqentry2) (tests/repro/README.md).
+# Needs no game ROM and, by default, no BIOS dump, so CI runs it.
 #
 #   scripts/repro-test.sh [--bios PATH] [--frames N] [--without NAME]...
 #                         [--expect-failure] [CASE...]
@@ -31,13 +31,14 @@
 #                      healing on. prefetch1, without 0011 and
 #                      arm-recomp-core/0001 (they go together), and
 #                      irqentry1, without 0012: timings other than mGBA's.
-#                      Without CASE, runs the default cases whose patches are
-#                      left out
+#                      irqentry2 has no such run: the pin gives mGBA's values
+#                      too (it charges no IRQ entry at all). Without CASE,
+#                      runs the default cases whose patches are left out
 #   CASE               irqleak1, irqleak2, irqleak3, overlay1, prefetch1,
-#                      irqentry1 (the default: these six), or overlay1heal,
-#                      which runs only when named (below)
+#                      irqentry1, irqentry2 (the default: these seven), or
+#                      overlay1heal, which runs only when named (below)
 #
-# prefetch1 and irqentry1 store timer-measured cycle counts in EWRAM
+# prefetch1, irqentry1 and irqentry2 store timer-measured cycle counts in EWRAM
 # (tests/repro/make_rom.py), which gbarecomp's capture (patch 0005) records
 # at every VBlank. Each runs twice: under GBARECOMP_STRICT_STATIC=1 (generated
 # code), and as CASE-interp under GBARECOMP_FORCE_INTERP=1 and
@@ -90,7 +91,7 @@ set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 . "$(dirname "$0")/lib/common.sh"
 
-ALL_CASES="irqleak1 irqleak2 irqleak3 overlay1 prefetch1 irqentry1"
+ALL_CASES="irqleak1 irqleak2 irqleak3 overlay1 prefetch1 irqentry1 irqentry2"
 FRAMES=2000
 EXPECT=pass
 CASES_ARG=""
@@ -104,7 +105,7 @@ while [ $# -gt 0 ]; do
     --without) [ $# -ge 2 ] || die "--without needs a patch name or number"; add_without "$2"; shift ;;
     --without=*) add_without "${1#*=}" ;;
     --expect-failure) EXPECT=failure ;;
-    -h | --help) sed -n '2,88p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,89p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option: $1" ;;
     *) CASES_ARG="$CASES_ARG${CASES_ARG:+ }$1" ;;
   esac
@@ -117,7 +118,9 @@ esac
 select_patch_variant
 
 # case_patch CASE: the patches that fix CASE's bug, as --without names them.
-# 0011 and arm-recomp-core/0001 are one fix in two repositories.
+# 0011 and arm-recomp-core/0001 are one fix in two repositories. Nothing for
+# irqentry2: it guards how 0012 treats a DMA, and leaving 0012 out does not
+# change its results (no IRQ entry is charged at all, which a DMA would hide).
 case_patch() {
   case "$1" in
     irqleak*) echo 0003 ;;
@@ -147,11 +150,18 @@ all_left_out() {
 CASES=""
 for c in ${CASES_ARG:-$ALL_CASES}; do
   case "$c" in
-    irqleak1 | irqleak2 | irqleak3 | overlay1 | overlay1heal | prefetch1 | irqentry1) ;;
-    *) die "unknown case: $c (irqleak1, irqleak2, irqleak3, overlay1, overlay1heal, prefetch1 or irqentry1)" ;;
+    irqleak1 | irqleak2 | irqleak3 | overlay1 | overlay1heal | prefetch1 | irqentry1 | irqentry2) ;;
+    *) die "unknown case: $c (irqleak1, irqleak2, irqleak3, overlay1, overlay1heal, prefetch1, irqentry1 or irqentry2)" ;;
   esac
   if [ "$EXPECT" = failure ]; then
     p=$(case_patch "$c")
+    if [ -z "$p" ]; then
+      if [ -z "$CASES_ARG" ]; then
+        info "Skipping $c: it has no --expect-failure run"
+        continue
+      fi
+      die "$c has no --expect-failure run: no patch left out brings back a bug it shows (tests/repro/README.md)"
+    fi
     if ! all_left_out "$p"; then
       [ -z "$CASES_ARG" ] && continue
       die "$c reproduces the bug that $p fix(es): --expect-failure needs --without for each: $p"
@@ -160,7 +170,7 @@ for c in ${CASES_ARG:-$ALL_CASES}; do
   # The overlay and timing cases read their results through patch 0005's
   # capture.
   case "$c:$left_out" in
-    overlay*:*" 0005 "* | prefetch1:*" 0005 "* | irqentry1:*" 0005 "*)
+    overlay*:*" 0005 "* | prefetch1:*" 0005 "* | irqentry*:*" 0005 "*)
       if [ -z "$CASES_ARG" ]; then
         info "Skipping $c: it reads its results through patch 0005's capture, which --without 0005 leaves out"
         continue
@@ -507,20 +517,23 @@ check_overlay() {
 # timing_reference CASE: what mGBA 0.10.5 gives for CASE's three results on
 # this run's BIOS image, in decimal, then '|' and the indices of the results
 # that the bug changes (tests/repro/README.md, "CPU timing against mGBA").
-# prefetch1 runs no BIOS code; irqentry1's IRQ goes through the BIOS's IRQ
-# dispatcher, so its values depend on the image. Nothing for other images.
+# prefetch1 runs no BIOS code; the IRQs of irqentry1 and irqentry2 go
+# through the BIOS's IRQ dispatcher, so their values depend on the image.
+# Nothing for other images. irqentry2 has no --expect-failure run (case_patch).
 timing_reference() {
   case "$1:$bios_kind:$bios_sha1" in
     prefetch1:*) echo "1424 1424 892|0 1 2" ;;
     irqentry1:"stand-in BIOS":*) echo "2596 2748 1|1" ;;
     irqentry1:*:"$NINTENDO_BIOS_SHA1") echo "2596 2747 1|1" ;;
+    irqentry2:"stand-in BIOS":*) echo "789 939 1|" ;;
+    irqentry2:*:"$NINTENDO_BIOS_SHA1") echo "789 938 1|" ;;
   esac
 }
 
-# check_timing RUN CASE strict|interp: run CASE (prefetch1 or irqentry1) as
-# RUN with the capture on, on generated code under GBARECOMP_STRICT_STATIC=1
-# or on the interpreter with the BIOS interpreted too, and compare its
-# results with mGBA's.
+# check_timing RUN CASE strict|interp: run CASE (prefetch1, irqentry1 or
+# irqentry2) as RUN with the capture on, on generated code under
+# GBARECOMP_STRICT_STATIC=1 or on the interpreter with the BIOS interpreted
+# too, and compare its results with mGBA's.
 check_timing() {
   local name=$1 c=$2 backend=$3 ref want changed frames coverage capture
   local row got="" marker="?" i v w problems=""
@@ -577,6 +590,12 @@ check_timing() {
       'self_heal_coverage=FULLY_STATIC dispatch_misses=0 interpreted_insns=0') ;;
       *) problems="$problems not fully static (${coverage:-no coverage banner});" ;;
     esac
+  else
+    # Without these banners the case would quietly time generated code.
+    grep -q '^force_interp=ENABLED' "$log" ||
+      problems="$problems not run on the interpreter (no force_interp=ENABLED);"
+    grep -q '^mra_interp_bios=ENABLED' "$log" ||
+      problems="$problems the BIOS not interpreted (no mra_interp_bios=ENABLED);"
   fi
   if [ -z "$ref" ]; then
     problems="$problems no mGBA reference values for this BIOS image ($bios_sha1);"
@@ -610,7 +629,7 @@ check_timing() {
 for c in $CASES; do
   case "$c" in
     irqleak*) check_irqleak "$c" ;;
-    prefetch1 | irqentry1)
+    prefetch1 | irqentry1 | irqentry2)
       check_timing "$c" "$c" strict
       check_timing "$c-interp" "$c" interp
       ;;
