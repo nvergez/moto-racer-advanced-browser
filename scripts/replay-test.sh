@@ -31,15 +31,25 @@
 #   --replay-offset K  apply the gbarecomp side's inputs K frames late (early
 #                      if negative): a wrong convention must make the run fail
 #   --max-detail N     frames re-run with line records and raw frames
-#                      (default 1200; 0 for none)
+#                      (default 1200, at most 5000; 0 for none). A capture
+#                      list holds at most 32 ranges, so close frames are
+#                      merged, up to 2N frames per side; requested frames
+#                      past that get no detail (undetermined, see compare.py)
 #   --fp-ring FRAME    then run both gbarecomp sides of --against interp up to
 #                      FRAME with gbarecomp's fingerprint ring armed and diff
 #                      their last instructions (tools/difftest/fpdiff.py): FRAME
 #                      is the first frame whose capture differs
 #   --fp-records N     fingerprint records kept per side (default 500000,
-#                      about 110 MB of CSV; at most 2000000)
+#                      about 110 MB of CSV; 1 to 2000000)
+#   --timeout SECONDS  stop an engine run that takes longer (default: 600
+#                      plus one second per 20 frames the run plays; 0: none)
 #   --exe PATH         the game executable (default build/native/MotoRacerAdvanceRecomp)
-#   --out DIR          outputs (default build/replay-test/ROUTE-AGAINST)
+#   --out DIR          outputs (default build/replay-test/ROUTE-AGAINST). The
+#                      runner owns DIR: it must be new, empty, or made by the
+#                      runner (it holds .replay-test-out). Each run first
+#                      deletes the files and directories the runner writes
+#                      there, by name, and nothing else. Inside the
+#                      repository, DIR must be under build/ (gitignored)
 #   --keep             keep the detail captures (line records, raw frames)
 #                      and the fingerprint tails, which show the game
 #   --rom PATH, --bios PATH
@@ -51,12 +61,18 @@
 # frames and compare.py with them. A route that starts from another route's
 # save runs that route first on each engine. Runs are headless and muted
 # (SDL_AUDIODRIVER=dummy), with GBARECOMP_SELFHEAL_RECOMPILE=0 and a fresh
-# save, as docs/phase2-plan.md asks.
+# save, as docs/phase2-plan.md asks. The harness plays a copy of the input
+# script without its dump, shot and savestate commands, which only write
+# game screens and memory the runner does not use.
 #
 # Exit 0 when both runs end normally, the gbarecomp run follows the route and
-# the comparison passes; 1 otherwise; 2 on a usage or setup error. Outputs are
-# derived from the ROM: they stay under build/ (gitignored). Environment:
-# HARNESS_BIN and MRA_OUT as for tools/analysis (the harness binary).
+# the comparison passes; 1 otherwise; 2 on a usage or setup error (a bad
+# option, a missing input, an --out the runner does not own, not enough free
+# disk, a tool that cannot read its input). Outputs are derived from the ROM:
+# they stay under build/ (gitignored) or outside the repository.
+# Environment: HARNESS_BIN and MRA_OUT as for tools/analysis (the harness
+# binary); MRA_MIN_FREE_GB, the free space the detail pass and the
+# fingerprint tails must leave on the --out disk (default 15).
 set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 . "$(dirname "$0")/lib/common.sh"
@@ -65,11 +81,20 @@ usage_error() {
   printf 'replay-test.sh: %s\n' "$*" >&2
   exit 2
 }
+# The shared helpers stop on setup errors (a missing ROM or BIOS, no SHA-1
+# tool) with die: here those exit 2 like usage errors, since 1 means that the
+# test ran and failed.
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 2
+}
 
 ROUTE=""
 AGAINST=""
 TEST_KIND=interp
+TEST_SET=0
 REF_KIND=bios
+REF_SET=0
 RANGE=""
 FRAME_MAP=""
 ALLOWLIST=""
@@ -78,18 +103,19 @@ OFFSET=0
 MAX_DETAIL=1200
 FP_FRAME=""
 FP_RECORDS=500000
+TIMEOUT=""
 EXE="$MRA_BUILD_DIR/native/MotoRacerAdvanceRecomp"
 OUT=""
 KEEP=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --against | --test | --reference | --frames | --frame-map | --allowlist | --script | --replay-offset | \
-      --max-detail | --fp-ring | --fp-records | --exe | --out | --rom | --bios)
+      --max-detail | --fp-ring | --fp-records | --timeout | --exe | --out | --rom | --bios)
       [ $# -ge 2 ] || usage_error "$1 needs a value"
       case "$1" in
         --against) AGAINST=$2 ;;
-        --test) TEST_KIND=$2 ;;
-        --reference) REF_KIND=$2 ;;
+        --test) TEST_KIND=$2; TEST_SET=1 ;;
+        --reference) REF_KIND=$2; REF_SET=1 ;;
         --frames) RANGE=$2 ;;
         --frame-map) FRAME_MAP=$2 ;;
         --allowlist) ALLOWLIST=$2 ;;
@@ -98,30 +124,73 @@ while [ $# -gt 0 ]; do
         --max-detail) MAX_DETAIL=$2 ;;
         --fp-ring) FP_FRAME=$2 ;;
         --fp-records) FP_RECORDS=$2 ;;
+        --timeout) TIMEOUT=$2 ;;
         --exe) EXE=$2 ;;
         --out) OUT=$2 ;;
         --rom | --bios) set_input "$1" "$2" ;;
       esac
       shift 2 ;;
     --keep) KEEP=1; shift ;;
-    -h | --help) sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,75p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) usage_error "unknown option $1" ;;
     *)
       [ -z "$ROUTE" ] || usage_error "one route only ($ROUTE, $1)"
       ROUTE=$1; shift ;;
   esac
 done
+
+# A decimal number of at most 9 digits, which bash arithmetic holds.
+is_count() { [[ $1 =~ ^[0-9]{1,9}$ ]]; }
+
 [ -n "$ROUTE" ] || usage_error "name a route (python3 -I tools/difftest/routes.py list)"
 case "$AGAINST" in interp | mgba | none) ;; *) usage_error "--against interp, mgba or none is required" ;; esac
 case "$TEST_KIND" in interp | reference | recompiled) ;; *) usage_error "--test interp, reference or recompiled" ;; esac
 case "$REF_KIND" in bios | plain) ;; *) usage_error "--reference bios or plain" ;; esac
-case "$OFFSET" in -[0-9]* | [0-9]*) ;; *) usage_error "--replay-offset needs a number of frames" ;; esac
-case "$MAX_DETAIL" in *[!0-9]* | "") usage_error "--max-detail needs a number" ;; esac
-case "$FP_RECORDS" in *[!0-9]* | "") usage_error "--fp-records needs a number" ;; esac
+if [ "$AGAINST" = interp ] && [ "$TEST_SET" = 1 ]; then
+  usage_error "--test is for --against mgba or none: --against interp always tests the recompiled build"
+fi
+if [ "$AGAINST" != interp ] && [ "$REF_SET" = 1 ]; then
+  usage_error "--reference is for --against interp"
+fi
+[[ $OFFSET =~ ^-?[0-9]{1,9}$ ]] || usage_error "--replay-offset needs a whole number of frames, not '$OFFSET'"
+case "$OFFSET" in
+  -*) OFFSET=$((-10#${OFFSET#-})) ;;
+  *) OFFSET=$((10#$OFFSET)) ;;
+esac
+is_count "$MAX_DETAIL" || usage_error "--max-detail needs a number of frames, not '$MAX_DETAIL'"
+MAX_DETAIL=$((10#$MAX_DETAIL))
+[ "$MAX_DETAIL" -le 5000 ] || usage_error "--max-detail: at most 5000 frames (about 116 KB per frame and side)"
+# src/main.cpp refuses MRA_FP_TAIL_RECORDS outside 1-2,000,000.
+is_count "$FP_RECORDS" || usage_error "--fp-records needs a number, not '$FP_RECORDS'"
+FP_RECORDS=$((10#$FP_RECORDS))
+if [ "$FP_RECORDS" -lt 1 ] || [ "$FP_RECORDS" -gt 2000000 ]; then
+  usage_error "--fp-records: 1 to 2000000"
+fi
+if [ -n "$TIMEOUT" ]; then
+  is_count "$TIMEOUT" || usage_error "--timeout needs a number of seconds, not '$TIMEOUT'"
+  TIMEOUT=$((10#$TIMEOUT))
+fi
 if [ -n "$FP_FRAME" ]; then
   [ "$AGAINST" = interp ] || usage_error "--fp-ring is for --against interp (both sides are gbarecomp)"
-  case "$FP_FRAME" in *[!0-9]* | "") usage_error "--fp-ring needs a frame number" ;; esac
+  is_count "$FP_FRAME" || usage_error "--fp-ring needs a frame number, not '$FP_FRAME'"
+  FP_FRAME=$((10#$FP_FRAME))
+  [ "$FP_FRAME" -ge 1 ] || usage_error "--fp-ring needs a frame number from 1"
 fi
+MIN_FREE_GB=${MRA_MIN_FREE_GB:-15}
+is_count "$MIN_FREE_GB" || usage_error "MRA_MIN_FREE_GB needs a number of GB, not '$MIN_FREE_GB'"
+MIN_FREE_GB=$((10#$MIN_FREE_GB))
+
+# Relative paths are from the current directory; the engines run from their
+# own directories, so make them absolute now.
+abs_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s\n' "$PWD/$1" ;;
+  esac
+}
+EXE=$(abs_path "$EXE")
+[ -z "$SCRIPT" ] || SCRIPT=$(abs_path "$SCRIPT")
+[ -z "$ALLOWLIST" ] || ALLOWLIST=$(abs_path "$ALLOWLIST")
 
 DIFFTEST="$MRA_ROOT/tools/difftest"
 rp() { python3 -I "$DIFFTEST/routes.py" "$@"; }
@@ -135,12 +204,12 @@ route_script="$MRA_ROOT/$(rp get "$ROUTE" script)"
 first=1
 last=$route_frames
 if [ -n "$RANGE" ]; then
+  [[ $RANGE =~ ^([0-9]{1,9}-)?[0-9]{1,9}$ ]] || usage_error "--frames A-B or --frames B, not '$RANGE'"
   case "$RANGE" in
-    *-*) first=${RANGE%-*}; last=${RANGE#*-} ;;
-    *) last=$RANGE ;;
+    *-*) first=$((10#${RANGE%-*})); last=$((10#${RANGE#*-})) ;;
+    *) last=$((10#$RANGE)) ;;
   esac
-  case "$first$last" in *[!0-9]*) usage_error "--frames A-B or --frames B" ;; esac
-  if [ "$first" -lt 1 ] || [ "$first" -gt "$last" ]; then usage_error "--frames: bad range $RANGE"; fi
+  if [ "$first" -lt 1 ] || [ "$first" -gt "$last" ]; then usage_error "--frames: bad range $RANGE (1 <= A <= B)"; fi
 fi
 partial=""
 [ "$last" -ge "$route_frames" ] || partial=--partial
@@ -159,12 +228,51 @@ fi
 test_last=$((last + reach))
 
 if [ -n "$SCRIPT" ]; then
-  case "$SCRIPT" in /*) ;; *) SCRIPT="$PWD/$SCRIPT" ;; esac
   [ -f "$SCRIPT" ] || usage_error "script not found: $SCRIPT"
 fi
 if [ "$AGAINST" = mgba ] && [ -z "$ALLOWLIST" ] && [ -f "$DIFFTEST/allowlists/$ROUTE.toml" ]; then
   ALLOWLIST="$DIFFTEST/allowlists/$ROUTE.toml"
 fi
+
+# ---- the output directory
+# The runner owns it: new, empty, or marked by an earlier run. It deletes only
+# the names below, which are everything it writes there, so a file it did not
+# write is never touched.
+MARKER=.replay-test-out
+OUT_NAMES="replay.csv replay-offset.csv scripts ref test ref-detail test-detail detail fp start-ref start-test
+  ref.start test.start ref.status test.status ref.log test.log ref-detail.log test-detail.log
+  ref.log.timeout test.log.timeout ref-detail.log.timeout test-detail.log.timeout
+  ref.tsv test.tsv ref-detail.tsv test-detail.tsv ref.lines.tsv test.lines.tsv
+  ref-detail.lines.tsv test-detail.lines.tsv ref.raw test.raw ref-detail.raw test-detail.raw
+  route-test.txt route-ref.txt detail-frames.tsv compare-frames.json compare-frames.txt
+  frames.tsv compare.json compare.txt fpdiff.txt"
+real_path() { python3 -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+OUT=$(real_path "$(abs_path "${OUT:-$MRA_BUILD_DIR/replay-test/$ROUTE-$AGAINST}")")
+root_real=$(real_path "$MRA_ROOT")
+build_real=$(real_path "$(abs_path "$MRA_BUILD_DIR")")
+case "$OUT/" in
+  "$build_real"/?*) ;;
+  "$root_real"/*)
+    usage_error "--out $OUT: inside the repository, outputs go under build/ (gitignored): they are derived from the ROM" ;;
+esac
+if [ -e "$OUT" ] && [ ! -d "$OUT" ]; then usage_error "--out $OUT is not a directory"; fi
+if [ -d "$OUT" ] && [ ! -f "$OUT/$MARKER" ] && [ -n "$(ls -A "$OUT")" ]; then
+  usage_error "--out $OUT is not empty and holds no $MARKER, so replay-test.sh did not make it: pick a new or empty directory (each run deletes the runner's own outputs there)"
+fi
+mkdir -p "$OUT"
+printf '%s\n' "Made by scripts/replay-test.sh, which deletes the files it writes here (and nothing else) at the start of each run." \
+  > "$OUT/$MARKER"
+for name in $OUT_NAMES; do rm -rf "${OUT:?}/$name"; done
+
+# Without --keep, the line records, raw frames and fingerprint tails go when
+# the runner exits, whatever the exit status: they show the game.
+# shellcheck disable=SC2317  # called through at_exit
+drop_game_data() {
+  [ "$KEEP" = 0 ] || return 0
+  rm -rf "$OUT/ref-detail.raw" "$OUT/test-detail.raw" "$OUT/ref-detail" "$OUT/test-detail" "$OUT/detail"
+  rm -f "$OUT/ref-detail.lines.tsv" "$OUT/test-detail.lines.tsv" "$OUT/fp/ref.csv" "$OUT/fp/test.csv"
+}
+at_exit drop_game_data
 
 [ -x "$EXE" ] || usage_error "no game executable at $(rel "$EXE"): run scripts/build-native.sh"
 require_inputs
@@ -178,14 +286,21 @@ if [ "$AGAINST" = mgba ]; then
   [ -x "$HARNESS" ] || usage_error "harness not built: $HARNESS (tools/analysis/harness/build.sh, or set HARNESS_BIN)"
 fi
 
-OUT=${OUT:-$MRA_BUILD_DIR/replay-test/$ROUTE-$AGAINST}
-case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
-mkdir -p "$OUT"
-rm -rf "$OUT/ref" "$OUT/test" "$OUT/detail" "$OUT/fp"
-rm -f "$OUT"/*.tsv "$OUT"/*.log "$OUT"/*.txt "$OUT"/*.json "$OUT"/*.csv
-
 MEM=$(rp trace-mem)
 SPEC="$MRA_ROOT/tools/capture/spec.txt"
+
+# check_disk WHAT KB: stop when writing KB more under $OUT would leave less
+# than MRA_MIN_FREE_GB free.
+check_disk() {
+  local avail
+  avail=$(df -Pk "$OUT" | awk 'NR == 2 { print $4 }')
+  case "$avail" in
+    '' | *[!0-9]*) warn "could not read the free space under $(rel "$OUT"): not checked"; return 0 ;;
+  esac
+  if [ $((avail - $2)) -lt $((MIN_FREE_GB * 1024 * 1024)) ]; then
+    die "$1 needs about $(($2 / 1024)) MB under $(rel "$OUT"), which would leave less than $MIN_FREE_GB GB free ($((avail / 1024)) MB free now; MRA_MIN_FREE_GB sets the margin)"
+  fi
+}
 
 # The two sides: "harness" or gbarecomp with its backend variables.
 if [ "$AGAINST" != interp ]; then
@@ -212,6 +327,21 @@ else
 fi
 test_desc="gbarecomp $TEST_KIND"
 
+# harness_copy SCRIPT TAG: a copy of an input script for the harness, without
+# its dump, shot and savestate commands (they write game screens, memory and
+# savestates, and do not change emulation: runScript in
+# tools/analysis/harness/gbaharness.c). Each becomes an empty line, so line
+# numbers stay. Prints the copy's path.
+harness_copy() {
+  local copy
+  copy="$OUT/scripts/$2-$(basename "$1")"
+  mkdir -p "$OUT/scripts"
+  awk '{ split($0, code, "#") }
+       code[1] ~ /^[ \t]*(dump|shot|savestate)([ \t\r]|$)/ { print ""; next }
+       { print }' "$1" > "$copy"
+  printf '%s\n' "$copy"
+}
+
 # ---- the replay
 replay="$OUT/replay.csv"
 if [ -n "$SCRIPT" ]; then
@@ -221,6 +351,7 @@ else
   python3 -I "$MRA_ROOT/tools/replay/script2replay.py" --route "$ROUTE" -o "$replay"
   harness_script=$route_script
 fi
+[ "$REF_ENGINE" != harness ] || harness_script=$(harness_copy "$harness_script" main)
 test_replay=$replay
 if [ "$OFFSET" != 0 ]; then
   test_replay="$OUT/replay-offset.csv"
@@ -233,27 +364,68 @@ if [ "$OFFSET" != 0 ]; then
 fi
 
 # ---- running the engines
+# The time limit of a run of FRAMES frames, in seconds (0: none).
+run_limit() {
+  if [ -n "$TIMEOUT" ]; then echo "$TIMEOUT"; else echo $((600 + $1 / 20)); fi
+}
+
+# start_watchdog PID SECONDS FLAG: send PID SIGTERM after SECONDS (then
+# SIGKILL 10 s later), creating FLAG first; nothing for 0 seconds. Prints the
+# watchdog's pid, or nothing.
+start_watchdog() {
+  local pid=$1 secs=$2 flag=$3
+  [ "$secs" -gt 0 ] || return 0
+  (
+    sp=""
+    trap '[ -z "$sp" ] || kill "$sp" 2> /dev/null; exit 0' TERM
+    sleep "$secs" &
+    sp=$!
+    wait "$sp"
+    : > "$flag"
+    kill -TERM "$pid" 2> /dev/null || exit 0
+    sleep 10 &
+    sp=$!
+    wait "$sp"
+    kill -KILL "$pid" 2> /dev/null || true
+  ) > /dev/null 2>&1 &
+  echo $!
+}
+
+stop_watchdog() {
+  [ -z "$1" ] || kill "$1" 2> /dev/null || true
+}
+
 # run_gbarecomp DIR LOG SAVE FRAMES REPLAY VARS [VAR=VALUE...]: one headless
 # run from DIR (gbarecomp writes its miss reports into the current directory).
 # Prints the exit status.
 run_gbarecomp() {
-  local dir=$1 log=$2 save=$3 frames=$4 replay_file=$5 vars=$6 status=0
+  local dir=$1 log=$2 save=$3 frames=$4 replay_file=$5 vars=$6 status=0 pid wd
   shift 6
   mkdir -p "$dir"
+  rm -f "$log.timeout"
   # shellcheck disable=SC2086  # VARS is a list of VAR=VALUE words
   (cd "$dir" && exec env SDL_AUDIODRIVER=dummy GBARECOMP_SELFHEAL_RECOMPILE=0 $vars \
     ${replay_file:+MRA_REPLAY="$replay_file"} "$@" \
     "$EXE" --bios "$MRA_BIOS" --rom "$MRA_ROM" --frames "$frames" --no-window \
-    --save-path "$save" "$MRA_GAME_CONFIG") > "$log" 2>&1 || status=$?
+    --save-path "$save" "$MRA_GAME_CONFIG") > "$log" 2>&1 &
+  pid=$!
+  wd=$(start_watchdog "$pid" "$(run_limit "$frames")" "$log.timeout")
+  wait "$pid" || status=$?
+  stop_watchdog "$wd"
   echo "$status"
 }
 
 # run_harness DIR LOG SAVE FRAMES SCRIPT [options...]: prints the exit status.
 run_harness() {
-  local dir=$1 log=$2 save=$3 frames=$4 script=$5 status=0
+  local dir=$1 log=$2 save=$3 frames=$4 script=$5 status=0 pid wd
   shift 5
+  rm -f "$log.timeout"
   HARNESS_BIN=$HARNESS "$MRA_ROOT/tools/analysis/harness/run_harness.sh" --rom "$MRA_ROM" --bios "$MRA_BIOS" \
-    --out "$dir" --script "$script" --frames "$frames" --save "$save" "$@" > "$log" 2>&1 || status=$?
+    --out "$dir" --script "$script" --frames "$frames" --save "$save" "$@" > "$log" 2>&1 &
+  pid=$!
+  wd=$(start_watchdog "$pid" "$(run_limit "$frames")" "$log.timeout")
+  wait "$pid" || status=$?
+  stop_watchdog "$wd"
   echo "$status"
 }
 
@@ -269,13 +441,14 @@ start_save() {
     rm -f "$save"
     [ -z "$prev" ] || cp "$prev" "$save"
     if [ "$side" = harness ]; then
-      status=$(run_harness "$dir/start-$r" "$dir/start-$r.log" "$save" "$frames" "$script")
+      status=$(run_harness "$dir/start-$r" "$dir/start-$r.log" "$save" "$frames" \
+        "$(harness_copy "$script" "start-$r")")
     else
       python3 -I "$MRA_ROOT/tools/replay/script2replay.py" --route "$r" -o "$dir/start-$r.csv"
       status=$(run_gbarecomp "$dir/start-$r" "$dir/start-$r.log" "$save" "$frames" "$dir/start-$r.csv" "$vars")
     fi
     if [ "$status" != 0 ] || [ ! -f "$save" ]; then
-      echo "start route $r failed on $side (see $dir/start-$r.log)" >&2
+      echo "start route $r failed on $side (exit $status; see $dir/start-$r.log)" >&2
       return 1
     fi
     prev=$save
@@ -283,16 +456,23 @@ start_save() {
   printf '%s\n' "$prev"
 }
 
+# seed_save SIDE SAVE: put the save SIDE (ref or test) starts from at SAVE, or
+# leave none (a fresh save). Only this run's start_save writes SIDE.start.
+seed_save() {
+  local sav0
+  rm -f "$2"
+  sav0=$(cat "$OUT/$1.start" 2> /dev/null || true)
+  [ -z "$sav0" ] || cp "$sav0" "$2"
+}
+
 # capture_side SIDE NAME FRAMES [extra capture options]: run one side with the
 # per-frame capture into $OUT/NAME.tsv. Prints the exit status.
 capture_side() {
-  local side=$1 name=$2 frames=$3 vars=$4 replay_file=$5 dir="$OUT/$2" save sav0 status
+  local side=$1 name=$2 frames=$3 vars=$4 replay_file=$5 dir="$OUT/$2" save status
   shift 5
   mkdir -p "$dir"
   save="$dir/run.sav"
-  rm -f "$save"
-  sav0=$(cat "$OUT/${name%-detail}.start" 2> /dev/null || true)
-  [ -z "$sav0" ] || cp "$sav0" "$save"
+  seed_save "${name%-detail}" "$save"
   if [ "$side" = harness ]; then
     status=$(run_harness "$dir/harness" "$OUT/$name.log" "$save" "$frames" "$harness_script" \
       --capture --capture-spec "$SPEC" --capture-mem "$MEM" --capture-frames "1-$frames" "$@")
@@ -313,7 +493,18 @@ describe_run() {  # NAME STATUS: the exit status and where the run stopped
   local final
   final=$(grep -E '^final_pc=|^done: frames' "$OUT/$1.log" 2> /dev/null | tail -n 1 |
     sed -E 's/.*(ppu_vcount=[0-9]+ ppu_frames=[0-9]+).*/\1/; s/^done: (frames [0-9.]+).*/\1/' || true)
+  [ ! -f "$OUT/$1.log.timeout" ] || final="stopped by the time limit${final:+, $final}"
   printf '  %-5s exit %s%s\n' "$1" "$2" "${final:+, $final}"
+}
+
+# run_problem NAME STATUS: the problem to report for a run's exit status.
+run_problem() {
+  [ "$2" != 0 ] || return 0
+  if [ -f "$OUT/$1.log.timeout" ]; then
+    printf '; the %s run took longer than its time limit (--timeout)' "$1"
+  else
+    printf '; the %s run exited with %s' "$1" "$2"
+  fi
 }
 
 info "$ROUTE --against $AGAINST: REF $ref_desc, TEST $test_desc, frames $first-$last${FRAME_MAP:+, frame map $FRAME_MAP}"
@@ -321,9 +512,15 @@ if [ -n "$(rp get "$ROUTE" start_save)" ]; then
   info "Starting saves: running $(rp plan "$ROUTE" | grep -vx "$ROUTE" | tr '\n' ' ')first"
   mkdir -p "$OUT/start-ref" "$OUT/start-test"
   if [ "$REF_ENGINE" != none ]; then
-    start_save "$REF_ENGINE" "$OUT/start-ref" "$REF_VARS" > "$OUT/ref.start" || exit 1
+    start_save "$REF_ENGINE" "$OUT/start-ref" "$REF_VARS" > "$OUT/ref.start" || {
+      echo "FAIL $ROUTE: the REF side could not make its starting save"
+      exit 1
+    }
   fi
-  start_save gbarecomp "$OUT/start-test" "$TEST_VARS" > "$OUT/test.start" || exit 1
+  start_save gbarecomp "$OUT/start-test" "$TEST_VARS" > "$OUT/test.start" || {
+    echo "FAIL $ROUTE: the gbarecomp side could not make its starting save"
+    exit 1
+  }
 fi
 
 ref_pid=""
@@ -345,9 +542,7 @@ ref_status=$(cat "$OUT/ref.status")
 test_status=$(cat "$OUT/test.status")
 [ "$REF_ENGINE" = none ] || describe_run ref "$ref_status"
 describe_run test "$test_status"
-problems=""
-[ "$ref_status" = 0 ] || problems="$problems; the REF run exited with $ref_status"
-[ "$test_status" = 0 ] || problems="$problems; the TEST run exited with $test_status"
+problems="$(run_problem ref "$ref_status")$(run_problem test "$test_status")"
 if [ ! -s "$OUT/test.tsv" ] || { [ "$REF_ENGINE" != none ] && [ ! -s "$OUT/ref.tsv" ]; }; then
   echo "FAIL: a run wrote no capture (see the logs in $(rel "$OUT"))"
   exit 1
@@ -393,7 +588,7 @@ fi
 # ---- comparison, per-frame pass
 compare_args=(--against "$AGAINST" --frames "$first-$last" --max-detail "$MAX_DETAIL")
 [ -z "$FRAME_MAP" ] || compare_args+=(--frame-map "$FRAME_MAP")
-[ -z "$ALLOWLIST" ] || compare_args+=(--allowlist "$ALLOWLIST")
+[ -z "$ALLOWLIST" ] || compare_args+=(--allowlist "$ALLOWLIST" --route "$ROUTE")
 info "Comparing (per-frame records)"
 cmp_status=0
 python3 -I "$DIFFTEST/compare.py" "$OUT/ref.tsv" "$OUT/test.tsv" "${compare_args[@]}" \
@@ -404,32 +599,20 @@ report="$OUT/compare-frames.txt"
 
 # ---- detail pass: line records and raw frames of the frames whose CRCs differ
 if [ "$MAX_DETAIL" -gt 0 ] && [ -s "$OUT/detail-frames.tsv" ]; then
-  # At most 32 entries per capture list (both engines): merge the closest
-  # ranges until the list fits. The extra frames cost only disk.
-  lists=$(python3 -I -c '
-import sys
-cols = ([], [])
-for line in open(sys.argv[1]):
-    a, b = line.split("\t")[:2]
-    cols[0].append(int(a)); cols[1].append(int(b))
-for frames in cols:
-    rs = []
-    for f in sorted(set(frames)):
-        if rs and f == rs[-1][1] + 1: rs[-1][1] = f
-        else: rs.append([f, f])
-    while len(rs) > 32:
-        i = min(range(len(rs) - 1), key=lambda k: rs[k + 1][0] - rs[k][1])
-        rs[i][1] = rs[i + 1][1]; del rs[i + 1]
-    print(",".join("%d-%d" % (a, b) for a, b in rs), max(frames), sum(b - a + 1 for a, b in rs))' \
-    "$OUT/detail-frames.tsv")
-  ref_list=$(printf '%s\n' "$lists" | sed -n 1p | cut -d' ' -f1)
-  ref_max=$(printf '%s\n' "$lists" | sed -n 1p | cut -d' ' -f2)
-  ref_count=$(printf '%s\n' "$lists" | sed -n 1p | cut -d' ' -f3)
-  test_list=$(printf '%s\n' "$lists" | sed -n 2p | cut -d' ' -f1)
-  test_max=$(printf '%s\n' "$lists" | sed -n 2p | cut -d' ' -f2)
-  test_count=$(printf '%s\n' "$lists" | sed -n 2p | cut -d' ' -f3)
+  # A capture list holds at most 32 ranges (both engines): merge the closest
+  # ranges until the list fits, as long as a side captures at most twice
+  # --max-detail frames; the ranges past the 32nd are then left out.
+  lists=$(python3 -I "$DIFFTEST/detail_lists.py" "$OUT/detail-frames.tsv" --cap "$((2 * MAX_DETAIL))") ||
+    die "detail_lists.py failed on $(rel "$OUT")/detail-frames.tsv"
+  read -r ref_list ref_max ref_count ref_left <<< "$(printf '%s\n' "$lists" | sed -n 1p)"
+  read -r test_list test_max test_count test_left <<< "$(printf '%s\n' "$lists" | sed -n 2p)"
   need=$(wc -l < "$OUT/detail-frames.tsv" | tr -d ' ')
-  info "Detail: $need frames to look at; re-running both sides to frames $ref_max and $test_max with line records and raw frames ($ref_count and $test_count frames, about $(((ref_count + test_count) * 116 / 1000)) MB)"
+  detail_kb=$(((ref_count + test_count) * 116))
+  info "Detail: $need frames to look at; re-running both sides to frames $ref_max and $test_max with line records and raw frames ($ref_count and $test_count frames, about $((detail_kb / 1000)) MB)"
+  if [ "$ref_left" != 0 ] || [ "$test_left" != 0 ]; then
+    warn "$ref_left REF and $test_left TEST frames to look at are past the 32 ranges a capture list holds: they get no detail"
+  fi
+  check_disk "The detail pass" "$detail_kb"
   mkdir -p "$OUT/detail"
   cp "$OUT/ref.tsv" "$OUT/detail/ref-pass1.tsv"
   cp "$OUT/test.tsv" "$OUT/detail/test-pass1.tsv"
@@ -447,12 +630,16 @@ for frames in cols:
     fi
   done
   wait
+  for side in ref test; do
+    st=$(cat "$OUT/detail/$side.status")
+    problems="$problems$(run_problem "$side-detail" "$st")"
+  done
   # Runs are deterministic (docs/research/phase2-diagnosis.md section 7.6): the
   # detail runs must give the same per-frame records as the first runs.
   for side in ref test; do
     if [ "$side" = ref ]; then max=$ref_max; else max=$test_max; fi
     n=$((max + 1))
-    if ! cmp -s <(head -n "$n" "$OUT/$side-detail.tsv") <(head -n "$n" "$OUT/detail/$side-pass1.tsv"); then
+    if ! cmp -s <(head -n "$n" "$OUT/$side-detail.tsv" 2> /dev/null) <(head -n "$n" "$OUT/detail/$side-pass1.tsv"); then
       problems="$problems; the $side detail run's per-frame records differ from the first run's (not deterministic?)"
     fi
   done
@@ -465,10 +652,6 @@ for frames in cols:
   set -e
   [ "$cmp_status" -le 1 ] || { cat "$OUT/compare.txt"; die "compare.py failed (exit $cmp_status)"; }
   report="$OUT/compare.txt"
-  if [ "$KEEP" = 0 ]; then
-    rm -rf "$OUT/ref-detail.raw" "$OUT/test-detail.raw" "$OUT/ref-detail" "$OUT/test-detail" "$OUT/detail"
-    rm -f "$OUT/ref-detail.lines.tsv" "$OUT/test-detail.lines.tsv"
-  fi
 else
   cp "$OUT/compare-frames.json" "$OUT/compare.json"
   cp "$OUT/compare-frames.txt" "$OUT/compare.txt"
@@ -479,16 +662,37 @@ cat "$report"
 # ---- fingerprint ring (comparison 1)
 if [ -n "$FP_FRAME" ]; then
   info "Fingerprint ring: both sides to frame $FP_FRAME, last $FP_RECORDS instructions each"
+  # About 220 bytes of CSV per record (src/main.cpp).
+  check_disk "The fingerprint tails" $((FP_RECORDS * 440 / 1024))
   mkdir -p "$OUT/fp"
   for side in ref test; do
     if [ "$side" = ref ]; then vars=$REF_VARS; rep=$replay; else vars=$TEST_VARS; rep=$test_replay; fi
+    seed_save "$side" "$OUT/fp/$side.sav"
     run_gbarecomp "$OUT/fp/$side" "$OUT/fp/$side.log" "$OUT/fp/$side.sav" "$FP_FRAME" "$rep" "$vars" \
       GBARECOMP_INSN_TRACE=1 MRA_FP_TAIL="$OUT/fp/$side.csv" MRA_FP_TAIL_RECORDS="$FP_RECORDS" \
       > "$OUT/fp/$side.status" &
   done
   wait
-  python3 -I "$DIFFTEST/fpdiff.py" "$OUT/fp/ref.csv" "$OUT/fp/test.csv" --costs 20 | tee "$OUT/fpdiff.txt" || true
-  [ "$KEEP" = 1 ] || rm -f "$OUT/fp/ref.csv" "$OUT/fp/test.csv"
+  fp_ok=1
+  for side in ref test; do
+    st=$(cat "$OUT/fp/$side.status")
+    if [ "$st" != 0 ]; then
+      problems="$problems; the $side fingerprint run exited with $st (see $(rel "$OUT")/fp/$side.log)"
+      fp_ok=0
+    elif [ ! -s "$OUT/fp/$side.csv" ]; then
+      problems="$problems; the $side fingerprint run wrote no tail (see $(rel "$OUT")/fp/$side.log)"
+      fp_ok=0
+    fi
+  done
+  if [ "$fp_ok" = 1 ]; then
+    # fpdiff.py: 0 the tails agree, 1 they part (a finding, not a failure), 2
+    # it could not compare them.
+    fp_status=0
+    python3 -I "$DIFFTEST/fpdiff.py" "$OUT/fp/ref.csv" "$OUT/fp/test.csv" --costs 20 > "$OUT/fpdiff.txt" ||
+      fp_status=$?
+    cat "$OUT/fpdiff.txt"
+    [ "$fp_status" -le 1 ] || problems="$problems; fpdiff.py could not compare the tails (exit $fp_status)"
+  fi
 fi
 
 echo
