@@ -33,6 +33,8 @@ options:
   --frames LIST        REF frames to compare (default: every frame of REF)
   --frame-map SPEC     pair REF frame f with another TEST frame (below)
   --allowlist FILE     comparison 2 allowlist (tools/difftest/allowlists/)
+  --route NAME         the route the captures are of: the allowlist must be
+                       that route's
   --exclusions FILE    comparison 1 exclusions (default: comparison1.toml
                        next to this script)
   --ref-lines F, --test-lines F
@@ -65,7 +67,16 @@ them, one "REF_FRAME<TAB>TEST_FRAME" per line, frames no allowlist entry
 covers first, at most --max-detail; scripts/replay-test.sh re-runs both
 engines with those records and calls this script again with them. A frame
 whose fb differs and has no raw frames is "undetermined" for layer 2 and
-fails unless the allowlist covers it.
+fails unless the allowlist covers it. Each raw frame's CRC-32 must equal
+the capture's fb for that frame, or the raw frames are refused (exit 2):
+they are not from the captured runs. In comparison 1 an fb difference
+always fails; the raw frames only locate it.
+
+The report counts, for each allowlist entry and check, the compared frames
+the entry covers (where it is the first entry that covers the check) and
+those it hits. An entry that covers frames it does not hit is marked PARTLY
+USED, with its unused frames listed: a range wider than the frames that
+differ hides what a later change breaks there.
 
 Exit 0 when every gated check passes and no frame is missing, 1 otherwise,
 2 on bad input.
@@ -77,6 +88,7 @@ import json
 import os
 import re
 import sys
+import zlib
 
 try:
     import tomllib
@@ -474,6 +486,15 @@ def read_raw(directory, f):
     return data
 
 
+def check_raw_crc(side, directory, f, data, fb):
+    """A raw frame must be the frame that the capture's fb column hashes."""
+    crc = "%08X" % zlib.crc32(data)
+    if crc != fb.upper():
+        raise CompareError("%s raw frame %s has CRC-32 %s, but the capture's fb for that frame is %s: "
+                           "the raw frames are not from the captured run" % (
+                               side, os.path.join(directory, "f%06d.bgr555" % f), crc, fb))
+
+
 def words(row):
     a = array.array("H")
     a.frombytes(row)
@@ -583,7 +604,8 @@ def write_frame_report(path, checks, pairs, layer1_detail, layer2_verdict, allow
                 else:
                     pixels = "beyond=%d within=%d max=%d effect_lines=%s%s" % (
                         v["beyond"], v["within"], v["max"],
-                        "-" if v["effect_lines"] is None else v["effect_lines"],
+                        "-" if v["effect_lines"] is None else
+                        "unknown(no_line_records)" if v["no_line_records"] else v["effect_lines"],
                         " first=%d,%d" % v["first"][:2] if v["first"] else "")
             rows.append((f, name, pairs.get(f, f), status, lines, columns, pixels))
     rows.sort()
@@ -601,6 +623,8 @@ def compare(args, out):
     fmap = FrameMap(args.frame_map)
     window = parse_frame_list(args.frames, "--frames") if args.frames else None
     allow = Allowlist(args.allowlist)
+    if args.route and allow.path and allow.route != args.route:
+        raise CompareError("%s is the allowlist of route %s, not of %s" % (allow.path, allow.route, args.route))
     if against == "interp" and args.allowlist:
         raise CompareError("comparison 1 takes no allowlist: it is exact, apart from the regions "
                            "comparison1.toml excludes")
@@ -647,6 +671,7 @@ def compare(args, out):
     pairs = {}          # REF frame -> TEST frame, for the frames compared
     resolved = []       # (REF frame, offset) chosen by searches
     need_detail = {}    # REF frame -> set of "lines", "raw"
+    fb_values = {}      # REF frame -> (REF fb, TEST fb), for the frames whose fb differs
     divergences = []    # (frame, check, text, failing) of every gated difference
     compared = 0
 
@@ -710,6 +735,7 @@ def compare(args, out):
             if rp[ri["fb"]] != tp[ti["fb"]]:
                 ch.differ.append(f)
                 need_detail.setdefault(f, set()).add("raw")
+                fb_values[f] = (rp[ri["fb"]], tp[ti["fb"]])
         else:
             l1, l2 = checks["layer1"], checks["layer2"]
             l1.compared += 1
@@ -723,6 +749,7 @@ def compare(args, out):
             if rp[ri["fb"]] != tp[ti["fb"]]:
                 l2.differ.append(f)
                 need_detail.setdefault(f, set()).update(("raw", "lines"))
+                fb_values[f] = (rp[ri["fb"]], tp[ti["fb"]])
 
     # Read the rest of both files: the frame counts in the report, and the
     # check that every row parses and frames increase.
@@ -766,6 +793,8 @@ def compare(args, out):
         if "raw" in need_detail[f]:
             ra, rb = read_raw(args.ref_raw, f), read_raw(args.test_raw, g)
             if ra is not None and rb is not None:
+                check_raw_crc("REF", args.ref_raw, f, ra, fb_values[f][0])
+                check_raw_crc("TEST", args.test_raw, g, rb, fb_values[f][1])
                 if against == "interp":
                     eff = None
                 else:
@@ -773,6 +802,7 @@ def compare(args, out):
                         if la is not None and lb is not None else set()
                 layer2_verdict[f] = pixel_diff(ra, rb, eff)
                 layer2_verdict[f]["effect_lines"] = None if eff is None else len(eff)
+                # Without line records no line has an effect: no tolerance.
                 layer2_verdict[f]["no_line_records"] = against == "mgba" and (la is None or lb is None)
                 got = True
             else:
@@ -802,12 +832,18 @@ def compare(args, out):
                     ch.undetermined.append(f)
                     failing = account(ch, f)
                     note_first(f, name, "fb CRC differs (no raw frames: undetermined)", failing)
-                elif v["beyond"]:
+                elif v["beyond"] or name == "fb":
+                    # Comparison 1 is exact: its fb differences fail whatever
+                    # the pixels show (with the CRCs checked, the raw frames
+                    # of such a frame differ anyway).
                     failing = account(ch, f)
-                    y, x, pa, pb = v["first"]
-                    note_first(f, name, "line %d column %d: REF %04X TEST %04X (%d pixels %s, max %d steps)" % (
-                        y, x, pa, pb, v["beyond"], "differ" if against == "interp" else "beyond tolerance",
-                        v["max"]), failing)
+                    if v["first"] is None:
+                        note_first(f, name, "fb CRC differs", failing)
+                    else:
+                        y, x, pa, pb = v["first"]
+                        note_first(f, name, "line %d column %d: REF %04X TEST %04X (%d pixels %s, max %d steps)" % (
+                            y, x, pa, pb, v["beyond"], "differ" if against == "interp" else "beyond tolerance",
+                            v["max"]), failing)
                 else:
                     ch.passed_detail.append(f)
             elif name == "layer1":
@@ -824,6 +860,24 @@ def compare(args, out):
                 note_first(f, name, "%s hash differs" % name[4:], failing)
     first_div = min(divergences) if divergences else None
     first_fail = min((d for d in divergences if d[3]), default=None)
+
+    # ---- allowlist coverage: per entry and check, the compared frames the
+    # entry would account for (where it is the first entry that covers the
+    # check), and those it did not need.
+    coverage = {}  # entry id -> {check: [frames]}
+    unused = {}    # entry id -> {check: [frames]}
+    if against == "mgba" and allow.entries:
+        for f in pairs:
+            for name in checks:
+                e = allow.covers(name, f)
+                if e:
+                    coverage.setdefault(e, {}).setdefault(name, []).append(f)
+        for e, by_check in coverage.items():
+            for name, fs in by_check.items():
+                hit = set(checks[name].allowed.get(e, []))
+                left = [f for f in fs if f not in hit]
+                if left:
+                    unused.setdefault(e, {})[name] = left
 
     failing_total = sorted(set(f for ch in checks.values() for f in ch.failing))
     result_ok = not failing_total and not missing_test and not missing_ref
@@ -908,14 +962,14 @@ def compare(args, out):
         if l2 is not None and l2.passed_detail:
             print("  %s: %d frames whose fb differs pass in detail (pixels within tolerance): %s" % (
                 l2.name, len(l2.passed_detail), format_ranges(to_ranges(l2.passed_detail), lim)), file=out)
-        for f in sorted(layer1_detail)[:5]:
+        l1_frames = [f for f in sorted(layer1_detail) if layer1_detail[f][0]]
+        for f in l1_frames[:5]:
             diff, first = layer1_detail[f]
-            if diff:
-                cols_seen = sorted({c for _, cs in diff for c in cs})
-                print("  layer 1, frame %d: %d lines (%s), columns %s" % (
-                    f, len(diff), format_ranges(to_ranges([l for l, _ in diff]), 6), " ".join(cols_seen)), file=out)
-        if len(layer1_detail) > 5:
-            print("  ... line records of %d more frames" % (len(layer1_detail) - 5), file=out)
+            cols_seen = sorted({c for _, cs in diff for c in cs})
+            print("  layer 1, frame %d: %d lines (%s), columns %s" % (
+                f, len(diff), format_ranges(to_ranges([l for l, _ in diff]), 6), " ".join(cols_seen)), file=out)
+        if len(l1_frames) > 5:
+            print("  ... %d more frames whose line records differ" % (len(l1_frames) - 5), file=out)
     if first_div:
         print("first divergence: frame %d, %s: %s%s" % (
             first_div[0], first_div[1], first_div[2], "" if first_div[3] else " (allowlisted)"), file=out)
@@ -923,12 +977,20 @@ def compare(args, out):
         print("first failing divergence: frame %d, %s: %s" % first_fail[:3], file=out)
     if against == "mgba" and allow.entries:
         print("", file=out)
-        print("allowlist entries (frames hit per check):", file=out)
+        print("allowlist entries (per check: compared frames hit/covered):", file=out)
         for e in allow.entries:
+            cov = coverage.get(e["id"], {})
             hits = {name: len(ch.allowed.get(e["id"], [])) for name, ch in checks.items()}
-            used = {k: v for k, v in hits.items() if v}
-            print("  %-34s %s%s" % (e["id"], ", ".join("%s %d" % kv for kv in used.items()) or "UNUSED",
+            text = ", ".join("%s %d/%d" % (name, hits[name], len(fs)) for name, fs in cov.items())
+            if not any(hits.values()):
+                text = "UNUSED" + (" (covers %s)" % text if text else " (covers no compared frame)")
+            elif unused.get(e["id"]):
+                text += "  PARTLY USED"
+            print("  %-34s %s%s" % (e["id"], text,
                                    "  (fixed by %s)" % e["fixed_by"] if e["fixed_by"] else ""), file=out)
+            if any(hits.values()):
+                for name, fs in unused.get(e["id"], {}).items():
+                    print("  %-34s   unused on %s: %s" % ("", name, format_ranges(to_ranges(fs), lim)), file=out)
     print("", file=out)
     if result_ok:
         print("RESULT: PASS (%d frames compared)" % compared, file=out)
@@ -958,6 +1020,10 @@ def compare(args, out):
             {"frame": first_fail[0], "check": first_fail[1], "text": first_fail[2]},
             "allowlist_hits": {e["id"]: {name: len(ch.allowed.get(e["id"], [])) for name, ch in checks.items()}
                                for e in allow.entries},
+            "allowlist_covered": {e: {name: len(fs) for name, fs in by_check.items()}
+                                  for e, by_check in coverage.items()},
+            "allowlist_unused": {e: {name: format_ranges(to_ranges(fs)) for name, fs in by_check.items()}
+                                 for e, by_check in unused.items()},
             "detail_frames": detail["frames"], "need_detail": len(need_detail),
             "result": "PASS" if result_ok else "FAIL",
         }
@@ -979,6 +1045,7 @@ def main(argv=None, out=None):
     ap.add_argument("--frames")
     ap.add_argument("--frame-map")
     ap.add_argument("--allowlist")
+    ap.add_argument("--route")
     ap.add_argument("--exclusions")
     ap.add_argument("--ref-lines")
     ap.add_argument("--test-lines")

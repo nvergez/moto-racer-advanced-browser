@@ -271,6 +271,21 @@ class CheckTests(Base):
         failures, out = self.run_check(GOOD[:5], partial=True)
         self.assertEqual(failures, 0, out)
         self.assertIn("not reached: the trace ends at frame 5", out)
+        # The summary says how far the run was checked, not just "follows".
+        m = self.manifest(MANIFEST)
+        r = m.route("first")
+        needed = set().union(*(cp.fields_used() for cp in r.checkpoints))
+        data = routes.read_trace(self.trace(GOOD[:5]), m.fields, needed)
+        stats = {}
+        failures = routes.check(r, data, partial=True, out=io.StringIO(), stats=stats)
+        self.assertEqual(routes.verdict(r, data, failures, stats),
+                         "route first: follows up to frame 5 (%d of %d checkpoints checked; "
+                         "the trace ends before the others)" % (stats["checked"], len(r.checkpoints)))
+        self.assertLess(stats["checked"], len(r.checkpoints))
+        stats = {}
+        data = routes.read_trace(self.trace(GOOD), m.fields, needed)
+        failures = routes.check(r, data, out=io.StringIO(), stats=stats)
+        self.assertEqual(routes.verdict(r, data, failures, stats), "route first: follows")
         # A trace that reaches an event's deadline still fails it.
         late = [r if r[0] < 3 else (r[0], r[1], "0000", "0000000A", r[4]) for r in GOOD[:7]]
         failures, out = self.run_check(late, partial=True)

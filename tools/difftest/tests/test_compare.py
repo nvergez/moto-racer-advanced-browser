@@ -10,6 +10,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import zlib
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
@@ -154,17 +155,50 @@ class Comparison1Test(Base):
             self.assertTrue(e["cause"] and e["ref"], name)
 
     def test_raw_detail_first_pixel(self):
-        rows_b = [row(f) for f in range(1, 4)]
-        rows_b[1]["fb"] = "DEADBEEF"
-        a = self.capture("a.tsv", [row(f) for f in range(1, 4)])
-        b = self.capture("b.tsv", rows_b)
         ra, rb = self.raw_dirs()
-        write_raw(ra, 2, {})
-        write_raw(rb, 2, {(5, 7): 0x0001})
+        rows_a = [row(f) for f in range(1, 4)]
+        rows_b = [row(f) for f in range(1, 4)]
+        rows_a[1]["fb"] = write_raw(ra, 2, {})
+        rows_b[1]["fb"] = write_raw(rb, 2, {(5, 7): 0x0001})
+        a = self.capture("a.tsv", rows_a)
+        b = self.capture("b.tsv", rows_b)
         code, out, _ = self.run_compare(a, b, "--against", "interp", "--exclusions", self.exclusions(),
                                         "--ref-raw", ra, "--test-raw", rb)
         self.assertEqual(code, 1)
         self.assertIn("first divergence: frame 2, fb: line 5 column 7: REF 0000 TEST 0001 (1 pixels differ", out)
+
+    def test_raw_frames_must_match_the_fb_crc(self):
+        # Raw frames that are not the captured ones (here: equal, while the
+        # fb CRCs differ) are refused, not read as a pass.
+        ra, rb = self.raw_dirs()
+        rows_a = [row(f) for f in range(1, 4)]
+        rows_b = [row(f) for f in range(1, 4)]
+        rows_a[1]["fb"] = write_raw(ra, 2, {})
+        rows_b[1]["fb"] = "DEADBEEF"
+        write_raw(rb, 2, {})
+        a = self.capture("a.tsv", rows_a)
+        b = self.capture("b.tsv", rows_b)
+        code, out, err = self.run_compare(a, b, "--against", "interp", "--exclusions", self.exclusions(),
+                                          "--ref-raw", ra, "--test-raw", rb)
+        self.assertEqual(code, 2, out)
+        self.assertIn("TEST raw frame", err)
+        self.assertIn("the capture's fb for that frame is DEADBEEF", err)
+
+    def test_fb_difference_never_passes_in_detail(self):
+        # Comparison 1 is exact: a one-step difference, which comparison 2
+        # tolerates on an effect line, fails, and nothing "passes in detail".
+        ra, rb = self.raw_dirs()
+        rows_a = [row(f) for f in range(1, 4)]
+        rows_b = [row(f) for f in range(1, 4)]
+        rows_a[1]["fb"] = write_raw(ra, 2, {(0, 0): 0x0001})
+        rows_b[1]["fb"] = write_raw(rb, 2, {(0, 0): 0x0002})
+        a = self.capture("a.tsv", rows_a)
+        b = self.capture("b.tsv", rows_b)
+        code, out, _ = self.run_compare(a, b, "--against", "interp", "--exclusions", self.exclusions(),
+                                        "--ref-raw", ra, "--test-raw", rb)
+        self.assertEqual(code, 1)
+        self.assertNotIn("pass in detail", out)
+        self.assertRegex(out, r"fb\s+3\s+1\s+0\s+1\s+2")
 
     def raw_dirs(self):
         ra, rb = self.path("a.raw"), self.path("b.raw")
@@ -174,13 +208,16 @@ class Comparison1Test(Base):
 
 
 def write_raw(directory, frame, pixels):
+    """Write a raw frame; returns its fb value (the CRC-32 the capture holds)."""
     a = array.array("H", [0] * (compare.WIDTH * compare.HEIGHT))
     for (y, x), v in pixels.items():
         a[y * compare.WIDTH + x] = v
     if sys.byteorder != "little":
         a.byteswap()
+    data = a.tobytes()
     with open(os.path.join(directory, "f%06d.bgr555" % frame), "wb") as f:
-        f.write(a.tobytes())
+        f.write(data)
+    return "%08X" % zlib.crc32(data)
 
 
 def write_lines(path, frames, override=None):
@@ -214,8 +251,43 @@ class Comparison2Test(Base):
                                'ref = "r"\nfixed_by = "P2-99"\n')
         code, out, _ = self.run_compare(a, b, "--against", "mgba", "--allowlist", allow)
         self.assertEqual(code, 0, out)
-        self.assertRegex(out, r"t\s+layer1 1")
-        self.assertRegex(out, r"spare\s+UNUSED\s+\(fixed by P2-99\)")
+        self.assertRegex(out, r"t\s+layer1 1/1\n")
+        self.assertRegex(out, r"spare\s+UNUSED \(covers ram:stacks 0/10\)\s+\(fixed by P2-99\)")
+
+    def test_partly_used_entry(self):
+        # An entry wider than the frames that differ, or naming a check that
+        # does not differ there, is reported with its unused frames.
+        rows_b = [row(f) for f in range(1, 11)]
+        rows_b[4]["lines"] = "X"            # frame 5
+        rows_b[5]["ram_ewram"] = "X"        # frame 6
+        a = self.capture("a.tsv", [row(f) for f in range(1, 11)])
+        b = self.capture("b.tsv", rows_b)
+        allow = self.allowlist('[[allow]]\nid = "wide"\nframes = "4-6"\nchecks = ["layer1"]\ncause = "c"\n'
+                               'ref = "r"\n[[allow]]\nid = "two"\nframes = "6"\nchecks = ["ram:ewram", "ram:stacks"]\n'
+                               'cause = "c"\nref = "r"\n[[allow]]\nid = "exact"\nframes = "5"\nchecks = ["layer1"]\n'
+                               'cause = "c"\nref = "r"\n')
+        js = self.path("s.json")
+        code, out, _ = self.run_compare(a, b, "--against", "mgba", "--allowlist", allow, "--json", js)
+        self.assertEqual(code, 0, out)
+        self.assertRegex(out, r"wide\s+layer1 1/3  PARTLY USED\n\s+unused on layer1: 4,6\n")
+        self.assertRegex(out, r"two\s+ram:ewram 1/1, ram:stacks 0/1  PARTLY USED\n\s+unused on ram:stacks: 6\n")
+        # "exact" comes after "wide", which takes frame 5's hit: it covers
+        # no compared frame of its own.
+        self.assertRegex(out, r"exact\s+UNUSED \(covers no compared frame\)")
+        with open(js) as f:
+            s = json.load(f)
+        self.assertEqual(s["allowlist_covered"]["wide"], {"layer1": 3})
+        self.assertEqual(s["allowlist_unused"]["wide"], {"layer1": "4,6"})
+        self.assertNotIn("exact", s["allowlist_covered"])
+
+    def test_allowlist_of_another_route(self):
+        a = self.capture("a.tsv", [row(1)])
+        allow = self.allowlist('[[allow]]\nid = "x"\nframes = "1"\nchecks = ["layer1"]\ncause = "c"\nref = "r"\n')
+        code, _, _ = self.run_compare(a, a, "--against", "mgba", "--allowlist", allow, "--route", "r")
+        self.assertEqual(code, 0)
+        code, _, err = self.run_compare(a, a, "--against", "mgba", "--allowlist", allow, "--route", "other")
+        self.assertEqual(code, 2)
+        self.assertIn("is the allowlist of route r, not of other", err)
 
     def test_ram_star_and_region(self):
         rows_b = [row(f) for f in range(1, 6)]
@@ -259,15 +331,15 @@ class Comparison2Test(Base):
         self.assertIn("no raw frames for 1 whose fb differs (layer 2 undetermined): 2", out)
 
     def layer2_case(self, line_override, pixels):
-        rows_b = [row(f) for f in range(1, 4)]
-        rows_b[1]["fb"] = "DEADBEEF"
-        a = self.capture("a.tsv", [row(f) for f in range(1, 4)])
-        b = self.capture("b.tsv", rows_b)
         ra, rb = self.path("a.raw"), self.path("b.raw")
         os.makedirs(ra, exist_ok=True)
         os.makedirs(rb, exist_ok=True)
-        write_raw(ra, 2, {(10, 0): 0x0421})  # r=g=b=1
-        write_raw(rb, 2, pixels)
+        rows_a = [row(f) for f in range(1, 4)]
+        rows_b = [row(f) for f in range(1, 4)]
+        rows_a[1]["fb"] = write_raw(ra, 2, {(10, 0): 0x0421})  # r=g=b=1
+        rows_b[1]["fb"] = write_raw(rb, 2, pixels)
+        a = self.capture("a.tsv", rows_a)
+        b = self.capture("b.tsv", rows_b)
         la, lb = self.path("a.lines.tsv"), self.path("b.lines.tsv")
         write_lines(la, [2], line_override)
         write_lines(lb, [2], line_override)
@@ -393,11 +465,19 @@ class Comparison2Test(Base):
         d = os.path.join(HERE, "allowlists")
         names = sorted(n for n in os.listdir(d) if n.endswith(".toml"))
         self.assertTrue(names)
-        routes_toml = open(os.path.join(HERE, "routes.toml")).read()
+        with open(os.path.join(HERE, "routes.toml")) as f:
+            routes_toml = f.read()
+        # The RAM regions the captures hash: the "ram NAME FIRST-LAST" lines
+        # of the capture spec both engines read.
+        spec = os.path.join(os.path.dirname(HERE), "capture", "spec.txt")
+        with open(spec) as f:
+            regions = [line.split()[1] for line in f if line.split()[:1] == ["ram"]]
+        self.assertIn("ewram", regions)
         for n in names:
             al = compare.Allowlist(os.path.join(d, n))
             self.assertEqual(al.route + ".toml", n)
             self.assertIn("[routes.%s]" % al.route, routes_toml)
+            al.check_regions(regions)
             for e in al.entries:
                 self.assertTrue(e["cause"].strip() and e["ref"].strip(), e["id"])
 
