@@ -1,36 +1,48 @@
 #!/usr/bin/env bash
-# Apply the gbarecomp patch series to the submodule's working tree as a
-# stack: patches/gbarecomp/*.patch in name order, each on top of the pinned
-# commit plus the patches before it. Never commits inside the submodule.
+# Apply the patch series to gbarecomp's working tree, and to that of its
+# nested submodule external/arm-recomp-core, as stacks: patches/gbarecomp/
+# *.patch in name order, each on top of gbarecomp's pinned commit plus the
+# patches before it, then patches/arm-recomp-core/*.patch the same way on
+# top of the commit gbarecomp pins for arm-recomp-core. Never commits inside
+# either repository.
 #
-#   scripts/apply-patches.sh            make the tree the pin plus the series
-#   scripts/apply-patches.sh --check    report whether it is (exit 0) or not
-#                                       (exit 1); change nothing
-#   scripts/apply-patches.sh --reverse  restore the pin
-#   scripts/apply-patches.sh --diff     print what the tree has on top of the
-#                                       pin plus the series
+#   scripts/apply-patches.sh            make each tree its pin plus its series
+#   scripts/apply-patches.sh --check    report whether they are (exit 0) or
+#                                       not (exit 1); change nothing
+#   scripts/apply-patches.sh --reverse  restore the pins
+#   scripts/apply-patches.sh --diff     print what the trees have on top of
+#                                       their pin plus their series, as one
+#                                       patch relative to gbarecomp/
 #   scripts/apply-patches.sh --write-patch FILE
-#                                       save the tree's changes as FILE,
-#                                       keeping FILE's header. For a FILE in
-#                                       patches/gbarecomp/, its place in the
-#                                       series decides the base: the pin plus
-#                                       the patches before it, with the
-#                                       patches after it taken out of the tree
+#                                       save a tree's changes as FILE,
+#                                       keeping FILE's header. FILE's
+#                                       directory picks the series
+#                                       (patches/SERIES/), gbarecomp
+#                                       elsewhere unless --series says. For
+#                                       a FILE in patches/SERIES/, its place
+#                                       in the series decides the base: the
+#                                       pin plus the patches before it, with
+#                                       the patches after it taken out of
+#                                       the tree
 #
-#   --without NAME   leave a patch out: its number (0003) or file name. Can be
+#   --without NAME   leave a patch out: its number (0003) or file name, and
+#                    for the nested series arm-recomp-core/NUMBER. Can be
 #                    repeated. The build scripts take it too, and build into
 #                    build/without-NAME/; their next normal run restores the
 #                    full series.
-#   -q, --quiet      print nothing unless the tree changes
+#   --series SERIES  only this series: gbarecomp or arm-recomp-core
+#   -q, --quiet      print nothing unless a tree changes
 #
-# The series is applied to a scratch index, and only the files whose content
-# changes are written. The tree may start from any state the script can
-# explain: the pin, a leading part of the series, the series with one patch
-# left out, what the script last wrote (its stamp, build/gbarecomp-patches/),
-# or the series of one of the last 100 commits of the current branch that
-# changed patches/gbarecomp/. Anything else is a hand edit: the script stops
-# before writing anything and lists the files. Builds and switches in one
-# checkout run one at a time (lock_checkout). See patches/gbarecomp/README.md.
+# Each series is applied to a scratch index, and only the files whose
+# content changes are written. A tree may start from any state the script
+# can explain: the pin, a leading part of the series, the series with one
+# patch left out, what the script last wrote (its stamp, in
+# build/gbarecomp-patches/, the nested series' in a subdirectory), or the
+# series of one of the last 100 commits of the current branch that changed
+# its patch directory. Anything else is a hand edit: the script stops before
+# writing anything in that tree and lists the files. Builds and switches in
+# one checkout run one at a time (lock_checkout). See
+# patches/gbarecomp/README.md.
 set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 . "$(dirname "$0")/lib/common.sh"
@@ -38,6 +50,8 @@ set -euo pipefail
 MODE=apply
 QUIET=0
 OUT=""
+ONLY=""
+ARGS=("$@")
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) MODE=check ;;
@@ -47,20 +61,85 @@ while [ $# -gt 0 ]; do
     --write-patch=*) MODE="write"; OUT=${1#*=} ;;
     --without) [ $# -ge 2 ] || die "--without needs a patch name or number"; add_without "$2"; shift ;;
     --without=*) add_without "${1#*=}" ;;
+    --series) [ $# -ge 2 ] || die "--series needs a series name"; ONLY=$2; shift ;;
+    --series=*) ONLY=${1#*=} ;;
     -q | --quiet) QUIET=1 ;;
-    -h | --help) sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
 done
 [ "$MODE" != write ] || [ -n "$OUT" ] || die "--write-patch needs a file"
+if [ -n "$ONLY" ]; then series_repo "$ONLY" > /dev/null || exit 1; fi
+if [ "$MODE" = write ]; then
+  case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
+  [ -d "$(dirname "$OUT")" ] || die "no such directory: $(dirname "$OUT")"
+fi
 
 require_submodule
 # Set by a calling git hook, these would point git at another repository.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_PREFIX
 
-sub=$GBARECOMP_DIR
+# --- Top level: one run of this script per series ----------------------------
+
+# The script runs itself once per series, with _MRA_APPLY_SERIES naming it,
+# so that each series gets the same checks and the same messages. The modes
+# that write hold the lock here, and the runs below share it.
+if [ -z "${_MRA_APPLY_SERIES:-}" ]; then
+  # Every --without name, checked before any tree is touched.
+  without_patch_list > /dev/null || exit 1
+  run_list=$MRA_PATCH_SERIES
+  if [ "$MODE" = write ]; then
+    picked=""
+    for s in $MRA_PATCH_SERIES; do
+      d=$(series_patch_dir "$s")
+      if [ -d "$d" ] && [ "$(dirname "$OUT")" -ef "$d" ]; then picked=$s; fi
+    done
+    if [ -n "$picked" ] && [ -n "$ONLY" ] && [ "$picked" != "$ONLY" ]; then
+      die "$(rel "$OUT") is a patch of the $picked series, not of $ONLY"
+    fi
+    run_list=${picked:-${ONLY:-gbarecomp}}
+  elif [ -n "$ONLY" ]; then
+    run_list=$ONLY
+  fi
+  case "$MODE" in apply | reverse | write) lock_checkout ;; esac
+  status=0
+  for s in $run_list; do
+    rc=0
+    _MRA_APPLY_SERIES=$s "$MRA_ROOT/scripts/apply-patches.sh" ${ARGS[@]+"${ARGS[@]}"} || rc=$?
+    [ "$rc" != 0 ] || continue
+    status=$rc
+    # --check and --diff go on with the next series; the modes that write
+    # stop at the first series that refuses, before touching the next one.
+    case "$MODE" in check | diff) ;; *) exit "$rc" ;; esac
+  done
+  exit "$status"
+fi
+
+# --- One series --------------------------------------------------------------
+
+series=$_MRA_APPLY_SERIES
+sub=$(series_repo "$series")
+MRA_PATCH_DIR=$(series_patch_dir "$series")
+# gbarecomp's path to the nested repository, for --diff.
+nested_prefix=""
+[ "$series" = gbarecomp ] || nested_prefix=${sub#"$GBARECOMP_DIR"/}/
+
+# A nested repository must be a checkout of its own. Without one (a
+# submodule that was never initialized), git would work on gbarecomp
+# instead: an empty series has nothing to do, any other one stops.
+own_checkout() {
+  local top
+  [ -d "$sub" ] || return 1
+  top=$(git -C "$sub" rev-parse --show-toplevel 2> /dev/null) || return 1
+  [ "$(cd "$top" && pwd -P)" = "$(cd "$sub" && pwd -P)" ]
+}
+if ! own_checkout; then
+  [ -n "$(patch_series "$series")" ] || exit 0
+  die "$(rel "$sub") is not a git checkout of its own, so patches/$series cannot be applied to it. Run scripts/setup.sh first."
+fi
+
 pin=$(git -C "$sub" rev-parse --verify --quiet 'HEAD^{commit}') ||
   die "$(rel "$sub") has no commit checked out"
 pin_tree=$(git -C "$sub" rev-parse 'HEAD^{tree}')
@@ -68,31 +147,41 @@ short_pin=$(git -C "$sub" rev-parse --short HEAD)
 real_objects=$(git -C "$sub" rev-parse --path-format=absolute --git-path objects) ||
   die "git 2.31 or newer is required"
 
-mkdir -p "$MRA_PATCH_STATE_DIR/objects"
-state=$(cd "$MRA_PATCH_STATE_DIR" && pwd)
+state_dir=$(series_state_dir "$series")
+mkdir -p "$state_dir/objects"
+state=$(cd "$state_dir" && pwd)
 stamp=$state/stamp
 objects=$state/objects
 tmp=$(mktemp -d "$state/run.XXXXXX")
 # shellcheck disable=SC2317  # called through at_exit
 remove_tmp() { rm -rf "$tmp"; }
 at_exit remove_tmp
-# The modes that write wait for any build or switch in progress.
+# The modes that write wait for any build or switch in progress (the top
+# level already holds the lock: this returns at once).
 case "$MODE" in apply | reverse | write) lock_checkout ;; esac
 
-# The pin is the commit checked out in the submodule. When this repository
-# records another one (a checkout or a pull that moved it without
+# The pin is the commit checked out in the repository. When the repository
+# above it records another one (a checkout or a pull that moved it without
 # `git submodule update`), say so: the series is not applied to the pin the
-# repository builds.
+# repository builds. gbarecomp's commit is recorded by this repository,
+# arm-recomp-core's by gbarecomp.
+if [ "$series" = gbarecomp ]; then
+  above=$MRA_ROOT
+  above_name="this repository"
+else
+  above=$GBARECOMP_DIR
+  above_name=$(rel "$GBARECOMP_DIR")
+fi
 recorded_pin() {
   local top
-  top=$(git -C "$MRA_ROOT" rev-parse --show-toplevel 2> /dev/null) || return 0
-  [ "$(cd "$top" && pwd -P)" = "$(cd "$MRA_ROOT" && pwd -P)" ] || return 0
-  git -C "$MRA_ROOT" ls-files -s -- "$(rel "$sub")" 2> /dev/null |
+  top=$(git -C "$above" rev-parse --show-toplevel 2> /dev/null) || return 0
+  [ "$(cd "$top" && pwd -P)" = "$(cd "$above" && pwd -P)" ] || return 0
+  git -C "$above" ls-files -s -- "${sub#"$above"/}" 2> /dev/null |
     awk '$1 == "160000" && $3 == "0" { print $2; exit }'
 }
 recorded=$(recorded_pin)
 if [ -n "$recorded" ] && [ "$recorded" != "$pin" ]; then
-  moved="$(rel "$sub") has $short_pin checked out, but this repository records $(printf '%.7s' "$recorded") for it"
+  moved="$(rel "$sub") has $short_pin checked out, but $above_name records $(printf '%.7s' "$recorded") for it"
   back="To go back to the recorded commit: scripts/apply-patches.sh --reverse, then scripts/setup.sh. To move the pin instead: patches/gbarecomp/README.md, \"Moving the pin\"."
   if [ "$MODE" = check ]; then
     echo "NO: $moved. $back"
@@ -101,10 +190,11 @@ if [ -n "$recorded" ] && [ "$recorded" != "$pin" ]; then
   warn "$moved, and the series is applied to what is checked out. $back"
 fi
 
-# git in the submodule, with the objects this script creates (scratch
-# indexes, the trees it compares) kept in build/: nothing is added to the
-# submodule's repository. Never use it for another repository, such as a
-# nested submodule: these variables would apply there too.
+# git in the series' repository, with the objects this script creates
+# (scratch indexes, the trees it compares) kept in build/: nothing is added
+# to that repository. Never use it for another repository, such as a nested
+# submodule: these variables would apply there too. (The nested series runs
+# in a process of its own, with its own objects.)
 sgit() {
   GIT_OBJECT_DIRECTORY=$objects GIT_ALTERNATE_OBJECT_DIRECTORIES=$real_objects \
     git -C "$sub" "$@"
@@ -142,6 +232,10 @@ short_name() {
   esac
 }
 
+# opt_name NAME: how --without names the patch: 0003, or
+# arm-recomp-core/0001 in the nested series.
+opt_name() { patch_label "$series" "$1"; }
+
 # short_list NAMES: "0001, 0002".
 short_list() {
   local n out=""
@@ -165,7 +259,8 @@ sorts_after() {
 }
 
 # The tree of the working tree as it is: tracked files, and new files that
-# gbarecomp's .gitignore does not exclude.
+# the repository's .gitignore does not exclude. A nested repository counts
+# as the commit it has checked out, whatever its working tree holds.
 worktree_tree() {
   local idx=$tmp/worktree.idx
   rm -f "$idx"
@@ -174,11 +269,27 @@ worktree_tree() {
   sgit_idx "$idx" write-tree
 }
 
-# Nested submodules (external/arm-recomp-core) that are not at the commit
-# gbarecomp pins or have local changes: no patch series explains those.
+# Nested repositories that have a series of their own (in gbarecomp,
+# external/arm-recomp-core): their content is that series' business, and
+# only a commit other than the pinned one counts here.
+managed=""
+for s in $MRA_PATCH_SERIES; do
+  r=$(series_repo "$s")
+  case "$r" in "$sub"/?*) managed="$managed${managed:+ }${r#"$sub"/}" ;; esac
+done
+
+# Nested submodules that are not at the commit the repository pins or (for
+# one without a series) have local changes: no patch series explains those.
 changed_submodules() {
   git -C "$sub" diff-index --ignore-submodules=none HEAD |
-    awk '$1 == ":160000" || $2 == "160000" { sub(/^[^\t]*\t/, ""); printf "%s ", $0 }'
+    awk -v managed="$managed" '
+      BEGIN { n = split(managed, m, " "); for (i = 1; i <= n; i++) own[m[i]] = 1 }
+      $1 == ":160000" || $2 == "160000" {
+        same = ($3 == $4)
+        sub(/^[^\t]*\t/, "")
+        if (same && ($0 in own)) next
+        printf "%s ", $0
+      }'
 }
 
 # Identity of a series: its file names and contents, in order.
@@ -222,9 +333,9 @@ apply_failed() {
   # shellcheck disable=SC2086  # names are split on purpose (no white space)
   if [ -n "$left" ] && [ -n "$(series_result $prefix "$n")" ]; then
     left=$(short_list "$left")
-    die "$n does not apply without $left, which it stacks on. Leave it out too (--without $(short_name "$n")), or refresh it so that it applies without $left (patches/gbarecomp/README.md). Nothing was changed."
+    die "$n does not apply without $left, which it stacks on. Leave it out too (--without $(opt_name "$n")), or refresh it so that it applies without $left (patches/gbarecomp/README.md). Nothing was changed in $(rel "$sub")."
   fi
-  die "$n does not apply on top of gbarecomp $short_pin plus the patches before it. Refresh it or drop it (patches/gbarecomp/README.md). Nothing was changed."
+  die "$n does not apply on top of $series $short_pin plus the patches before it. Refresh it or drop it (patches/gbarecomp/README.md). Nothing was changed in $(rel "$sub")."
 }
 
 # series_result NAME...: the tree the series gives, or nothing when one of
@@ -241,13 +352,13 @@ last_tree() {
   if [ -n "$1" ]; then printf '%s\n' "${1##*$'\n'}"; else printf '%s\n' "$pin_tree"; fi
 }
 
-# A new file that gbarecomp ignores would never show in worktree_tree.
+# A new file that the repository ignores would never show in worktree_tree.
 check_not_ignored() {
   local path
   sgit diff-tree -r -z --name-only --diff-filter=A "$pin_tree" "$1" |
     while IFS= read -r -d '' path; do
       if git -C "$sub" check-ignore -q --no-index -- "$path"; then
-        die "the series adds $path, which gbarecomp's .gitignore excludes, so this script cannot track it. Put the file elsewhere."
+        die "the series adds $path, which the .gitignore of $(rel "$sub") excludes, so this script cannot track it. Put the file elsewhere."
       fi
     done
 }
@@ -259,7 +370,7 @@ stamp_get() {
 # write_stamp STATE TREE [FROM]
 write_stamp() {
   {
-    echo "# Written by scripts/apply-patches.sh: the gbarecomp tree it last produced."
+    echo "# Written by scripts/apply-patches.sh: the $series tree it last produced."
     echo "pin=$pin"
     echo "series=$target_id"
     echo "patches=$target_names"
@@ -287,14 +398,14 @@ is_mix() {
 
 # A series committed earlier in this repository (the stamp is gone after
 # build/ is deleted, and pulling may bring several new patches at once): the
-# last 100 commits reachable from HEAD that changed patches/gbarecomp/. A
+# last 100 commits reachable from HEAD that changed patches/SERIES/. A
 # series from another branch is not found once the stamp is gone.
 explain_from_history() {
   local tree=$1 top c entries key seen="" blob ok t
   top=$(git -C "$MRA_ROOT" rev-parse --show-toplevel 2> /dev/null) || return 1
   [ "$(cd "$top" && pwd -P)" = "$(cd "$MRA_ROOT" && pwd -P)" ] || return 1
-  for c in $(git -C "$MRA_ROOT" rev-list --max-count=100 HEAD -- patches/gbarecomp 2> /dev/null); do
-    entries=$(git -C "$MRA_ROOT" ls-tree "$c" -- patches/gbarecomp/ | grep '\.patch$' || true)
+  for c in $(git -C "$MRA_ROOT" rev-list --max-count=100 HEAD -- "patches/$series" 2> /dev/null); do
+    entries=$(git -C "$MRA_ROOT" ls-tree "$c" -- "patches/$series/" | grep '\.patch$' || true)
     [ -n "$entries" ] || continue
     key=$(printf '%s' "$entries" | git hash-object --stdin)
     case " $seen " in *" $key "*) continue ;; esac
@@ -378,12 +489,12 @@ show_unexplained() {
 
 refuse_hand_edit() {
   {
-    echo "error: $(rel "$sub") has changes that no known patch series explains (a hand edit?). Nothing was changed."
+    echo "error: $(rel "$sub") has changes that no known patch series explains (a hand edit?). Nothing was changed in it."
     show_unexplained
-    echo "  To see them: scripts/apply-patches.sh --diff."
-    echo "  To keep them as a patch: scripts/apply-patches.sh --write-patch patches/gbarecomp/NNNN-name.patch"
+    echo "  To see them: scripts/apply-patches.sh --diff --series $series."
+    echo "  To keep them as a patch: scripts/apply-patches.sh --write-patch patches/$series/NNNN-name.patch"
     echo "  (on top of the full series; it keeps the header of an existing file)."
-    echo "  To discard them: scripts/apply-patches.sh --diff | git -C $(rel "$sub") apply -R"
+    echo "  To discard them: scripts/apply-patches.sh --diff --series $series | git -C $(rel "$GBARECOMP_DIR") apply -R"
     echo "  After an A/B build that left two or more patches out, once build/ is deleted: run"
     echo "  scripts/apply-patches.sh with the same --without options instead (not --write-patch,"
     echo "  which would save a patch that undoes them). The next normal run then restores the series."
@@ -421,7 +532,7 @@ switch_tree() {
 report() {
   local n
   [ "$QUIET" = 0 ] || return 0
-  info "gbarecomp $short_pin: $(describe "$target_names")"
+  info "$series $short_pin: $(describe "$target_names")"
   for n in $all_names; do
     if in_list "$n" "$target_names"; then
       printf '  %-12s %s\n' applied "$n"
@@ -441,19 +552,16 @@ left_out_note() {
 
 # --- The series and the tree -------------------------------------------------
 
-all_names=$(patch_series) || exit 1
+all_names=$(patch_series "$series") || exit 1
 all_names=$(words "$all_names")
 out_name=""
-if [ "$MODE" = write ]; then
-  case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
-  [ -d "$(dirname "$OUT")" ] || die "no such directory: $(dirname "$OUT")"
-  if [ "$(dirname "$OUT")" -ef "$MRA_PATCH_DIR" ] && in_list "${OUT##*/}" "$all_names"; then
-    out_name=${OUT##*/}
-  fi
+if [ "$MODE" = write ] && [ -d "$MRA_PATCH_DIR" ] &&
+   [ "$(dirname "$OUT")" -ef "$MRA_PATCH_DIR" ] && in_list "${OUT##*/}" "$all_names"; then
+  out_name=${OUT##*/}
 fi
 without_names=""
 if [ "$MODE" != reverse ]; then
-  without_names=$(without_patch_names) || exit 1
+  without_names=$(without_patch_names "$series") || exit 1
   without_names=$(words "$without_names")
 fi
 target_names=""
@@ -504,11 +612,15 @@ if [ "$MODE" = diff ] || [ "$MODE" = write ]; then
     # FILE's place in the series (its name) decides what it is written
     # against: the pin plus the patches before it. The patches after it are
     # taken out of the tree, so that the patch applies at its place and the
-    # later ones still apply on top of it. A FILE outside patches/gbarecomp/
+    # later ones still apply on top of it. A FILE outside patches/SERIES/
     # is written against the whole series.
     before_names="" after_names="" place=""
     case "$OUT" in
-      *.patch) if [ "$(dirname "$OUT")" -ef "$MRA_PATCH_DIR" ]; then place=${OUT##*/}; fi ;;
+      *.patch)
+        if [ -d "$MRA_PATCH_DIR" ] && [ "$(dirname "$OUT")" -ef "$MRA_PATCH_DIR" ]; then
+          place=${OUT##*/}
+        fi
+        ;;
     esac
     for n in $target_names; do
       if [ -n "$place" ] && sorts_after "$n" "$place"; then
@@ -528,7 +640,11 @@ if [ "$MODE" = diff ] || [ "$MODE" = write ]; then
   fi
   diff_cmd=(sgit diff-tree -p -r --binary --no-ext-diff --src-prefix=a/ --dst-prefix=b/ "$base_tree" "$new_tree")
   if [ "$MODE" = diff ]; then
-    "${diff_cmd[@]}"
+    # Paths relative to gbarecomp/, for every series, so that the output of
+    # all series is one patch that `git -C gbarecomp apply` takes (git
+    # writes the files of a nested repository there too).
+    sgit diff-tree -p -r --binary --no-ext-diff --src-prefix="a/$nested_prefix" \
+      --dst-prefix="b/$nested_prefix" "$base_tree" "$new_tree"
     exit 0
   fi
   # The header is everything above the first 'diff --git' line, blank lines
@@ -552,7 +668,7 @@ if [ "$MODE" = diff ] || [ "$MODE" = write ]; then
   fi
   if [ -n "$place" ]; then
     names=""
-    for n in $(patch_series); do
+    for n in $(patch_series "$series"); do
       in_list "$n" "$without_names" || names="$names $n"
     done
     # shellcheck disable=SC2086
@@ -585,7 +701,7 @@ if [ "$MODE" = check ]; then
   full_trees=$(series_trees partial "$tmp/full.idx" $all_names)
   if explain "$W"; then
     opts=""
-    for n in $without_names; do opts="$opts --without $(short_name "$n")"; done
+    for n in $without_names; do opts="$opts --without $(opt_name "$n")"; done
     echo "NO: $(rel "$sub") is $EXPLAIN, not $(describe "$target_names")."
     echo "Run scripts/apply-patches.sh$opts to switch it."
   else
@@ -631,5 +747,5 @@ explain "$W" || refuse_hand_edit
 was=$EXPLAIN
 switch_tree "$W" "$target_tree"
 report
-info "gbarecomp: $(describe "$target_names") (was $was): $written file(s) written, $removed removed"
+info "$series: $(describe "$target_names") (was $was): $written file(s) written, $removed removed"
 left_out_note

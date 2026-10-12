@@ -2,14 +2,18 @@
 """Synthetic 4 KiB GBA ROMs that reproduce gbarecomp runtime bugs.
 
     make_rom.py CASE OUT.gba      CASE is irqleak1, irqleak2, irqleak3,
-                                  overlay1 or overlay1heal
+                                  overlay1, overlay1heal, prefetch1,
+                                  irqentry1 or irqentry2
 
 Prints the SHA-1 of the ROM it wrote. Each case has a gba_recompile config
 next to this script (CASE.toml) whose [identity].sha1 pins these bytes.
 irqleak1-3 reproduce the IRQ call-return leak (patch 0003, below); overlay1
 reproduces the shared-IWRAM code images that patch 0006's RAM overlay
 selector handles (see OVERLAY1). overlay1heal is the same ROM, byte for byte,
-run with another config and selector (tests/repro/README.md).
+run with another config and selector (tests/repro/README.md). prefetch1,
+irqentry1 and irqentry2 time CPU work against mGBA's model: the GamePak
+prefetch reset on a PC write, and the cycles of IRQ entry, which a DMA hides
+(see PREFETCH1, IRQENTRY1 and IRQENTRY2).
 
 No Nintendo code or data is inside: the header logo (0x04-0x9F) is left zero,
 so the runtime must skip the BIOS intro ([bios] skip_intro = true in the
@@ -255,6 +259,222 @@ OVERLAY1 = {
 
 
 
+# Timing repros (patches/gbarecomp/0011, 0012 and
+# patches/arm-recomp-core/0001). Each measures cycles with free-running
+# timer 0 at F/1, read before and after a workload, as gbarecomp's CPU timing
+# fixture does (gbarecomp tests/timing/timing_fixture.S), and stores one
+# 16-bit difference per measurement in words from 0x02020000 on, then the
+# marker 0x600D at 0x0201FFF0. scripts/repro-test.sh reads them through
+# gbarecomp's capture; the reference values come from mGBA 0.10.5 running
+# the same ROM on the same BIOS image (tests/repro/README.md).
+TIMING_RESULTS = 0x02020000
+TIMING_MARKER = 0x0201FFF0
+
+# prefetch1: the GamePak prefetch buffer forgets its position on a PC write
+# (mGBA GBASetActiveRegion). With WAITCNT 0x4317 (ROM 3/1, prefetch on), a
+# loop that runs from ROM and stores to EWRAM gets a store that costs 4
+# cycles, the buffer fetching from scratch during each store. gbarecomp's pin
+# keeps the position of the opcodes after the loop across the branch back,
+# so the buffer looks nearly full and the store costs 8: 26 cycles per
+# iteration instead of mGBA's 22 for kernel 0, the loop of Moto Racer
+# Advance's race start-up (0x08159FD4, docs/research/phase2-race-lockstep.md
+# section 2). Kernel 0 closes the loop with a static branch (the codegen's
+# reset), kernel 1 with BXCC (a PC write known only at run time:
+# runtime_refill_cycles), kernel 2 is a THUMB loop. The interpreter resets
+# through Bus::prefetch_reset.
+PREFETCH1 = {
+    0x080000C0: 0xE3A00301,  # mov r0, #0x04000000
+    0x080000C4: 0xE3A01080,  # mov r1, #0x80
+    0x080000C8: 0xE1C010B0,  # strh r1, [r0]         DISPCNT: forced blank
+    0x080000CC: 0xE2802C02,  # add r2, r0, #0x200
+    0x080000D0: 0xE3A01000,  # mov r1, #0
+    0x080000D4: 0xE5821008,  # str r1, [r2, #8]      IME = 0: no IRQ while measuring
+    0x080000D8: 0xE59F1054,  # ldr r1, [pc, #0x54]   -> 0x4317 (literal at 0x08000134)
+    0x080000DC: 0xE1C210B4,  # strh r1, [r2, #4]     WAITCNT: ROM 3/1, SRAM 8, prefetch on
+    0x080000E0: 0xE2822C06,  # add r2, r2, #0x600
+    0x080000E4: 0xE59F104C,  # ldr r1, [pc, #0x4C]   -> 0x0D000020 (literal at 0x08000138)
+    0x080000E8: 0xE5821000,  # str r1, [r2]          0x04000800: EWRAM 2 wait states
+    0x080000EC: 0xE280CC01,  # add r12, r0, #0x100   r12 = TM0CNT_L
+    0x080000F0: 0xE3A01000,  # mov r1, #0
+    0x080000F4: 0xE1CC10B0,  # strh r1, [r12]        timer 0 reload 0
+    0x080000F8: 0xE3A01080,  # mov r1, #0x80
+    0x080000FC: 0xE1CC10B2,  # strh r1, [r12, #2]    timer 0 on, F/1
+    0x08000100: 0xE59FB034,  # ldr r11, [pc, #0x34]  -> 0x02020000 (literal at 0x0800013C)
+    0x08000104: b(0x08000104, 0x08000200, link=True),  # bl k_bcc
+    0x08000108: 0xE48B0004,  # str r0, [r11], #4     result 0
+    0x0800010C: b(0x0800010C, 0x08000280, link=True),  # bl k_bx
+    0x08000110: 0xE48B0004,  # str r0, [r11], #4     result 1
+    0x08000114: 0xE59F7024,  # ldr r7, [pc, #0x24]   -> 0x08000301 (literal at 0x08000140)
+    0x08000118: 0xE1A0E00F,  # mov lr, pc
+    0x0800011C: 0xE12FFF17,  # bx r7                 k_thumb
+    0x08000120: 0xE48B0004,  # str r0, [r11], #4     result 2
+    0x08000124: 0xE59F0018,  # ldr r0, [pc, #0x18]   -> 0x600D (literal at 0x08000144)
+    0x08000128: 0xE59F1018,  # ldr r1, [pc, #0x18]   -> 0x0201FFF0 (literal at 0x08000148)
+    0x0800012C: 0xE5810000,  # str r0, [r1]          done marker
+    0x08000130: 0xEAFFFFFE,  # done: b done
+    0x08000134: 0x00004317,
+    0x08000138: 0x0D000020,
+    0x0800013C: TIMING_RESULTS,
+    0x08000140: 0x08000301,
+    0x08000144: 0x0000600D,
+    0x08000148: TIMING_MARKER,
+    # Kernel 0, k_bcc: clear 64 words of EWRAM, as the race start-up does.
+    0x08000200: 0xE59F1028,  # ldr r1, [pc, #0x28]   -> 0x02010000 (literal at 0x08000230)
+    0x08000204: 0xE2812C01,  # add r2, r1, #0x100    end: 64 words on
+    0x08000208: 0xE3A03000,  # mov r3, #0
+    0x0800020C: 0xE1DC40B0,  # ldrh r4, [r12]        t0
+    0x08000210: 0xE1510002,  # loop: cmp r1, r2
+    0x08000214: 0x34813004,  # strcc r3, [r1], #4
+    0x08000218: 0x3AFFFFFC,  # bcc loop
+    0x0800021C: 0xE1DC50B0,  # ldrh r5, [r12]        t1
+    0x08000220: 0xE0450004,  # sub r0, r5, r4
+    0x08000224: 0xE1A00800,  # mov r0, r0, lsl #16
+    0x08000228: 0xE1A00820,  # mov r0, r0, lsr #16   16-bit timer difference
+    0x0800022C: 0xE12FFF1E,  # bx lr
+    0x08000230: 0x02010000,
+    # Kernel 1, k_bx: the same loop, closed by BXCC to the loop head.
+    0x08000280: 0xE59F102C,  # ldr r1, [pc, #0x2C]   -> 0x02010000 (literal at 0x080002B4)
+    0x08000284: 0xE2812C01,  # add r2, r1, #0x100
+    0x08000288: 0xE3A03000,  # mov r3, #0
+    0x0800028C: 0xE28F6000,  # add r6, pc, #0        r6 = 0x08000294, the loop head
+    0x08000290: 0xE1DC40B0,  # ldrh r4, [r12]        t0
+    0x08000294: 0xE1510002,  # loop: cmp r1, r2
+    0x08000298: 0x34813004,  # strcc r3, [r1], #4
+    0x0800029C: 0x312FFF16,  # bxcc r6
+    0x080002A0: 0xE1DC50B0,  # ldrh r5, [r12]        t1
+    0x080002A4: 0xE0450004,  # sub r0, r5, r4
+    0x080002A8: 0xE1A00800,  # mov r0, r0, lsl #16
+    0x080002AC: 0xE1A00820,  # mov r0, r0, lsr #16
+    0x080002B0: 0xE12FFF1E,  # bx lr
+    0x080002B4: 0x02010000,
+}
+# Kernel 2, k_thumb (THUMB, entered with `bx r7`): store, add, compare and
+# branch back, from ROM.
+PREFETCH1_THUMB = {
+    0x08000300: 0x4907,  # ldr r1, [pc, #0x1C]   -> 0x02010000 (literal at 0x08000320)
+    0x08000302: 0x2201,  # movs r2, #1
+    0x08000304: 0x0212,  # lsls r2, r2, #8
+    0x08000306: 0x188A,  # adds r2, r1, r2       end: 64 words on
+    0x08000308: 0x2300,  # movs r3, #0
+    0x0800030A: 0x4666,  # mov r6, r12
+    0x0800030C: 0x8834,  # ldrh r4, [r6]         t0
+    0x0800030E: 0x600B,  # loop: str r3, [r1]
+    0x08000310: 0x3104,  # adds r1, #4
+    0x08000312: 0x4291,  # cmp r1, r2
+    0x08000314: 0xD3FB,  # bcc loop
+    0x08000316: 0x8835,  # ldrh r5, [r6]         t1
+    0x08000318: 0x1B28,  # subs r0, r5, r4
+    0x0800031A: 0x0400,  # lsls r0, r0, #16
+    0x0800031C: 0x0C00,  # lsrs r0, r0, #16
+    0x0800031E: 0x4770,  # bx lr
+    0x08000320: 0x0000,  # literal 0x02010000, low half
+    0x08000322: 0x0201,  # high half
+}
+
+# irqentry1: entering an IRQ costs the pipeline refill at the vector, 2
+# cycles in the zero-wait BIOS, which mGBA charges (ARMRaiseIRQ:
+# ARMWritePC) and gbarecomp's pin does not (runtime_tick, before
+# runtime_irq). No DMA runs, so no DMA hides them. Result 0 is a loop of 100
+# subs/bne from ROM (power-on WAITCNT, no prefetch), result 1 the same loop
+# with one timer 1 IRQ inside it, result 2 the number of IRQs the handler
+# counted (1). Result 1 - result 0 is the IRQ's whole cost: entry, the BIOS's
+# dispatcher, the handler and the return.
+IRQENTRY1 = {
+    0x080000C0: 0xE3A00301,  # mov r0, #0x04000000
+    0x080000C4: 0xE3A01080,  # mov r1, #0x80
+    0x080000C8: 0xE1C010B0,  # strh r1, [r0]         DISPCNT: forced blank
+    0x080000CC: 0xE2802C02,  # add r2, r0, #0x200
+    0x080000D0: 0xE3A01010,  # mov r1, #0x10
+    0x080000D4: 0xE1C210B0,  # strh r1, [r2]         IE = timer 1
+    0x080000D8: 0xE3A01001,  # mov r1, #1
+    0x080000DC: 0xE1C210B8,  # strh r1, [r2, #8]     IME = 1
+    0x080000E0: 0xE59F0060,  # ldr r0, [pc, #0x60]   -> 0x03007FFC (literal at 0x08000148)
+    0x080000E4: 0xE59F1060,  # ldr r1, [pc, #0x60]   -> 0x08000180 (literal at 0x0800014C)
+    0x080000E8: 0xE5801000,  # str r1, [r0]          user IRQ handler pointer
+    0x080000EC: 0xE3A0C301,  # mov r12, #0x04000000
+    0x080000F0: 0xE28CCC01,  # add r12, r12, #0x100  r12 = TM0CNT_L
+    0x080000F4: 0xE3A01000,  # mov r1, #0
+    0x080000F8: 0xE1CC10B0,  # strh r1, [r12]        timer 0 reload 0
+    0x080000FC: 0xE3A01080,  # mov r1, #0x80
+    0x08000100: 0xE1CC10B2,  # strh r1, [r12, #2]    timer 0 on, F/1
+    0x08000104: 0xE59FB044,  # ldr r11, [pc, #0x44]  -> 0x02020000 (literal at 0x08000150)
+    0x08000108: 0xE321F01F,  # msr cpsr_c, #0x1F     System mode, IRQs enabled
+    0x0800010C: b(0x0800010C, 0x08000200, link=True),  # bl k_loop
+    0x08000110: 0xE48B0004,  # str r0, [r11], #4     result 0: the loop alone
+    0x08000114: 0xE3A01CFF,  # mov r1, #0xFF00
+    0x08000118: 0xE1CC10B4,  # strh r1, [r12, #4]    timer 1 reload: overflow 256 cycles on
+    0x0800011C: 0xE3A010C0,  # mov r1, #0xC0
+    0x08000120: 0xE1CC10B6,  # strh r1, [r12, #6]    timer 1 on, IRQ, F/1
+    0x08000124: b(0x08000124, 0x08000200, link=True),  # bl k_loop
+    0x08000128: 0xE48B0004,  # str r0, [r11], #4     result 1: the loop with one IRQ
+    0x0800012C: 0xE3A00402,  # mov r0, #0x02000000
+    0x08000130: 0xE5900000,  # ldr r0, [r0]
+    0x08000134: 0xE48B0004,  # str r0, [r11], #4     result 2: IRQs counted
+    0x08000138: 0xE59F0014,  # ldr r0, [pc, #0x14]   -> 0x600D (literal at 0x08000154)
+    0x0800013C: 0xE59F1014,  # ldr r1, [pc, #0x14]   -> 0x0201FFF0 (literal at 0x08000158)
+    0x08000140: 0xE5810000,  # str r0, [r1]          done marker
+    0x08000144: 0xEAFFFFFE,  # done: b done
+    0x08000148: 0x03007FFC,
+    0x0800014C: 0x08000180,
+    0x08000150: TIMING_RESULTS,
+    0x08000154: 0x0000600D,
+    0x08000158: TIMING_MARKER,
+    # Timer 1 IRQ handler, called by the BIOS's IRQ vector through 0x03007FFC.
+    0x08000180: 0xE3A00301,  # mov r0, #0x04000000
+    0x08000184: 0xE2800C01,  # add r0, r0, #0x100
+    0x08000188: 0xE3A01000,  # mov r1, #0
+    0x0800018C: 0xE1C010B6,  # strh r1, [r0, #6]     timer 1 off
+    0x08000190: 0xE2800C01,  # add r0, r0, #0x100
+    0x08000194: 0xE3A01010,  # mov r1, #0x10
+    0x08000198: 0xE1C010B2,  # strh r1, [r0, #2]     IF: acknowledge timer 1
+    0x0800019C: 0xE3A00402,  # mov r0, #0x02000000
+    0x080001A0: 0xE5901000,  # ldr r1, [r0]
+    0x080001A4: 0xE2811001,  # add r1, r1, #1
+    0x080001A8: 0xE5801000,  # str r1, [r0]          count the IRQ
+    0x080001AC: 0xE12FFF1E,  # bx lr
+    # k_loop: 100 iterations of subs/bne, timed.
+    0x08000200: 0xE3A00064,  # mov r0, #100
+    0x08000204: 0xE1DC40B0,  # ldrh r4, [r12]        t0
+    0x08000208: 0xE2500001,  # loop: subs r0, r0, #1
+    0x0800020C: 0x1AFFFFFD,  # bne loop
+    0x08000210: 0xE1DC50B0,  # ldrh r5, [r12]        t1
+    0x08000214: 0xE0450004,  # sub r0, r5, r4
+    0x08000218: 0xE1A00800,  # mov r0, r0, lsl #16
+    0x0800021C: 0xE1A00820,  # mov r0, r0, lsr #16
+    0x08000220: 0xE12FFF1E,  # bx lr
+}
+
+# irqentry2: an IRQ raised while a DMA holds the bus costs no refill in mGBA,
+# whose event loop advances a CPU that a DMA blocks to its next event
+# (GBAProcessEvents, cpuBlocked). irqentry1's program, with the timed routine
+# at 0x08000200 replaced: it starts an immediate DMA3 of 64 words from EWRAM
+# to EWRAM with one store to DMA3CNT, between the two timer 0 reads. In the
+# second run, timer 1 overflows about 256 cycles after it starts, while the
+# DMA runs (it takes about 770 cycles), so the IRQ is taken right after the
+# store. Generated code and the interpreter charge the DMA's cycles after the
+# store, from runtime_resync_horizon; patch 0012 must hide the refill there
+# too, not only after a DMA drained inside runtime_tick.
+IRQENTRY2 = {
+    **{a: w for a, w in IRQENTRY1.items() if a < 0x08000200},
+    # k_dma: one immediate DMA3, timed.
+    0x08000200: 0xE59FA02C,  # ldr r10, [pc, #0x2C] -> 0x040000D4 (literal at 0x08000234)
+    0x08000204: 0xE3A01402,  # mov r1, #0x02000000
+    0x08000208: 0xE58A1000,  # str r1, [r10]         DMA3SAD = 0x02000000
+    0x0800020C: 0xE2811A01,  # add r1, r1, #0x1000
+    0x08000210: 0xE58A1004,  # str r1, [r10, #4]     DMA3DAD = 0x02001000
+    0x08000214: 0xE59F601C,  # ldr r6, [pc, #0x1C]   -> 0x84000040 (literal at 0x08000238)
+    0x08000218: 0xE1DC40B0,  # ldrh r4, [r12]        t0
+    0x0800021C: 0xE58A6008,  # str r6, [r10, #8]     DMA3CNT: 64 words, 32-bit, start now
+    0x08000220: 0xE1DC50B0,  # ldrh r5, [r12]        t1
+    0x08000224: 0xE0450004,  # sub r0, r5, r4
+    0x08000228: 0xE1A00800,  # mov r0, r0, lsl #16
+    0x0800022C: 0xE1A00820,  # mov r0, r0, lsr #16
+    0x08000230: 0xE12FFF1E,  # bx lr
+    0x08000234: 0x040000D4,
+    0x08000238: 0x84000040,
+}
+
+
 def check_overlay_images():
     """Stop unless every word of images A and B is defined and the two images
     differ at every offset they share. The selectors in
@@ -279,17 +499,23 @@ CASES = {
     'overlay1': (b'RAMOVERLAY1', b'ZZZW', OVERLAY1),
     # overlay1's bytes, with another config (tests/repro/overlay1heal.toml).
     'overlay1heal': (b'RAMOVERLAY1', b'ZZZW', OVERLAY1),
+    'prefetch1': (b'PREFETCH1', b'ZZZV', PREFETCH1, PREFETCH1_THUMB),
+    'irqentry1': (b'IRQENTRY1', b'ZZZU', IRQENTRY1),
+    'irqentry2': (b'IRQENTRY2', b'ZZZT', IRQENTRY2),
 }
 
 
 def build(case):
-    title, game_code, code = CASES[case]
+    title, game_code, code = CASES[case][:3]
+    halfwords = CASES[case][3] if len(CASES[case]) > 3 else {}
     if code is OVERLAY1:
         check_overlay_images()
     rom = bytearray(ROM_SIZE)
     header(rom, title, game_code)
     for addr, word in code.items():
         struct.pack_into('<I', rom, addr - ROM_BASE, word)
+    for addr, half in halfwords.items():
+        struct.pack_into('<H', rom, addr - ROM_BASE, half)
     return bytes(rom)
 
 

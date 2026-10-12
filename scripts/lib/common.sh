@@ -16,9 +16,12 @@
 # --without NAME, which sets the first variable below. Both directories above
 # then move under $MRA_BUILD_DIR/without-NAME/, so a build with a patch left
 # out never writes the normal build or generated/:
-#   MRA_WITHOUT_PATCHES  patches to leave out, separated by spaces  (none)
-#   MRA_PATCH_STATE_DIR  apply-patches.sh's stamp and scratch objects, and
-#                        the checkout lock (lock_checkout)
+#   MRA_WITHOUT_PATCHES  patches to leave out, separated by spaces: 0003
+#                        for patches/gbarecomp/0003-*.patch,
+#                        arm-recomp-core/0001 for the nested series  (none)
+#   MRA_PATCH_STATE_DIR  apply-patches.sh's stamps and scratch objects (the
+#                        nested series' in a subdirectory of the same name),
+#                        and the checkout lock (lock_checkout)
 #                        ($MRA_BUILD_DIR/gbarecomp-patches, never per variant)
 #
 # Keep this file compatible with the bash 3.2 that ships with macOS: no
@@ -26,7 +29,11 @@
 
 MRA_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GBARECOMP_DIR="$MRA_ROOT/gbarecomp"
-MRA_PATCH_DIR="$MRA_ROOT/patches/gbarecomp"
+# The patch series (patches/gbarecomp/README.md), in the order
+# scripts/apply-patches.sh applies them. Each is a directory patches/SERIES/
+# of *.patch files, applied as a stack to the working tree of one repository
+# (series_repo): gbarecomp, then its nested submodule arm-recomp-core.
+MRA_PATCH_SERIES="gbarecomp arm-recomp-core"
 
 MRA_ROM=${MRA_ROM:-$MRA_ROOT/roms/moto-racer-advance.gba}
 MRA_BIOS=${MRA_BIOS:-$MRA_ROOT/bios/gba_bios.bin}
@@ -266,9 +273,11 @@ verify_inputs() {
   info "BIOS $(rel "$MRA_BIOS")  sha1=$bios_sha1"
 }
 
-# Make the submodule's tree the pin plus patches/gbarecomp/ (minus the
-# patches MRA_WITHOUT_PATCHES leaves out). Silent when it already is; stops
-# on a patch that does not apply and on changes no known series explains.
+# Make the submodule's tree the pin plus patches/gbarecomp/, and its nested
+# arm-recomp-core the commit gbarecomp pins plus patches/arm-recomp-core/
+# (minus the patches MRA_WITHOUT_PATCHES leaves out). Silent when they
+# already are; stops on a patch that does not apply and on changes no known
+# series explains.
 ensure_patches() {
   "$MRA_ROOT/scripts/apply-patches.sh" --quiet
 }
@@ -350,21 +359,62 @@ unlock_checkout() {
 # After an A/B build: gbarecomp/ keeps the variant until the next normal run.
 # shellcheck disable=SC2317  # called through at_exit
 variant_notice() {
-  local stamp="$MRA_PATCH_STATE_DIR/stamp" without n list=""
-  [ -f "$stamp" ] || return 0
-  [ "$(sed -n 's/^state=//p' "$stamp" | head -n 1)" = "done" ] || return 0
-  without=$(sed -n 's/^without=//p' "$stamp" | head -n 1)
-  [ -n "$without" ] || return 0
-  for n in $without; do list="$list${list:+, }${n%%-*}"; done
+  local series stamp without n list=""
+  for series in $MRA_PATCH_SERIES; do
+    stamp="$(series_state_dir "$series")/stamp"
+    [ -f "$stamp" ] || continue
+    [ "$(sed -n 's/^state=//p' "$stamp" | head -n 1)" = "done" ] || continue
+    without=$(sed -n 's/^without=//p' "$stamp" | head -n 1)
+    for n in $without; do list="$list${list:+, }$(patch_label "$series" "$n")"; done
+  done
+  [ -n "$list" ] || return 0
   info "gbarecomp/ is left without $list. The next normal build script, or scripts/apply-patches.sh, restores the full series; a build by hand before that compiles this variant."
 }
 
-# The file names of the series (patches/gbarecomp/*.patch), in name order,
-# one per line. Names are restricted to letters, digits, '.', '_' and '-' so
-# that callers can split the list on white space.
+# series_repo SERIES: the repository whose working tree SERIES patches.
+series_repo() {
+  case "$1" in
+    gbarecomp) printf '%s\n' "$GBARECOMP_DIR" ;;
+    arm-recomp-core) printf '%s\n' "$GBARECOMP_DIR/external/arm-recomp-core" ;;
+    *) die "unknown patch series: $1 (one of: $MRA_PATCH_SERIES)" ;;
+  esac
+}
+
+# series_patch_dir SERIES: patches/SERIES.
+series_patch_dir() {
+  series_repo "$1" > /dev/null || exit 1
+  printf '%s\n' "$MRA_ROOT/patches/$1"
+}
+
+# series_state_dir SERIES: where apply-patches.sh keeps SERIES's stamp and
+# scratch objects. The nested series' directory is inside gbarecomp's.
+series_state_dir() {
+  case "$1" in
+    gbarecomp) printf '%s\n' "$MRA_PATCH_STATE_DIR" ;;
+    *) series_repo "$1" > /dev/null || exit 1; printf '%s\n' "$MRA_PATCH_STATE_DIR/$1" ;;
+  esac
+}
+
+# patch_label SERIES FILE: how messages and options name a patch: 0003 for
+# patches/gbarecomp/0003-some-fix.patch, arm-recomp-core/0001 for a patch of
+# the nested series.
+patch_label() {
+  local short
+  case "$2" in
+    [0-9]*-*) short=${2%%-*} ;;
+    *) short=${2%.patch} ;;
+  esac
+  if [ "$1" = gbarecomp ]; then printf '%s\n' "$short"; else printf '%s/%s\n' "$1" "$short"; fi
+}
+
+# patch_series [SERIES]: the file names of a series (patches/SERIES/*.patch,
+# gbarecomp by default), in name order, one per line. Names are restricted
+# to letters, digits, '.', '_' and '-' so that callers can split the list on
+# white space.
 patch_series() {
-  local p base list=""
-  for p in "$MRA_PATCH_DIR"/*.patch; do
+  local dir p base list=""
+  dir=$(series_patch_dir "${1:-gbarecomp}") || exit 1
+  for p in "$dir"/*.patch; do
     [ -f "$p" ] || continue
     base=${p##*/}
     case "$base" in
@@ -376,30 +426,66 @@ patch_series() {
   printf '%s' "$list" | LC_ALL=C sort
 }
 
-# resolve_patch NAME: the file name of the one patch that NAME designates:
-# its number (0003), its file name with or without .patch, or a path to it.
-resolve_patch() {
-  local want=${1##*/} series p base exact="" matches="" count=0
-  want=${want%.patch}
-  [ -n "$want" ] || die "empty patch name"
-  series=$(patch_series) || exit 1
-  for p in $series; do
+# match_patch SERIES WANT: the file names in SERIES that WANT designates
+# (its number, or its file name without .patch), exact match first.
+match_patch() {
+  local list p base exact="" matches=""
+  list=$(patch_series "$1") || exit 1
+  for p in $list; do
     base=${p%.patch}
-    if [ "$base" = "$want" ]; then
-      exact=$base.patch
-    elif [ "${base#"$want"-}" != "$base" ]; then
-      matches="$matches $base.patch"
-      count=$((count + 1))
+    if [ "$base" = "$2" ]; then
+      exact=$p
+    elif [ "${base#"$2"-}" != "$base" ]; then
+      matches="$matches${matches:+ }$p"
     fi
   done
-  if [ -n "$exact" ]; then
-    printf '%s\n' "$exact"
-  elif [ "$count" = 1 ]; then
-    printf '%s\n' "${matches# }"
+  if [ -n "$exact" ]; then printf '%s\n' "$exact"; else printf '%s\n' "$matches"; fi
+}
+
+# resolve_patch NAME: SERIES/FILE, the one patch that NAME designates: its
+# number (0003), its file name with or without .patch, or a path to it. A
+# name in the nested series is qualified with the series' name or directory
+# (arm-recomp-core/0001, patches/arm-recomp-core/0001-x.patch); a name
+# without a directory designates a patch of patches/gbarecomp/. A directory
+# that is neither a series' name nor, for an existing file, a series'
+# directory stops: a mistyped series must not leave out another patch.
+resolve_patch() {
+  local want=${1##*/} series=gbarecomp dir s found count other
+  case "$1" in
+    */*)
+      dir=${1%/*}
+      dir=${dir##*/}
+      series=""
+      for s in $MRA_PATCH_SERIES; do [ "$dir" != "$s" ] || series=$s; done
+      if [ -z "$series" ] && [ -f "$1" ]; then
+        dir=$(cd "$(dirname "$1")" && pwd -P)
+        for s in $MRA_PATCH_SERIES; do
+          [ "$dir" != "$(cd "$MRA_ROOT/patches/$s" 2> /dev/null && pwd -P)" ] || series=$s
+        done
+      fi
+      [ -n "$series" ] ||
+        die "unknown patch series '${1%/*}' in '$1': qualify a patch with one of: $MRA_PATCH_SERIES"
+      ;;
+  esac
+  want=${want%.patch}
+  [ -n "$want" ] || die "empty patch name"
+  found=$(match_patch "$series" "$want") || exit 1
+  # shellcheck disable=SC2086  # file names hold no white space
+  count=$(set -- $found; echo $#)
+  if [ "$count" = 1 ]; then
+    printf '%s/%s\n' "$series" "$found"
   elif [ "$count" = 0 ]; then
-    die "no patch in $(rel "$MRA_PATCH_DIR") matches '$1'"
+    other=""
+    if [ "$series" = gbarecomp ] && [ "$1" = "${1##*/}" ]; then
+      for s in $MRA_PATCH_SERIES; do
+        [ "$s" != gbarecomp ] || continue
+        [ -z "$(match_patch "$s" "$want")" ] || other="$other${other:+ or }$s/$want"
+      done
+    fi
+    [ -z "$other" ] || die "no patch in patches/gbarecomp matches '$1'. For the nested series, qualify the name: $other"
+    die "no patch in patches/$series matches '$1'"
   else
-    die "'$1' matches several patches:$matches"
+    die "'$1' matches several patches in patches/$series: $found"
   fi
 }
 
@@ -410,31 +496,46 @@ add_without() {
   MRA_WITHOUT_PATCHES="${MRA_WITHOUT_PATCHES:+$MRA_WITHOUT_PATCHES }$1"
 }
 
-# The patches MRA_WITHOUT_PATCHES leaves out: file names, sorted, one per
-# line. Stops on a name that does not designate exactly one patch: a typo
-# must not build the full series into an A/B directory.
-without_patch_names() {
-  local name file list=""
+# The patches MRA_WITHOUT_PATCHES leaves out, as SERIES/FILE, one per line,
+# in series order and then name order. Stops on a name that does not
+# designate exactly one patch: a typo must not build the full series into
+# an A/B directory.
+without_patch_list() {
+  local name resolved list="" series sorted
   for name in $MRA_WITHOUT_PATCHES; do
-    file=$(resolve_patch "$name") || exit 1
-    list="$list$file
+    resolved=$(resolve_patch "$name") || exit 1
+    list="$list$resolved
 "
   done
-  printf '%s' "$list" | LC_ALL=C sort -u
+  sorted=$(printf '%s' "$list" | LC_ALL=C sort -u)
+  [ -n "$sorted" ] || return 0
+  for series in $MRA_PATCH_SERIES; do
+    printf '%s\n' "$sorted" | sed -n "\\|^$series/|p"
+  done
+}
+
+# without_patch_names [SERIES]: the file names of the patches of SERIES
+# (gbarecomp by default) that MRA_WITHOUT_PATCHES leaves out, sorted, one
+# per line. Stops on any name that does not designate exactly one patch.
+without_patch_names() {
+  local series=${1:-gbarecomp} list
+  series_repo "$series" > /dev/null || exit 1
+  list=$(without_patch_list) || exit 1
+  [ -n "$list" ] || return 0
+  printf '%s\n' "$list" | sed -n "s|^$series/||p"
 }
 
 # Point the build directories at the variant MRA_WITHOUT_PATCHES selects:
-# $MRA_BUILD_DIR/without-0003[-0007...]/, with generated code inside it.
-# Without any patch left out, keep the normal directories.
+# $MRA_BUILD_DIR/without-0003[-0007...]/, with generated code inside it; a
+# patch of the nested series adds its label with '-' for '/', as in
+# without-0011-arm-recomp-core-0001/. Without any patch left out, keep the
+# normal directories.
 select_patch_variant() {
-  local names name suffix=""
-  names=$(without_patch_names) || exit 1
+  local names name label suffix=""
+  names=$(without_patch_list) || exit 1
   for name in $names; do
-    case "$name" in
-      [0-9]*-*) name=${name%%-*} ;;
-      *) name=${name%.patch} ;;
-    esac
-    suffix="$suffix${suffix:+-}$name"
+    label=$(patch_label "${name%%/*}" "${name#*/}")
+    suffix="$suffix${suffix:+-}$(printf '%s' "$label" | tr / -)"
   done
   if [ -n "$_mra_variant_inherited" ]; then
     # Called from a script that already selected the variant.
@@ -544,6 +645,31 @@ reset_dir() {
   done
   rm -rf "$dir"
   mkdir -p "$dir"
+}
+
+# clear_stale_heal_cache BUILD_DIR: empty BUILD_DIR/recomp_cache when the
+# patched trees of the series differ from those BUILD_DIR's cache was last
+# kept with (BUILD_DIR/recomp_cache.series). gbarecomp's Stage-2 healing,
+# on by default, compiles each missed function into recomp_cache/ under the
+# runtime's working directory and loads it again at every start. The cache
+# is keyed by the ROM's SHA-1, the compiler, the host, the PC and a CRC of
+# the guest code, and checked against an ABI version that covers its data
+# layout only (overlay_loader.cpp:118-123 and 356-395 at the pin), not the
+# code generator or the inline runtime that the patches change. A function
+# healed before a patch would otherwise keep the timing of the series it was
+# compiled with. Runs with GBARECOMP_SELFHEAL_RECOMPILE=0 or under
+# GBARECOMP_STRICT_STATIC=1 never read the cache.
+clear_stale_heal_cache() {
+  local dir=$1 key series stamp
+  key=$(for series in $MRA_PATCH_SERIES; do
+    stamp="$(series_state_dir "$series")/stamp"
+    printf '%s tree=%s\n' "$series" "$(sed -n 's/^tree=//p' "$stamp" 2> /dev/null | head -n 1)"
+  done)
+  if [ -d "$dir/recomp_cache" ] && [ "$(cat "$dir/recomp_cache.series" 2> /dev/null)" != "$key" ]; then
+    reset_dir "$dir/recomp_cache"
+    info "Emptied $(rel "$dir/recomp_cache"): its heals may come from another patch series"
+  fi
+  printf '%s\n' "$key" > "$dir/recomp_cache.series"
 }
 
 # recompile_rom <rom> <config> <out dir> <log> [gba_recompile option...]

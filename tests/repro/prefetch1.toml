@@ -1,0 +1,35 @@
+# gba_recompile and runtime config for the synthetic repro ROM prefetch1
+# (tests/repro/make_rom.py prefetch1; no Nintendo data inside). It times three
+# loops that run from ROM with the GamePak prefetch buffer on and store to
+# EWRAM, the case that patches/gbarecomp/0011 and
+# patches/arm-recomp-core/0001 fix: see tests/repro/README.md.
+# scripts/repro-test.sh generates the ROM, checks its SHA-1 against
+# [identity] below, recompiles it with this file and runs it.
+[game]
+name = "Prefetch reset repro 1"
+short_name = "prefetch1"
+
+[program]
+name = "prefetch1"
+id = "ZZZV"                     # header game code written by make_rom.py
+load_address = 0x08000000
+size = 0x00001000               # 4096 bytes
+entry_pc = 0x08000000
+speculative_literal_harvest = false
+# Two targets no direct branch reaches: the instruction after `bx r7` at
+# 0x0800011C, where kernel 2 returns, and the loop head 0x08000294 of kernel
+# 1, which `bxcc r6` reaches. Every instruction of an emitted function gets
+# an entry.
+static_resume_all = true
+
+[identity]
+sha1 = "a2eda41b4bf471e112aa8d951e7995b0cfbb728b"
+
+[bios]
+# The header logo is zero, so the BIOS intro, which checks it, must not run.
+skip_intro = true
+
+[[extra_func]]
+addr = 0x08000300
+mode = "thumb"
+note = "Kernel 2 (THUMB). Reached only through 'bx r7' at 0x0800011C, with r7 = 0x08000301 from the literal at 0x08000140 (make_rom.py, PREFETCH1)"

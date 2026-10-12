@@ -13,8 +13,8 @@ entry_pc     = 0x00000000
 static_resume_all = true
 
 [identity]
-sha1 = "87467856c6608b3851f67893f7d6d5dd2fb949bd"
-md5  = "ef8bd8b187e200db8c8c995953941f2d"
+sha1 = "c767007db5d7cb3eb1b992c285906e5025755c6b"
+md5  = "6e57be964a31583cacfb151676058408"
 
 # gba_recompile seeds the vectors 0x00, 0x08 and 0x18 itself in --bios mode.
 

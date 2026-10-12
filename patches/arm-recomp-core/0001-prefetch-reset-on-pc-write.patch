@@ -1,0 +1,131 @@
+Empty the GamePak prefetch buffer on every PC write, in the interpreter and
+in generated code.
+
+The GBA profile models the GamePak prefetch buffer after mGBA's
+GBAMemoryStall (Bus::prefetch_stall; the runtime keeps the buffer's
+position in RuntimeWaitTable::last_prefetched_pc). mGBA forgets that
+position on every PC write: ARMWritePC calls setActiveRegion, and
+GBASetActiveRegion sets lastPrefetchedPc = 0 (mGBA 0.10.5,
+src/gba/memory.c:273; the same in 1d201b22, the timing model's reference).
+Nothing reset it here, so a loop that runs from the cartridge and stores to
+RAM kept, across its branch back, the position of the opcodes fetched after
+the loop: the buffer looked nearly full, the store let it fetch one
+halfword instead of five, and the store cost 8 cycles instead of mGBA's 4.
+With WAITCNT 0x4317, `cmp r1, r2; strcc r3, [r1], #4; bcc` costs 26 cycles
+per iteration instead of 22.
+
+The change:
+
+- Bus::prefetch_reset() (bus.h): a PC write empties the buffer. A no-op by
+  default, as a bus without a prefetch buffer has nothing to empty.
+- Interpreter::step calls it after any instruction that wrote R15 (taken
+  branches, data-processing and load writes to R15, LDM with PC, exception
+  returns), after the instruction's own stalls, which come before the
+  write. The refill's fetch waits do not read the position.
+- The codegen clears g_runtime_waits.last_prefetched_pc after the refill of
+  every direct branch (emit_direct_branch), whatever the target region, on
+  every path that leaves through it (loop back-edge, tail transfer, call).
+  PC writes known only at run time charge runtime_refill_cycles, which the
+  runtime resets.
+
+SWI and IRQ entry do not go through Interpreter::step; the runtime that
+enters them decides (the position matters only while the CPU runs from the
+cartridge, and both exceptions return there through a PC write that resets
+it).
+
+This is half of the fix; the runtime's half overrides prefetch_reset in its
+buses and resets the position in runtime_refill_cycles (gbarecomp:
+0011-prefetch-reset-on-pc-write.patch in the same repository as this
+patch). Without it, this patch builds but the interpreter keeps the old
+behavior while generated static branches reset, so the two backends no
+longer charge ROM loops alike.
+
+Tested on macOS arm64 (Apple clang 21) at arm-recomp-core 1f13cdf, inside
+gbarecomp 5e89943 with its runtime half:
+
+- gbarecomp's ctest, 52 of 52 (with the gba-tests test ROMs). codegen_tests
+  compares, for every instruction of its corpus relocated into the
+  cartridge under five WAITCNT/EWRAM settings (one with the buffer's
+  position seeded just ahead of the instruction), the interpreter's and the
+  generated code's cycles and buffer position. A new interpreter_smoke case
+  checks that prefetch_reset runs once after each kind of PC write and
+  never otherwise (mov, cmp, str, a branch not taken).
+- Mutations: without the interpreter's call, interpreter_smoke fails on
+  every kind of PC write and codegen_tests on its 18 PC-writing cases;
+  without the codegen's reset, codegen_tests fails on the 4 static
+  branches (arm_b_forward, arm_bl, arm_b_backward, thumb_beq_taken);
+  without the runtime_refill_cycles reset, on the 14 PC writes known only
+  at run time (BX, MOV and ADD to PC, POP and LDM with PC).
+- A synthetic 4 KiB ROM (no Nintendo data, header logo zero), prefetch1,
+  times three loops of 64 stores to EWRAM from the cartridge with WAITCNT
+  0x4317, each between two timer 0 reads at F/1: the loop above, the same
+  loop closed by `bxcc r6` (a PC write known only at run time), and a THUMB
+  loop (str, adds, cmp, bcc). mGBA 0.10.5 measures 1424, 1424 and 892
+  cycles. gbarecomp 5e89943 measures 1673, 1673 and 1141 on generated code
+  (GBARECOMP_STRICT_STATIC=1, fully static) and on the interpreter
+  (GBARECOMP_FORCE_INTERP=1, BIOS interpreted too); with this patch and its
+  runtime half, 1424, 1424 and 892 on both. The generator and config are in
+  tests/repro/ of https://github.com/nvergez/moto-racer-advanced-browser
+  (make_rom.py, prefetch1.toml); attach them when filing this patch.
+- A commercial game whose race start-up clears 54,459 words of EWRAM with
+  the loop above, from the cartridge, before it copies its race code to
+  IWRAM: without the fix the race code arrives one frame later than in
+  mGBA (the clear costs 217,829 cycles more, 0.78 frame), and every later
+  input lands one game frame off. With both halves (and the IRQ entry
+  cycles of 0012 in the runtime), the clear's instruction timeline equals
+  mGBA's to the cycle, the race code arrives on mGBA's frame, and the race
+  plays as in mGBA (same lap times, same RAM on every race frame but three
+  of the loading screen).
+
+diff --git a/profiles/armv4t_gba/arm_codegen.cpp b/profiles/armv4t_gba/arm_codegen.cpp
+index a6c4dba..2a8c401 100644
+--- a/profiles/armv4t_gba/arm_codegen.cpp
++++ b/profiles/armv4t_gba/arm_codegen.cpp
+@@ -461,6 +461,11 @@ std::string emit_direct_branch(uint32_t target, uint32_t branch_pc,
+         const std::string refill = static_refill_expr(target, thumb_link);
+         if (!refill.empty()) s << indent << cyc << " += " << refill << ";\n";
+     }
++    // The PC write empties the GamePak prefetch buffer, as
++    // Bus::prefetch_reset does in the interpreter (mGBA
++    // GBASetActiveRegion). PC writes known only at run time charge
++    // runtime_refill_cycles, which resets it too.
++    s << indent << "g_runtime_waits.last_prefetched_pc = 0u;\n";
+ 
+     if (!is_link &&
+         target >= ctx.current_function_addr &&
+diff --git a/profiles/armv4t_gba/bus.h b/profiles/armv4t_gba/bus.h
+index 01172df..be70114 100644
+--- a/profiles/armv4t_gba/bus.h
++++ b/profiles/armv4t_gba/bus.h
+@@ -61,6 +61,15 @@ struct Bus {
+                                    bool /*thumb*/) {
+         return wait;
+     }
++
++    // A PC write (any branch, a data-processing or load instruction that
++    // writes R15, an exception return) empties the GamePak prefetch
++    // buffer: the next stall starts from no prefetched opcodes. mGBA's
++    // GBASetActiveRegion, which ARMWritePC calls on every PC write, sets
++    // lastPrefetchedPc = 0. The interpreter calls this after any
++    // instruction that wrote R15; generated code resets the same state
++    // after every PC write it makes. The default has no prefetch buffer.
++    virtual void prefetch_reset() {}
+ };
+ 
+ }  // namespace armv4t
+diff --git a/profiles/armv4t_gba/interpreter.cpp b/profiles/armv4t_gba/interpreter.cpp
+index e11046e..6c1b030 100644
+--- a/profiles/armv4t_gba/interpreter.cpp
++++ b/profiles/armv4t_gba/interpreter.cpp
+@@ -1221,6 +1221,11 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
+         *cycles_out = c;
+     }
+ 
++    // The PC write empties the GamePak prefetch buffer (Bus::prefetch_reset,
++    // mGBA GBASetActiveRegion). After the instruction's own stalls, which
++    // came before the write; the refill above reads only fetch waits.
++    if (wrote_pc) bus.prefetch_reset();
++
+     if (exception_returned) {
+         return Result::ExceptionReturn;
+     }
